@@ -151,6 +151,7 @@ npm install        # 自动下载 ffmpeg-static / gifsicle / sharp 二进制
 npm run dev        # 开发(主+渲热更)
 npm run typecheck  # 主+渲分别 tsc --noEmit
 npm run lint       # eslint 0 warning
+npm test           # vitest 单元测试(R-16)
 npm run build      # 编译 main + renderer
 npm start          # 运行打包后的版本
 npm run package:mac   # 打包成 dmg
@@ -158,6 +159,30 @@ npm run package:win   # 打包成 nsis
 ```
 
 > **注意**:Mac 第一次跑可能要等 sharp 编译;Windows 上不需要 VS Build Tools(预编译二进制)。
+
+---
+
+## 4.1 测试与回归(R-16)
+
+每一个新功能 / bug fix 都必须**随测试一起提交**(R-16),否则不允许合并。
+
+```bash
+npm test              # 一次性跑所有 vitest 单元测试
+npm run test:watch    # 开发时监听
+npm run test:coverage # 覆盖率(v8 provider,reporter=text+html)
+```
+
+| 文件 | 覆盖范围 |
+|---|---|
+| [tests/main/helpers.test.ts](file:///Users/guoshuyu/workspace/gif-toolkit/tests/main/helpers.test.ts) | `isPrivateHost`(SSRF 名单)/ `safeName`(路径净化、Win 保留名、控制字符)/ `fileNameFor`(扩展名推断、batch 去重) |
+| [tests/main/processor-utils.test.ts](file:///Users/guoshuyu/workspace/gif-toolkit/tests/main/processor-utils.test.ts) | 压缩管线纯函数:`clampConcurrency` / `shortSideAfterCap` / `compressCacheKey` / `planPhase0` / `adaptiveStartLossy` / `extrapolateNextLossy`(线性外推 O2)/ `geometricShrinkLongestSide`(0.95 cap) |
+| [tests/main/ffmpeg-pure.test.ts](file:///Users/guoshuyu/workspace/gif-toolkit/tests/main/ffmpeg-pure.test.ts) | `parseRational`(`30000/1001` / `0/0` / 畸形输入容错) |
+| [tests/renderer/TaskTable.test.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/tests/renderer/TaskTable.test.tsx) | 重试按钮启用条件 / 防双击 / 警告详情弹窗 / 复制到剪贴板 / 空状态 |
+
+测试栈:[vitest 2.1.8](file:///Users/guoshuyu/workspace/gif-toolkit/vitest.config.ts) + happy-dom + @testing-library/react。
+渲染端测试用 happy-dom,主进程测试用 node 环境(避免无谓启动开销);Electron API 通过 `vi.mock('electron', …)` 隔离,**测试不会真起 Electron 也不会调真实 ffmpeg/yt-dlp 二进制**。
+
+详细规则见 [R-16](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-16-tests-required.md)。
 
 ---
 
@@ -191,7 +216,7 @@ npm run package:win   # 打包成 nsis
 
 请先读:
 
-1. [AGENTS.md](file:///Users/guoshuyu/workspace/gif-toolkit/AGENTS.md) — 15 条项目级硬规则 (R-01..R-15)
+1. [AGENTS.md](file:///Users/guoshuyu/workspace/gif-toolkit/AGENTS.md) — 项目级硬规则 (R-01..R-16)
 2. [harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/) — 已知问题与对应回归(SC-01..SC-15)
 3. [harness/checklists/pr-checklist.md](file:///Users/guoshuyu/workspace/gif-toolkit/harness/checklists/pr-checklist.md) — 提交前自检
 

@@ -53,6 +53,12 @@
 - [ ] 我能在 30 秒内说清"功能上线后,我用什么输入、看什么输出来确认它工作"?
 - [ ] 我有没有 fixture(URL / mhtml / 本地文件)能放进 [harness/regression/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/regression/)?
 
+## 13. 测试(R-16)
+- [ ] 这个功能里的纯函数 / 组件 / IPC handler **必须**配套 `tests/**/*.test.{ts,tsx}` 用例,我已经规划好了在哪个文件加哪些断言
+- [ ] 边界条件(空输入 / 上限 / 失败路径)都有用例覆盖
+- [ ] 如果是修 bug:我会**先**写一个会因 bug 失败的回归测试,再改代码
+- [ ] `npm test` 必须 0 失败、不允许 `*.skip`
+
 ---
 
 ## 答完这些之后

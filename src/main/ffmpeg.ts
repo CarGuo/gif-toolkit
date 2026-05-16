@@ -170,8 +170,10 @@ interface FfprobeOutput {
   format: FfprobeFormat;
 }
 
-/** Parse an ffprobe rational string like "30000/1001" into a Number. */
-function parseRational(s: string | undefined): number {
+/** Parse an ffprobe rational string like "30000/1001" into a Number.
+ *  Returns 0 for null/empty/malformed/zero-denominator inputs. Exported
+ *  for unit testing (see tests/main/ffmpeg-pure.test.ts). */
+export function parseRational(s: string | undefined): number {
   if (!s) return 0;
   const [a, b] = s.split('/').map((n) => Number(n));
   if (!Number.isFinite(a) || !Number.isFinite(b) || b === 0) return 0;

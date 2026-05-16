@@ -25,9 +25,17 @@ import type { ProbeInfo } from './ffmpeg';
 import { getCacheDir } from './binaries';
 import { log } from './logger';
 import { fileNameFor, safeName } from './helpers';
+import {
+  DEFAULT_CONCURRENCY,
+  MAX_CONCURRENCY,
+  clampConcurrency as clampConcurrencyExt,
+  shortSideAfterCap as shortSideAfterCapExt,
+  compressCacheKey,
+  ACCEPT_TOL as ACCEPT_TOL_EXT,
+  EARLY_FAST_RATIO as EARLY_FAST_RATIO_EXT,
+  SHRINK_FIRST_RATIO as SHRINK_FIRST_RATIO_EXT
+} from './processor-utils';
 
-const DEFAULT_CONCURRENCY = 3;
-const MAX_CONCURRENCY = 8;
 let currentConcurrency = DEFAULT_CONCURRENCY;
 const queue = new PQueue({ concurrency: DEFAULT_CONCURRENCY });
 const activeAborts: Set<AbortController> = new Set();
@@ -36,10 +44,16 @@ const activeAborts: Set<AbortController> = new Set();
 // the OLD batches must fully settle (including in-flight ffmpeg/gifsicle child
 // processes) before a new batch may take their place.
 const activeBatchPromises: Set<Promise<void>> = new Set();
+// Re-export the unit values the local closures still reference; the
+// processor-utils versions are the single source of truth, these aliases
+// preserve the old call sites without one-line shotgun edits across the file.
+void MAX_CONCURRENCY;
 
+// Local thin wrappers that delegate to the unit-tested processor-utils.
+// We keep wrappers (instead of replacing every call site) so the diff stays
+// small and JS-side hot path doesn't add module-boundary indirection cost.
 function clampConcurrency(n: number | undefined): number {
-  if (!Number.isFinite(n) || !n || n <= 0) return DEFAULT_CONCURRENCY;
-  return Math.max(1, Math.min(MAX_CONCURRENCY, Math.floor(n as number)));
+  return clampConcurrencyExt(n);
 }
 
 class CancelledError extends Error {
@@ -81,9 +95,7 @@ class AspectRatioConstraintError extends Error {
  * Returns 0 when shape is unknown.
  */
 function shortSideAfterCap(longest: number, shortest: number, cap: number): number {
-  if (longest <= 0 || shortest <= 0 || cap <= 0) return 0;
-  if (longest <= cap) return shortest; // no shrink needed
-  return Math.max(1, Math.round(shortest * (cap / longest)));
+  return shortSideAfterCapExt(longest, shortest, cap);
 }
 
 export async function cancelAllTasks(): Promise<void> {
@@ -228,10 +240,11 @@ async function compressLoop(
   const TOTAL_STEPS = 8; // new realistic ceiling, was 12
   let stepCounter = 0;
   // Tunables — exposed as constants so a follow-up benchmark pass can
-  // tweak them without re-reading the strategy comment.
-  const ACCEPT_TOL = 0.12;          // O2: ±12% of target counts as "good enough"
-  const EARLY_FAST_RATIO = 1.6;     // O1: <= softMB × this → fast path
-  const SHRINK_FIRST_RATIO = 4.0;   // O1: > softMB × this → skip lossy on orig size
+  // tweak them without re-reading the strategy comment. Sourced from
+  // processor-utils so unit tests can pin the boundary behaviour.
+  const ACCEPT_TOL = ACCEPT_TOL_EXT;          // O2: ±12% of target counts as "good enough"
+  const EARLY_FAST_RATIO = EARLY_FAST_RATIO_EXT;     // O1: <= softMB × this → fast path
+  const SHRINK_FIRST_RATIO = SHRINK_FIRST_RATIO_EXT;   // O1: > softMB × this → skip lossy on orig size
   const phaseFailures: string[] = [];
   let producedAny = false;
   const recordPhaseFailure = (phase: string, err: unknown): void => {
@@ -254,8 +267,7 @@ async function compressLoop(
   // dimension we very often re-run identical lossy settings — cache spares
   // the redundant gifsicle invocation.
   const optimizeCache = new Map<string, { path: string; size: number }>();
-  const cacheKey = (src: string, width: number, lossy: number, colors: number): string =>
-    `${src}|w=${width}|l=${lossy}|c=${colors}`;
+  const cacheKey = compressCacheKey;
 
   // ---------- Phase 0: probe + a-priori size estimate ----------
   let origW = 0;

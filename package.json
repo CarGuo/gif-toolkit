@@ -17,12 +17,15 @@
     "package:win": "npm run build && electron-builder --win",
     "lint": "eslint \"src/**/*.{ts,tsx}\" --max-warnings 0",
     "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
     "postinstall": "npm rebuild sharp ffmpeg-static ffprobe-static @343dev/gifsicle ytdlp-nodejs",
     "lockfile:lint": "lockfile-lint --path package-lock.json --type npm --validate-https --allowed-hosts npm --validate-integrity --validate-package-names"
   },
   "engines": {
     "node": ">=20.0.0",
-    "npm": ">=11.10.0"
+    "npm": ">=10.8.0"
   },
   "dependencies": {
     "@343dev/gifsicle": "^1.1.0",
@@ -35,12 +38,17 @@
     "ytdlp-nodejs": "^3.4.4"
   },
   "devDependencies": {
+    "@testing-library/dom": "10.4.0",
+    "@testing-library/jest-dom": "6.6.3",
+    "@testing-library/react": "16.1.0",
+    "@testing-library/user-event": "14.5.2",
     "@types/node": "^20.14.10",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@typescript-eslint/eslint-plugin": "^7.16.1",
     "@typescript-eslint/parser": "^7.16.1",
     "@vitejs/plugin-react": "^4.3.1",
+    "@vitest/coverage-v8": "2.1.8",
     "concurrently": "^8.2.2",
     "cross-env": "^7.0.3",
     "electron": "^31.2.1",
@@ -48,11 +56,13 @@
     "eslint": "^8.57.0",
     "eslint-plugin-react": "^7.34.4",
     "eslint-plugin-react-hooks": "^4.6.2",
+    "happy-dom": "15.11.7",
     "lockfile-lint": "4.14.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "typescript": "^5.5.3",
     "vite": "^5.3.4",
+    "vitest": "2.1.8",
     "wait-on": "^7.2.0"
   },
   "build": {
