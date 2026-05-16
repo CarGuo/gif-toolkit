@@ -16,6 +16,13 @@ import { PreviewModal } from './components/PreviewModal';
 import { TaskTable } from './components/TaskTable';
 import { LogBox } from './components/LogBox';
 import { BatchSegmentModal, type BatchSegmentEntry } from './components/BatchSegmentModal';
+import { HistoryPanel } from './components/HistoryPanel';
+import {
+  useHistory,
+  makeHistoryRecord,
+  mergeProgressIntoRecord,
+  type HistoryRecord
+} from './components/useHistory';
 
 const giftk = (typeof window !== 'undefined' ? window.giftk : undefined);
 
@@ -43,6 +50,15 @@ const App: React.FC = () => {
   const [resolveErrorMap, setResolveErrorMap] = useState<Record<string, string>>({});
   const [batchModal, setBatchModal] = useState<BatchSegmentEntry[] | null>(null);
 
+  // R-27 — persistent history of every sniff round and its associated
+  // batch outputs. The hook owns the localStorage layer; App owns the
+  // life-cycle hooks that create/append records. We track the *current*
+  // record id in a ref so progress events can locate the right record
+  // without forcing a re-render or recreating any callback.
+  const { history, pushOrReplace, patch: patchHistory, remove: removeHistory, clear: clearHistory } = useHistory();
+  const activeHistoryIdRef = useRef<string | null>(null);
+  const [view, setView] = useState<'home' | 'history'>('home');
+
   // Bottom panel (TaskTable + LogBox) resizable height.
   // Persisted in localStorage so the user's preference survives reloads.
   const BOTTOM_H_KEY = 'giftk.bottomPanelHeight';
@@ -66,6 +82,14 @@ const App: React.FC = () => {
     }).catch(() => { /* ignore */ });
     const off1 = giftk.onProgress((p) => {
       setProgress((prev) => ({ ...prev, [p.taskId]: p }));
+      // R-27 — fold the same emit into the active history record so a
+      // user who opens the history panel mid-batch sees outputs / status
+      // accumulate live. Cheap: mergeProgressIntoRecord short-circuits
+      // when there are no outputs and the status is non-terminal.
+      const recId = activeHistoryIdRef.current;
+      if (recId) {
+        patchHistory(recId, (r) => mergeProgressIntoRecord(r, p));
+      }
     });
     const off2 = giftk.onLog((line) => {
       setLogs((prev) => {
@@ -81,6 +105,30 @@ const App: React.FC = () => {
       off2();
       off3();
     };
+    // patchHistory is stable (memoised in useHistory with empty deps);
+    // we want this effect to run exactly once on mount, so the missing
+    // dep is intentional.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // R-27 — on mount, walk the persisted history and tell the main
+  // process to re-allow each batch sub-dir so "打开目录" continues to
+  // work for old records after a renderer restart. Best-effort: failures
+  // for individual entries are swallowed (the IPC itself never throws).
+  // We deliberately read `history` only once at mount time to avoid
+  // re-registering on every state change; new records added after mount
+  // are already in `allowedOutputDirs` because process:start put them
+  // there.
+  useEffect(() => {
+    if (!giftk || typeof giftk.registerOutputDir !== 'function') return;
+    const seen = new Set<string>();
+    for (const rec of history) {
+      if (rec.outputDir && !seen.has(rec.outputDir)) {
+        seen.add(rec.outputDir);
+        giftk.registerOutputDir(rec.outputDir).catch(() => { /* swallow */ });
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const items = useMemo(() => {
@@ -145,6 +193,25 @@ const App: React.FC = () => {
           .map((i) => i.id)
       );
       setSelected(auto);
+      // R-27 — every successful sniff opens a fresh history record. We
+      // create it here (with no outputDir yet) so even sniffs that
+      // never get batched are surfaced — the user might just be
+      // browsing what's on a page. The batch dispatcher mutates this
+      // same record in place when process:start returns an outputDir.
+      if (r.items.length > 0 || (r.warnings?.length ?? 0) === 0) {
+        const rec = makeHistoryRecord({
+          pageUrl: r.pageUrl,
+          title: r.title,
+          items: r.items,
+          options: { ...options }
+        });
+        pushOrReplace(rec);
+        activeHistoryIdRef.current = rec.id;
+      } else {
+        // A sniff with only warnings (timeout / parse error) is not
+        // worth a history slot — it has no media to re-process.
+        activeHistoryIdRef.current = null;
+      }
     } catch (e) {
       if (myId !== sniffReqId.current || finished) return;
       finished = true;
@@ -156,7 +223,7 @@ const App: React.FC = () => {
         setSniffProgress(null);
       }
     }
-  }, [url, result]);
+  }, [url, result, options, pushOrReplace]);
 
   const onPickDir = useCallback(async () => {
     if (!giftk) return;
@@ -245,6 +312,18 @@ const App: React.FC = () => {
       if (r?.outputDir) {
         setLastBatchDir(r.outputDir);
         setLogs((prev) => [...prev, `[batch] outputs -> ${r.outputDir}`].slice(-300));
+        // R-27 — pin the batch's sub-directory onto the active record
+        // so the history panel can later "打开目录" without re-asking
+        // the main process. Also snapshots the *effective* options
+        // (incl. modal-injected selectedSegments) for the summary.
+        const recId = activeHistoryIdRef.current;
+        if (recId) {
+          patchHistory(recId, (rec) => ({
+            ...rec,
+            outputDir: r.outputDir,
+            options: { ...options, outDir: dir }
+          }));
+        }
       }
     } catch (e) {
       const msg = (e as Error).message || '';
@@ -254,7 +333,7 @@ const App: React.FC = () => {
         setLogs((prev) => [...prev, `[error] startBatch: ${msg}`].slice(-300));
       }
     }
-  }, [processable, options, baseOutputDir, outputDir, result]);
+  }, [processable, options, baseOutputDir, outputDir, result, patchHistory]);
 
   const onStart = useCallback(async () => {
     if (!giftk) return;
@@ -346,6 +425,18 @@ const App: React.FC = () => {
       if (r?.outputDir) {
         setLastBatchDir(r.outputDir);
         setLogs((prev) => [...prev, `[single] outputs -> ${r.outputDir}`].slice(-300));
+        // R-27 — same as batch: pin the sub-dir onto the active record.
+        // Single-task runs share the same record as the most recent
+        // sniff, so a user re-running media one-by-one still ends up
+        // with one history row that carries every produced file.
+        const recId = activeHistoryIdRef.current;
+        if (recId) {
+          patchHistory(recId, (rec) => ({
+            ...rec,
+            outputDir: r.outputDir,
+            options: { ...options, outDir: dir }
+          }));
+        }
       }
     } catch (e) {
       const msg = (e as Error).message || '';
@@ -355,7 +446,7 @@ const App: React.FC = () => {
         setLogs((prev) => [...prev, `[error] startBatch(single): ${msg}`].slice(-300));
       }
     }
-  }, [options, baseOutputDir, outputDir, result]);
+  }, [options, baseOutputDir, outputDir, result, patchHistory]);
 
   useEffect(() => {
     if (processingOne.size === 0) return;
@@ -449,6 +540,74 @@ const App: React.FC = () => {
     giftk.openOutputDir(target).catch(() => { /* ignore */ });
   }, [outputDir, lastBatchDir]);
 
+  // R-27 — open a *specific* historical record's output directory.
+  // We invoke registerOutputDir first to handle the case where the
+  // user just hydrated history but the panel is rendered before the
+  // mount-time hydration effect ran (e.g. fast click on a freshly
+  // reloaded app). The IPC call is idempotent and cheap.
+  const onOpenHistoryDir = useCallback((dir: string) => {
+    if (!giftk) return;
+    if (!dir) return;
+    const open = () => giftk.openOutputDir(dir).catch(() => { /* ignore */ });
+    if (typeof giftk.registerOutputDir === 'function') {
+      giftk.registerOutputDir(dir).then(open).catch(open);
+    } else {
+      open();
+    }
+  }, []);
+
+  // R-27 — re-run a single SniffedMedia from a historical record using
+  // the snapshotted options. Behaviour matches "逐条重跑": we do NOT
+  // splice the record back into the main view; we just dispatch one
+  // task and let the regular TaskTable surface progress. The active
+  // history id is also re-pointed at this record so streaming progress
+  // events update the right row.
+  const onReprocessFromHistory = useCallback((rec: HistoryRecord, media: SniffedMedia) => {
+    if (!giftk) return;
+    if (media.kind === 'image') return;
+    if (media.requiresExternalDownload && !media.resolved) return;
+    activeHistoryIdRef.current = rec.id;
+    const dir = rec.options.outDir || baseOutputDir || outputDir;
+    const optBase: ProcessOptions = { ...rec.options, outDir: dir };
+    const tasks: ProcessTask[] = [{ id: media.id, media, options: optBase }];
+    setProgress((prev) => {
+      const next = { ...prev };
+      delete next[media.id];
+      return next;
+    });
+    setLogs((prev) => [
+      ...prev,
+      `[history] re-run "${shortDir(media.url)}" (record ${rec.id})`
+    ].slice(-300));
+    giftk.startBatch(tasks, rec.title)
+      .then((r) => {
+        setProcessingOne((prev) => {
+          const n = new Set(prev); n.add(media.id); return n;
+        });
+        if (r?.outputDir) {
+          setLastBatchDir(r.outputDir);
+          patchHistory(rec.id, (cur) => ({
+            ...cur,
+            outputDir: r.outputDir,
+            options: { ...cur.options, outDir: dir }
+          }));
+        }
+      })
+      .catch((e: Error) => {
+        const msg = e?.message || '';
+        if (/\bbusy\b/i.test(msg)) {
+          setLogs((prev) => [...prev, `[busy] 已有任务在跑,请先取消或等待`].slice(-300));
+        } else {
+          setLogs((prev) => [...prev, `[error] history re-run: ${msg}`].slice(-300));
+        }
+      });
+    // Switch back to the home view so the user can watch the task
+    // progress in the TaskTable they're already familiar with. Without
+    // this jump the user would have to manually click a tab to see
+    // anything happen.
+    setView('home');
+  }, [baseOutputDir, outputDir, patchHistory]);
+
   const toggleSelected = useCallback((id: string) => {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -526,6 +685,24 @@ const App: React.FC = () => {
     <div className="app" style={{ ['--bottom-h' as string]: `${bottomH}px` } as React.CSSProperties}>
       <div className="titlebar">
         <h1>Gif Toolkit · 网页媒体一站式抓取与转换</h1>
+        <div className="tabs">
+          <button
+            type="button"
+            className={`tab-btn ${view === 'home' ? 'active' : ''}`}
+            onClick={() => setView('home')}
+            aria-pressed={view === 'home'}
+          >
+            主页
+          </button>
+          <button
+            type="button"
+            className={`tab-btn ${view === 'history' ? 'active' : ''}`}
+            onClick={() => setView('history')}
+            aria-pressed={view === 'history'}
+          >
+            历史 {history.length > 0 ? `(${history.length})` : ''}
+          </button>
+        </div>
         <div className="spacer" />
         <div className="actions">
           <button onClick={onPickDir}>{baseOutputDir ? `根目录: ${shortDir(baseOutputDir)}` : '选择输出目录'}</button>
@@ -535,6 +712,7 @@ const App: React.FC = () => {
         </div>
       </div>
 
+      {view === 'home' ? (
       <div className="body">
         <div className="left">
           <div className="section fixed">
@@ -627,6 +805,17 @@ const App: React.FC = () => {
           </div>
         </div>
       </div>
+      ) : (
+        <div className="body" role="region" aria-label="history">
+          <HistoryPanel
+            history={history}
+            onOpenOutputDir={onOpenHistoryDir}
+            onReprocessOne={onReprocessFromHistory}
+            onRemove={removeHistory}
+            onClear={clearHistory}
+          />
+        </div>
+      )}
 
       <div
         className="bottom-resize-handle"

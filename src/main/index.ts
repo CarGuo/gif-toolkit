@@ -423,6 +423,49 @@ ipcMain.handle('app:defaultDir', async () => {
   return d;
 });
 
+/**
+ * R-27 — Re-allow a previously-created output directory after a
+ * renderer reload. Each batch sub-dir is added to `allowedOutputDirs`
+ * the first time it's created (process:start), but that set lives in
+ * memory only; the next launch must explicitly opt back in for
+ * openDir to succeed on those paths.
+ *
+ * Strict safety: we only honour paths that
+ *   1. Exist on disk and are directories.
+ *   2. Sit either under the current default output dir (the safest
+ *      case — a sibling of every other batch sub-dir) OR under a path
+ *      already in `allowedOutputDirs` (i.e. the user just picked a
+ *      custom root via app:pickDir, which white-listed that root).
+ *
+ * Anything else is silently rejected (return ok:false, no throw —
+ * this is a best-effort hydration, the renderer should NOT bail the
+ * whole history panel just because one stale entry was rejected).
+ */
+ipcMain.handle('app:registerOutputDir', async (_e, p: unknown) => {
+  if (typeof p !== 'string' || !p) return { ok: false };
+  let norm: string;
+  try {
+    norm = path.resolve(p);
+  } catch {
+    return { ok: false };
+  }
+  let st;
+  try {
+    st = statSync(norm);
+  } catch {
+    return { ok: false };
+  }
+  if (!st.isDirectory()) return { ok: false };
+  const def = defaultOutDir();
+  const underDefault = !!def && (norm === def || isPathInside(def, norm));
+  const underAllowed = Array.from(allowedOutputDirs).some(
+    (root) => norm === root || isPathInside(root, norm)
+  );
+  if (!underDefault && !underAllowed) return { ok: false };
+  allowedOutputDirs.add(norm);
+  return { ok: true };
+});
+
 /* ----------------------- Resolver IPC (yt-dlp) ----------------------- */
 
 ipcMain.handle('resolve:checkYtdlp', async () => {

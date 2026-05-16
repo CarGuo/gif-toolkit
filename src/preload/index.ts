@@ -64,6 +64,14 @@ const api = {
     ensureString(p, 'path');
     return ipcRenderer.invoke('app:openDir', p);
   },
+  async registerOutputDir(p: string): Promise<{ ok: boolean }> {
+    // R-27 — best-effort re-allow of a persisted history dir after
+    // restart. Always returns {ok:false} for invalid / out-of-allowed-tree
+    // paths, never throws, so the caller can iterate hydration without
+    // breaking on stale entries.
+    ensureString(p, 'path');
+    return ipcRenderer.invoke('app:registerOutputDir', p);
+  },
   async getDefaultOutputDir(): Promise<string> {
     return ipcRenderer.invoke('app:defaultDir');
   },
