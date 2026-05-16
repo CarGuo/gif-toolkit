@@ -57,7 +57,7 @@ export interface ProcessOptions {
   softMaxBytes: number;
   /** Max length of the LONGEST side (width OR height). Default 800. */
   maxWidth: number;
-  /** Lower bound for the longest side. Default 240. */
+  /** Lower bound for the longest side. Default 450 (R-25 raise). */
   minSize: number;
   maxSegmentSec: number;  // max single gif duration when splitting video, default 20
   fps: number;            // default 12
@@ -181,7 +181,7 @@ export const DEFAULT_OPTIONS: ProcessOptions = {
   maxBytes: 4 * 1024 * 1024,
   softMaxBytes: 2 * 1024 * 1024,
   maxWidth: 800,
-  minSize: 240,
+  minSize: 450,
   maxSegmentSec: 20,
   fps: 12,
   speed: 1,

@@ -110,6 +110,7 @@ export const BatchSegmentModal: React.FC<Props> = ({
                   title=""
                   hint={`已勾 ${(selection[e.media.id] ?? [0]).length} / ${segs.length}`}
                   compact
+                  videoUrl={e.media.url}
                 />
               </div>
             );

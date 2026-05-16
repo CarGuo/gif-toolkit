@@ -1,4 +1,5 @@
 import React, { useMemo } from 'react';
+import { useSegmentThumbnails } from './useSegmentThumbnails';
 
 export interface SegmentPreview {
   index: number;
@@ -13,6 +14,12 @@ interface Props {
   title?: string;
   hint?: string;
   compact?: boolean;
+  /**
+   * R-25 (#2): when supplied, the picker tries to seek a hidden <video> to
+   * each segment midpoint and renders the resulting frame above each chip.
+   * CORS-tainted videos return null thumbs and fall back to plain labels.
+   */
+  videoUrl?: string;
 }
 
 export function buildSegmentPreviews(
@@ -41,7 +48,8 @@ export const SegmentPicker: React.FC<Props> = ({
   onChange,
   title = '分段选择 (R-22)',
   hint,
-  compact = false
+  compact = false,
+  videoUrl
 }) => {
   const effectiveSelected: Set<number> = useMemo(() => {
     if (segments.length === 0) return new Set();
@@ -50,6 +58,8 @@ export const SegmentPicker: React.FC<Props> = ({
     }
     return new Set([0]);
   }, [segments.length, selectedSegments]);
+
+  const thumbs = useSegmentThumbnails(videoUrl, segments);
 
   if (segments.length === 0) return null;
 
@@ -77,32 +87,51 @@ export const SegmentPicker: React.FC<Props> = ({
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
         {segments.map((s) => {
           const checked = effectiveSelected.has(s.index);
+          const thumb = thumbs[s.index];
           return (
             <label
               key={s.index}
               className={`segment-chip${checked ? ' active' : ''}`}
               style={{
                 display: 'inline-flex',
-                alignItems: 'center',
+                flexDirection: thumb ? 'column' : 'row',
+                alignItems: thumb ? 'stretch' : 'center',
                 gap: 6,
-                padding: '4px 8px',
+                padding: thumb ? 4 : '4px 8px',
                 borderRadius: 4,
                 background: checked ? 'var(--accent-bg, #1f3a52)' : 'var(--surface-2, #1a1c20)',
                 border: `1px solid ${checked ? 'var(--accent, #4aa3ff)' : 'var(--border, #2a2d33)'}`,
                 cursor: 'pointer',
-                fontSize: 12
+                fontSize: 12,
+                width: thumb ? 120 : undefined
               }}
             >
-              <input
-                type="checkbox"
-                checked={checked}
-                onChange={() => toggle(s.index)}
-                aria-label={`segment ${s.index + 1}`}
-              />
-              <span>#{s.index + 1}</span>
-              <span style={{ color: 'var(--muted)' }}>
-                {s.start.toFixed(1)}–{s.end.toFixed(1)}s
-              </span>
+              {thumb ? (
+                <img
+                  src={thumb}
+                  alt={`segment-${s.index + 1}-thumb`}
+                  style={{
+                    width: '100%',
+                    height: 68,
+                    objectFit: 'cover',
+                    borderRadius: 3,
+                    background: '#000',
+                    display: 'block'
+                  }}
+                />
+              ) : null}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={() => toggle(s.index)}
+                  aria-label={`segment ${s.index + 1}`}
+                />
+                <span>#{s.index + 1}</span>
+                <span style={{ color: 'var(--muted)' }}>
+                  {s.start.toFixed(1)}–{s.end.toFixed(1)}s
+                </span>
+              </div>
             </label>
           );
         })}

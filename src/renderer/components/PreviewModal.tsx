@@ -59,6 +59,19 @@ export const PreviewModal: React.FC<Props> = ({
   const isImage = media.kind === 'image';
   const isVideo = !isGif && !isImage;
 
+  // R-25 (#1): the bare <video preload="metadata"> shows a *blank* black
+  // box from modal open until onLoadedMetadata fires — on slow networks
+  // this is several seconds of "did anything happen?". We surface an
+  // explicit loading overlay so the user knows the player is fetching the
+  // first frame / metadata. The overlay vanishes the moment the media
+  // resolves a non-zero natural size or errors out.
+  const mediaLoading = !mediaError && naturalSize.w === 0;
+  const loadingLabel = isVideo
+    ? '正在加载视频元数据 / 首帧…'
+    : isGif
+      ? '正在加载 GIF…'
+      : '正在加载图像…';
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
@@ -188,6 +201,20 @@ export const PreviewModal: React.FC<Props> = ({
                   onError={() => setMediaError('视频加载失败(可能因为 CORS 或链接失效),不影响后台抓取')}
                 />
               )}
+              {mediaLoading ? (
+                <div
+                  className="modal-player-loading"
+                  role="status"
+                  aria-live="polite"
+                  aria-label="media-loading"
+                >
+                  <div className="modal-player-spinner" aria-hidden />
+                  <div className="modal-player-loading-label">{loadingLabel}</div>
+                  <div className="modal-player-loading-hint">
+                    远端视频首帧拉取中,慢的话再等几秒;失败会显示具体原因。
+                  </div>
+                </div>
+              ) : null}
               {tab === 'crop' && naturalSize.w > 0 ? (
                 <div className="crop-overlay">
                   <CropBox

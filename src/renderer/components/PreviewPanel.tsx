@@ -166,6 +166,7 @@ export const PreviewPanel: React.FC<Props> = ({
           segments={segmentPreviews}
           selectedSegments={options.selectedSegments}
           onChange={setSelectedSegments}
+          videoUrl={media.kind === 'video' ? media.url : undefined}
         />
       )}
 

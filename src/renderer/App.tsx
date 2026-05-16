@@ -100,6 +100,16 @@ const App: React.FC = () => {
       setUrlError('请先输入文章 URL');
       return;
     }
+    // R-25 (#3): if the user just sniffed this same URL and the result is
+    // still on screen, re-sniffing is almost always an accidental click.
+    // Sniffing again throws away the current selection / resolved chips
+    // and triggers another full network round-trip, so confirm first.
+    if (result?.pageUrl === trimmed && (result.items.length > 0 || (result.warnings?.length ?? 0) > 0)) {
+      const ok = typeof window !== 'undefined'
+        ? window.confirm(`已嗅探过该 URL,是否再次嗅探?\n\n${trimmed}\n\n确认会清空当前结果重新拉取。`)
+        : true;
+      if (!ok) return;
+    }
     setUrlError(null);
     const myId = ++sniffReqId.current;
     setSniffing(true);
@@ -146,7 +156,7 @@ const App: React.FC = () => {
         setSniffProgress(null);
       }
     }
-  }, [url]);
+  }, [url, result]);
 
   const onPickDir = useCallback(async () => {
     if (!giftk) return;
