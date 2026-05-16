@@ -55,8 +55,46 @@ input[type="text"]:focus { border-color: var(--accent); }
 
 .app {
   display: grid;
-  grid-template-rows: 56px 1fr 180px;
+  /* Rows: titlebar | body | bottom-resize-handle | bottom panel.
+     The bottom panel height is driven by `--bottom-h` (default 180px),
+     set inline by App.tsx and persisted to localStorage.
+     The handle row is fixed at 6px and acts as a draggable separator. */
+  grid-template-rows: 56px 1fr 6px var(--bottom-h, 180px);
   height: 100vh;
+}
+/* Draggable separator between the main body and the bottom panel.
+   - 6px tall but with a 1px visible accent line on top for affordance.
+   - ns-resize cursor; visual highlight on hover/active.
+   - Sits in its own grid row so dragging never reflows the body width. */
+.bottom-resize-handle {
+  height: 6px;
+  background: transparent;
+  border-top: 1px solid var(--border);
+  cursor: ns-resize;
+  user-select: none;
+  position: relative;
+  z-index: 5;
+  transition: background-color 0.12s ease;
+}
+.bottom-resize-handle::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 36px;
+  height: 2px;
+  margin-left: -18px;
+  margin-top: -1px;
+  border-radius: 1px;
+  background: var(--border);
+  transition: background-color 0.12s ease;
+}
+.bottom-resize-handle:hover {
+  background: rgba(120, 140, 200, 0.12);
+}
+.bottom-resize-handle:hover::after,
+.bottom-resize-handle:active::after {
+  background: var(--accent);
 }
 .titlebar {
   display: flex;

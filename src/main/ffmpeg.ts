@@ -416,12 +416,53 @@ export async function gifsicleOptimize(
   );
 }
 
+/** Resize an animated GIF (or any image) keeping aspect ratio.
+ *
+ *  Two-tier strategy:
+ *    1. sharp({ animated: true, limitInputPixels: false }) — fast, but
+ *       sharp tiles every frame into a single virtual canvas of height
+ *       (H * frames). Even with `limitInputPixels: false`, very large /
+ *       long animated gifs occasionally still throw "Input image exceeds
+ *       pixel limit" on libvips' internal guards.
+ *    2. ffmpeg fallback — `ffmpeg -i in.gif -vf "scale=W:-2" out.gif`.
+ *       Native GIF demuxer, frame-by-frame, no virtual canvas, no
+ *       pixel-limit guard. Slower but always works.
+ *
+ *  We always try sharp first (faster + better quality on small gifs)
+ *  and silently fall back to ffmpeg on ANY sharp error. The caller
+ *  doesn't need to know which engine produced the output. */
 export async function imageResizeKeepAspect(input: string, output: string, targetWidth: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) throw makeCancelledError();
-  await sharp(input, { animated: true })
-    .resize({ width: targetWidth, withoutEnlargement: true })
-    .gif()
-    .toFile(output);
+  try {
+    await sharp(input, { animated: true, limitInputPixels: false })
+      .resize({ width: targetWidth, withoutEnlargement: true })
+      .gif()
+      .toFile(output);
+    if (signal?.aborted) throw makeCancelledError();
+    return;
+  } catch (sharpErr) {
+    if (signal?.aborted) throw makeCancelledError();
+    // Re-throw cancellation untouched.
+    if ((sharpErr as Error)?.name === 'CancelledError') throw sharpErr;
+    // Fall through to ffmpeg.
+  }
+
+  if (signal?.aborted) throw makeCancelledError();
+  // Even width is a hard requirement for many encoders/filters; -2 in
+  // height keeps aspect ratio while snapping to an even number.
+  const safeW = Math.max(2, Math.floor(targetWidth / 2) * 2);
+  await run(
+    getFfmpegPath(),
+    [
+      '-y',
+      '-loglevel', 'error',
+      '-i', input,
+      '-vf', `scale=${safeW}:-2:flags=lanczos`,
+      '-loop', '0',
+      output
+    ],
+    { signal }
+  );
   if (signal?.aborted) throw makeCancelledError();
 }
 
@@ -516,9 +557,12 @@ export async function buildThumbnailDataUrl(
     };
   }
 
-  // gif / image: take first frame via sharp; do NOT pass animated:true so we get one frame
-  const meta = await sharp(inputPath).metadata();
-  const buf = await sharp(inputPath)
+  // gif / image: take first frame via sharp; do NOT pass animated:true so we get one frame.
+  // limitInputPixels: false avoids "Input image exceeds pixel limit" on huge gifs/images
+  // (sharp's default ~268MP guard trips on large source dimensions even when we only
+  // want the first frame for a 256-wide thumbnail).
+  const meta = await sharp(inputPath, { limitInputPixels: false }).metadata();
+  const buf = await sharp(inputPath, { limitInputPixels: false })
     .resize({ width: maxWidth, withoutEnlargement: true })
     .webp({ quality: 75 })
     .toBuffer();

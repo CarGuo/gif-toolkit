@@ -41,6 +41,18 @@ const App: React.FC = () => {
   const [resolvingSet, setResolvingSet] = useState<Set<string>>(new Set());
   const [resolveErrorMap, setResolveErrorMap] = useState<Record<string, string>>({});
 
+  // Bottom panel (TaskTable + LogBox) resizable height.
+  // Persisted in localStorage so the user's preference survives reloads.
+  const BOTTOM_H_KEY = 'giftk.bottomPanelHeight';
+  const BOTTOM_H_MIN = 80;
+  const BOTTOM_H_DEFAULT = 180;
+  const [bottomH, setBottomH] = useState<number>(() => {
+    if (typeof window === 'undefined') return BOTTOM_H_DEFAULT;
+    const raw = window.localStorage.getItem(BOTTOM_H_KEY);
+    const n = raw ? Number(raw) : NaN;
+    return Number.isFinite(n) && n >= BOTTOM_H_MIN ? n : BOTTOM_H_DEFAULT;
+  });
+
   const sniffReqId = useRef(0);
   const previewReqId = useRef(0);
 
@@ -368,6 +380,40 @@ const App: React.FC = () => {
     setPreview(null);
   }, []);
 
+  // Drag handler for the resizable bottom panel. Computed against
+  // window.innerHeight so the gesture maps 1:1 with cursor movement.
+  // Persists final value to localStorage on mouseup.
+  const onBottomResizeStart = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startH = bottomH;
+    const onMove = (ev: MouseEvent) => {
+      const dy = startY - ev.clientY;
+      const maxH = Math.max(BOTTOM_H_MIN + 1, Math.floor(window.innerHeight * 0.7));
+      const next = Math.min(maxH, Math.max(BOTTOM_H_MIN, startH + dy));
+      setBottomH(next);
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      try {
+        // setBottomH is async; read latest from a closure-stable getter.
+        // We piggy-back on next tick by reading from state on the next call.
+        // Simplest: write the most recent value via a setter snapshot.
+        setBottomH((v) => {
+          window.localStorage.setItem(BOTTOM_H_KEY, String(v));
+          return v;
+        });
+      } catch { /* ignore quota errors */ }
+    };
+    document.body.style.cursor = 'ns-resize';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }, [bottomH]);
+
   if (!giftk) {
     return (
       <div style={{ padding: 24, color: 'var(--text)' }}>
@@ -389,7 +435,7 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className="app">
+    <div className="app" style={{ ['--bottom-h' as string]: `${bottomH}px` } as React.CSSProperties}>
       <div className="titlebar">
         <h1>Gif Toolkit · 网页媒体一站式抓取与转换</h1>
         <div className="spacer" />
@@ -494,6 +540,17 @@ const App: React.FC = () => {
         </div>
       </div>
 
+      <div
+        className="bottom-resize-handle"
+        onMouseDown={onBottomResizeStart}
+        onDoubleClick={() => {
+          setBottomH(BOTTOM_H_DEFAULT);
+          try { window.localStorage.setItem(BOTTOM_H_KEY, String(BOTTOM_H_DEFAULT)); } catch { /* ignore */ }
+        }}
+        title="拖动调节高度,双击恢复默认"
+        role="separator"
+        aria-orientation="horizontal"
+      />
       <div className="bottom">
         <TaskTable items={items} progress={progress} />
         <LogBox lines={logs} />
