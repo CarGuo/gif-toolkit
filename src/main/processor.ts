@@ -33,7 +33,9 @@ import {
   compressCacheKey,
   ACCEPT_TOL as ACCEPT_TOL_EXT,
   EARLY_FAST_RATIO as EARLY_FAST_RATIO_EXT,
-  SHRINK_FIRST_RATIO as SHRINK_FIRST_RATIO_EXT
+  SHRINK_FIRST_RATIO as SHRINK_FIRST_RATIO_EXT,
+  enumerateSegments,
+  filterSelectedSegments
 } from './processor-utils';
 
 let currentConcurrency = DEFAULT_CONCURRENCY;
@@ -1059,7 +1061,6 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
   }
 
   const totalDuration = info.durationSec;
-  const segLen = Math.max(1, options.maxSegmentSec);
   const userStart = options.startSec ?? 0;
   const userEnd = options.endSec ?? totalDuration;
   const clipStart = Math.max(0, Math.min(totalDuration, userStart));
@@ -1067,13 +1068,18 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
   const range = clipEnd - clipStart;
   if (range <= 0.5) throw new Error('clip range too short (<0.5s)');
 
-  const segCount = Math.max(1, Math.ceil(range / segLen));
-  const segActual = range / segCount;
-  const segments = Array.from({ length: segCount }, (_, i) => ({
-    index: i,
-    start: clipStart + i * segActual,
-    duration: segActual
-  }));
+  // R-22: split the clip into equally-sized segments, then optionally filter
+  // by user's selectedSegments whitelist so a long video doesn't expand into
+  // a flood of tasks. enumerateSegments + filterSelectedSegments are pure
+  // helpers in processor-utils.ts (covered by processor-utils.test.ts).
+  const allSegments = enumerateSegments(clipStart, clipEnd, options.maxSegmentSec);
+  const segments = filterSelectedSegments(allSegments, options.selectedSegments);
+  if (segments.length === 0) {
+    // filterSelectedSegments only returns [] when allSegments itself is empty
+    // (range non-positive); guarded by the range check above, but keep an
+    // explicit error for defensive coverage.
+    throw new Error('no segments to process');
+  }
 
   const srcW = info.width > 0 ? info.width : options.maxWidth;
   const srcH = info.height > 0 ? info.height : 0;

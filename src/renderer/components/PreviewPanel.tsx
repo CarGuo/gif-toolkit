@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { ProcessOptions, SniffedMedia, PreviewResult } from '../../shared/types';
 import { CropBox } from './CropBox';
 import { Timeline } from './Timeline';
@@ -30,13 +30,65 @@ export const PreviewPanel: React.FC<Props> = ({
   const isGif = media.kind === 'gif';
   const isImage = media.kind === 'image';
 
+  // R-22: derive a UI-only preview of the segments the processor will produce
+  // for the current clip range. Mirrors enumerateSegments() in
+  // processor-utils.ts (kept inline to avoid pulling main-process code into
+  // the renderer bundle). Empty list when video metadata isn't loaded yet
+  // or when the clip is shorter than maxSegmentSec (single-segment case
+  // doesn't need user picking).
+  const segmentPreviews = useMemo(() => {
+    if (isGif || isImage) return [];
+    if (duration <= 0) return [];
+    const start = Math.max(0, Math.min(duration, options.startSec ?? 0));
+    const end = Math.max(start, Math.min(duration, options.endSec ?? duration));
+    const range = end - start;
+    if (range <= 0) return [];
+    const segLen = Math.max(1, options.maxSegmentSec);
+    if (range <= segLen) return []; // single segment: no need to ask the user
+    const segCount = Math.max(1, Math.ceil(range / segLen));
+    const segActual = range / segCount;
+    return Array.from({ length: segCount }, (_, i) => ({
+      index: i,
+      start: start + i * segActual,
+      end: start + (i + 1) * segActual
+    }));
+  }, [isGif, isImage, duration, options.startSec, options.endSec, options.maxSegmentSec]);
+
+  const effectiveSelected: Set<number> = useMemo(() => {
+    if (segmentPreviews.length === 0) return new Set();
+    if (options.selectedSegments && options.selectedSegments.length > 0) {
+      return new Set(options.selectedSegments);
+    }
+    // No explicit selection but we have multiple segments → mirror App.tsx's
+    // batch behaviour: default to segment #0 only. Users see #1 ticked here
+    // and the "select all"/"clear" buttons let them lift this fast.
+    return new Set([0]);
+  }, [segmentPreviews.length, options.selectedSegments]);
+
+  const toggleSegment = (idx: number) => {
+    const next = new Set(effectiveSelected);
+    if (next.has(idx)) next.delete(idx);
+    else next.add(idx);
+    const arr = Array.from(next).sort((a, b) => a - b);
+    onChangeOptions({ ...options, selectedSegments: arr.length === 0 ? undefined : arr });
+  };
+  const selectAllSegments = () => {
+    onChangeOptions({
+      ...options,
+      selectedSegments: segmentPreviews.map((s) => s.index)
+    });
+  };
+  const selectFirstSegment = () => {
+    onChangeOptions({ ...options, selectedSegments: [0] });
+  };
+
   useEffect(() => {
     setCurrentTime(0);
     setDuration(0);
     setNaturalSize({ w: 0, h: 0 });
     setMediaError(null);
     setTargetEl(null);
-    onChangeOptions({ ...options, cropRect: undefined, startSec: undefined, endSec: undefined });
+    onChangeOptions({ ...options, cropRect: undefined, startSec: undefined, endSec: undefined, selectedSegments: undefined });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [media.id]);
 
@@ -68,7 +120,21 @@ export const PreviewPanel: React.FC<Props> = ({
                 setDuration(t.duration);
                 setNaturalSize({ w: t.videoWidth, h: t.videoHeight });
                 if (options.endSec === undefined) {
-                  onChangeOptions({ ...options, startSec: 0, endSec: Math.min(options.maxSegmentSec, t.duration) });
+                  // R-22: for the clip range we now select the full duration so
+                  // the segment checkboxes below can offer every slice. The
+                  // default "only segment #0" behaviour is delivered through
+                  // `selectedSegments=[0]` rather than truncating the range,
+                  // so the user can tick more segments without first dragging
+                  // the timeline.
+                  const tooLong = t.duration > options.maxSegmentSec;
+                  onChangeOptions({
+                    ...options,
+                    startSec: 0,
+                    endSec: t.duration,
+                    selectedSegments: tooLong
+                      ? (options.selectedSegments ?? [0])
+                      : options.selectedSegments
+                  });
                 }
               }}
               onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
@@ -126,6 +192,53 @@ export const PreviewPanel: React.FC<Props> = ({
             if (videoRef.current) videoRef.current.currentTime = t;
           }}
         />
+      )}
+
+      {segmentPreviews.length > 0 && (
+        <div className="segment-picker" style={{ marginTop: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, flexWrap: 'wrap' }}>
+            <b style={{ fontSize: 12 }}>分段选择 (R-22)</b>
+            <span style={{ color: 'var(--muted)', fontSize: 11 }}>
+              已勾 {effectiveSelected.size} / {segmentPreviews.length} 段 · 默认仅第 1 段
+            </span>
+            <span style={{ flex: 1 }} />
+            <button type="button" onClick={selectFirstSegment} style={{ fontSize: 11 }}>仅第 1 段</button>
+            <button type="button" onClick={selectAllSegments} style={{ fontSize: 11 }}>全选</button>
+          </div>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            {segmentPreviews.map((s) => {
+              const checked = effectiveSelected.has(s.index);
+              return (
+                <label
+                  key={s.index}
+                  className={`segment-chip${checked ? ' active' : ''}`}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    padding: '4px 8px',
+                    borderRadius: 4,
+                    background: checked ? 'var(--accent-bg, #1f3a52)' : 'var(--surface-2, #1a1c20)',
+                    border: `1px solid ${checked ? 'var(--accent, #4aa3ff)' : 'var(--border, #2a2d33)'}`,
+                    cursor: 'pointer',
+                    fontSize: 12
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => toggleSegment(s.index)}
+                    aria-label={`segment ${s.index + 1}`}
+                  />
+                  <span>#{s.index + 1}</span>
+                  <span style={{ color: 'var(--muted)' }}>
+                    {s.start.toFixed(1)}–{s.end.toFixed(1)}s
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+        </div>
       )}
 
       {preview && preview.frames.length > 0 && (

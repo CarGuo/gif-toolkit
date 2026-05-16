@@ -195,11 +195,38 @@ const App: React.FC = () => {
     }
     setProgress({});
     const dir = baseOutputDir || outputDir;
-    const tasks: ProcessTask[] = processable.map((m) => ({
-      id: m.id,
-      media: m,
-      options: { ...options, outDir: dir }
-    }));
+    // R-22: for video tasks whose duration exceeds maxSegmentSec, default to
+    // processing only segment #0 (i.e. the first 0..maxSegmentSec slice).
+    // This avoids spawning N tasks for a 10-min video when the user just
+    // dragged a URL in. Users who want more segments select them in the
+    // PreviewPanel before clicking ▶. Skipped when:
+    //   - clip range already set explicitly (startSec/endSec) → trust user
+    //   - selectedSegments already set on the global options → trust user
+    //   - duration unknown (sniff didn't probe) → fall through, processor
+    //     will still emit one task per segment (same as before R-22)
+    const tasks: ProcessTask[] = processable.map((m) => {
+      const opt: ProcessOptions = { ...options, outDir: dir };
+      const dur = m.resolved?.durationSec ?? m.durationSec ?? 0;
+      const tooLong = m.kind === 'video' && dur > options.maxSegmentSec;
+      const userPickedRange =
+        opt.startSec !== undefined ||
+        opt.endSec !== undefined ||
+        (opt.selectedSegments && opt.selectedSegments.length > 0);
+      if (tooLong && !userPickedRange) {
+        opt.selectedSegments = [0];
+      }
+      return { id: m.id, media: m, options: opt };
+    });
+    const truncated = tasks.filter((t) =>
+      t.options.selectedSegments && t.options.selectedSegments.length === 1 && t.options.selectedSegments[0] === 0 &&
+      ((t.media.resolved?.durationSec ?? t.media.durationSec ?? 0) > options.maxSegmentSec)
+    );
+    if (truncated.length > 0) {
+      setLogs((prev) => [
+        ...prev,
+        `[batch] ${truncated.length} 个长视频已默认只处理第 1 段(0..${options.maxSegmentSec}s);如需更多段,请在预览中勾选`
+      ].slice(-300));
+    }
     try {
       const r = await giftk.startBatch(tasks, result?.title);
       setProcessingOne((prev) => {
@@ -240,8 +267,25 @@ const App: React.FC = () => {
       return;
     }
     const dir = baseOutputDir || outputDir;
+    // R-22 (single): mirror onStart's auto-truncation so retry/single-process
+    // long videos don't accidentally explode into N segment tasks. The user
+    // can still expand to all segments by ticking checkboxes in the modal.
+    const optBase: ProcessOptions = { ...options, outDir: dir };
+    const dur = media.resolved?.durationSec ?? media.durationSec ?? 0;
+    const tooLong = media.kind === 'video' && dur > options.maxSegmentSec;
+    const userPickedRange =
+      optBase.startSec !== undefined ||
+      optBase.endSec !== undefined ||
+      (optBase.selectedSegments && optBase.selectedSegments.length > 0);
+    if (tooLong && !userPickedRange) {
+      optBase.selectedSegments = [0];
+      setLogs((prev) => [
+        ...prev,
+        `[single] 长视频(${dur.toFixed(1)}s)默认只处理第 1 段(0..${options.maxSegmentSec}s);如需更多段,请在预览中勾选`
+      ].slice(-300));
+    }
     const tasks: ProcessTask[] = [
-      { id: media.id, media, options: { ...options, outDir: dir } }
+      { id: media.id, media, options: optBase }
     ];
     setProgress((prev) => {
       const next = { ...prev };

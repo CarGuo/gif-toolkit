@@ -14,7 +14,9 @@ import {
   adaptiveStartLossy,
   clampConcurrency,
   compressCacheKey,
+  enumerateSegments,
   extrapolateNextLossy,
+  filterSelectedSegments,
   geometricShrinkLongestSide,
   planPhase0,
   shortSideAfterCap
@@ -187,5 +189,78 @@ describe('exported tunable invariants', () => {
   it('DEFAULT_CONCURRENCY ≤ MAX_CONCURRENCY', () => {
     expect(DEFAULT_CONCURRENCY).toBeLessThanOrEqual(MAX_CONCURRENCY);
     expect(DEFAULT_CONCURRENCY).toBeGreaterThan(0);
+  });
+});
+
+describe('enumerateSegments (R-22)', () => {
+  it('returns a single segment when range fits within maxSegmentSec', () => {
+    const segs = enumerateSegments(0, 10, 20);
+    expect(segs.length).toBe(1);
+    expect(segs[0]).toEqual({ index: 0, start: 0, duration: 10 });
+  });
+
+  it('produces equally-sized segments instead of "N full + leftover"', () => {
+    // 50s clip with 20s cap should be 3 segments of 50/3 ≈ 16.67s each,
+    // NOT [20, 20, 10]. This keeps progress UI predictable.
+    const segs = enumerateSegments(0, 50, 20);
+    expect(segs.length).toBe(3);
+    for (const s of segs) {
+      expect(s.duration).toBeCloseTo(50 / 3, 6);
+    }
+    // Indices monotonic, starts contiguous.
+    expect(segs[0].start).toBe(0);
+    expect(segs[1].start).toBeCloseTo(50 / 3, 6);
+    expect(segs[2].start).toBeCloseTo((50 / 3) * 2, 6);
+  });
+
+  it('honours non-zero clipStart', () => {
+    const segs = enumerateSegments(10, 30, 5);
+    expect(segs.length).toBe(4);
+    expect(segs[0].start).toBe(10);
+    expect(segs[3].start).toBeCloseTo(25, 6);
+  });
+
+  it('returns [] when range is non-positive', () => {
+    expect(enumerateSegments(5, 5, 10)).toEqual([]);
+    expect(enumerateSegments(10, 5, 10)).toEqual([]);
+  });
+
+  it('treats zero/negative maxSegmentSec as 1s (defensive)', () => {
+    const segs = enumerateSegments(0, 3, 0);
+    expect(segs.length).toBe(3);
+    expect(segs[0].duration).toBe(1);
+  });
+});
+
+describe('filterSelectedSegments (R-22)', () => {
+  const all = [
+    { index: 0, start: 0, duration: 10 },
+    { index: 1, start: 10, duration: 10 },
+    { index: 2, start: 20, duration: 10 }
+  ];
+
+  it('returns all segments when selection is undefined (legacy callers)', () => {
+    expect(filterSelectedSegments(all, undefined)).toEqual(all);
+  });
+
+  it('returns all segments when selection is empty', () => {
+    expect(filterSelectedSegments(all, [])).toEqual(all);
+  });
+
+  it('keeps only whitelisted indices, preserving original order', () => {
+    expect(filterSelectedSegments(all, [0, 2])).toEqual([all[0], all[2]]);
+    // Selection order doesn't affect output order — original indexing wins.
+    expect(filterSelectedSegments(all, [2, 0])).toEqual([all[0], all[2]]);
+  });
+
+  it('drops out-of-range or non-integer indices silently', () => {
+    expect(filterSelectedSegments(all, [99])).toEqual(all);  // empty allow → fallback to all
+    expect(filterSelectedSegments(all, [1, 99, 0])).toEqual([all[0], all[1]]);
+    expect(filterSelectedSegments(all, [0.5, 1.7, 2])).toEqual([all[2]]);
+    expect(filterSelectedSegments(all, [-1, 0])).toEqual([all[0]]);
+  });
+
+  it('dedupes selection without affecting output', () => {
+    expect(filterSelectedSegments(all, [1, 1, 1])).toEqual([all[1]]);
   });
 });

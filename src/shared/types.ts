@@ -59,7 +59,7 @@ export interface ProcessOptions {
   maxWidth: number;
   /** Lower bound for the longest side. Default 240. */
   minSize: number;
-  maxSegmentSec: number;  // max single gif duration when splitting video, default 15
+  maxSegmentSec: number;  // max single gif duration when splitting video, default 20
   fps: number;            // default 12
   speed: number;          // playback speed multiplier, default 1.0
   outDir?: string;        // overrides default user folder
@@ -67,6 +67,17 @@ export interface ProcessOptions {
   endSec?: number;
   cropRect?: { x: number; y: number; w: number; h: number };
   concurrency?: number;   // batch parallelism, default 3
+  /**
+   * Per-task segment whitelist for video → gif (R-22). When the clip range
+   * exceeds maxSegmentSec, processor.ts splits it into N equal segments
+   * indexed 0..N-1. `selectedSegments` restricts processing to the listed
+   * indices only. Unset (undefined) preserves legacy behaviour: process
+   * every segment. Values are deduped, sorted, and clamped to [0, N-1] in
+   * sanitizeOptions; out-of-range entries are dropped silently. Empty array
+   * after clamp is treated the same as `undefined` to avoid producing zero
+   * outputs and confusing the user.
+   */
+  selectedSegments?: number[];
 }
 
 export type TaskStatus =
@@ -171,7 +182,7 @@ export const DEFAULT_OPTIONS: ProcessOptions = {
   softMaxBytes: 2 * 1024 * 1024,
   maxWidth: 800,
   minSize: 240,
-  maxSegmentSec: 15,
+  maxSegmentSec: 20,
   fps: 12,
   speed: 1,
   concurrency: 3

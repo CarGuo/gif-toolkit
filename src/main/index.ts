@@ -203,6 +203,22 @@ function sanitizeOptions(o: unknown): ProcessOptions {
     result.endSec = Math.max(0, obj.endSec);
   }
 
+  // R-22: selectedSegments — non-negative integers, deduped, sorted ascending.
+  // Out-of-range values are intentionally NOT clamped here (the renderer may
+  // submit before reading actual video duration); processor.ts re-validates
+  // against the live segment count in filterSelectedSegments().
+  if (Array.isArray(obj.selectedSegments)) {
+    const cleaned = Array.from(
+      new Set(
+        (obj.selectedSegments as unknown[])
+          .filter((n): n is number => typeof n === 'number' && Number.isInteger(n) && n >= 0 && n < 1000)
+      )
+    ).sort((a, b) => a - b);
+    if (cleaned.length > 0) {
+      result.selectedSegments = cleaned;
+    }
+  }
+
   if (obj.cropRect && typeof obj.cropRect === 'object') {
     const r = obj.cropRect as Record<string, unknown>;
     result.cropRect = {
