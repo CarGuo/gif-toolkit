@@ -20,6 +20,16 @@
 - [ ] R-10 contextIsolation/nodeIntegration 没动
 - [ ] R-11 改 IPC 时 main + preload + global.d.ts 三处都改了
 - [ ] R-12 没为了让 SC 通过而改 SC
+- [ ] R-13 SPA / anti-bot 三级 fallback 没破
+- [ ] R-14 embed resolver 仍随包分发 + 自动解析(没回退到 opt-in)
+- [ ] R-15 npm 供应链卫生五道闸门没破
+
+## 添加 / 升级依赖时(R-15)
+- [ ] 新加包是精确版本(`"foo": "1.2.3"` 而不是 `"^1.2.3"`)
+- [ ] 该版本已发布 ≥ 7 天(若 `--min-release-age=0` 绕过,PR 标题前缀 `[security]` + 附 CVE 编号)
+- [ ] 若是 native dep,已把包名加到 [package.json](file:///Users/guoshuyu/workspace/gif-toolkit/package.json) `scripts.postinstall` 的 `npm rebuild` allowlist,并在 PR 里说明该包 install hook 做了什么
+- [ ] `package-lock.json` 已提交,且本地跑 `npm run lockfile:lint` 通过(所有 resolved 指向 `https://registry.npmjs.org/...`)
+- [ ] CI workflow 用的是 `npm ci`,没人偷偷换成 `npm install`
 
 ## 共享类型 / 边界
 - [ ] 改了 [src/shared/types.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types.ts)?(若是,确认对应的 sanitizeOptions / OptionsForm 都更新了)

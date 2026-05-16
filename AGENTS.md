@@ -35,6 +35,7 @@
 | **R-12** | **不要为了让一个测试通过就改测试,要改的是代码** | 全局 SOP | — |
 | **R-13** | **SPA / anti-bot 页面必须走「静态正则 → headless → CF challenge 报警」三级 fallback**:1) 规则 8 用宽松正则在 `<script>` JSON payload 里抽 player URL;2) `noMedia ‖ looksTooShort ‖ looksLikeCsr` 任一即触发 [headlessFetch](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/headlessFetch.ts);3) 命中 Turnstile / Just-a-moment 时显式 warning。同时 main 入口必须 `app.commandLine.appendSwitch('disable-quic')`,否则部分网络上 Chromium 会 ERR_CONNECTION_RESET。**任何 sniffer 改动都必须先用真实 OpenAI URL 跑通 e2e 才能交付** | 第 23 轮 "OpenAI 还是测试不出来,你不应该测试下这个嗅探成功了才交付吗?" | [extractFromHtml](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/sniffer.ts) 规则 8 + [headlessFetch.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/headlessFetch.ts) + [SC-07](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-07-spa-hydrated-iframe-fallback.md) |
 | **R-14** | **embed resolver 随包分发 + 自动解析(开箱即用)**:1) `electron-builder.asarUnpack` 必须包含 `node_modules/ytdlp-nodejs/bin/**`,yt-dlp 二进制随 dmg/installer 分发,**不允许**在 `build.files` 排除该路径;2) 嗅探完成后 `App.tsx useEffect([result])` 自动批量调起 `resolveEmbed`,**不得**有任何 `confirm()` 弹窗 / `installYtdlp` IPC / `ytdlp-chip` 状态徽章;3) resolver 内部 4 级 fallback 找 binary(packaged → dev node_modules → helpers.BIN_DIR → userData/bin → helpers.downloadYtDlp 兜底);4) resolver 失败 / 上游拒绝时 embed 卡片必须保留 + 显示 `↻ 重试解析` 小按钮 + `resolveErrorMap` 守卫(永不卡死、永不循环);5) resolver target 必须是 `media.url`(iframe `src`),不是 `media.pageUrl`(文章页);6) header 沿用必须经白名单(User-Agent/Referer/Origin/Accept-*/Range/X-CSRF-Token/X-Requested-With),禁止 Authorization/Cookie/Set-Cookie/Host 沿用;7) log buffer 写入前必须 `redactUrls()` 脱敏。**改 resolver 必须先验证 YouTube + Bilibili must-pass 才能交付** | 第 29 轮 "没必要,我们要提供的是开箱即用的功能,都打包进去,没必要做这种未装的情况" | [resolver/ytdlp.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/resolver/ytdlp.ts) + [resolver/index.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/resolver/index.ts) + [SC-13](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-13-resolver-opt-in.md) / [SC-14](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-14-resolver-bilibili.md) / [SC-15](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-15-resolver-failure-fallback.md) |
+| **R-15** | **npm 供应链卫生**(五道闸门,缺一不可):1) `.npmrc` 设 `min-release-age=7`(npm 单位是*天*,不要混淆 pnpm 的*分钟*单位写成 10080)— 新版本必须满 7 天才进 lockfile;2) `ignore-scripts=true` 全局禁止子依赖 lifecycle hook,native rebuild 通过根 `package.json` 的 `scripts.postinstall` 显式 allowlist(`sharp` / `ffmpeg-static` / `ffprobe-static` / `gifsicle` / `ytdlp-nodejs` 五个);3) `save-exact=true` + `save-prefix=` — 新增依赖固定到精确版本而非 caret 范围;4) CI / 部署必须用 `npm ci`,禁止 `npm install`(后者会默默改 lockfile);5) `npm run lockfile:lint` 校验 `package-lock.json` 所有 resolved 都指向官方 npm + integrity 是 sha512(挡 lockfile injection)。辅助:`engine-strict=true` + `audit-signatures=true` + `engines.node>=20 / npm>=11.10`。紧急 CVE 通道允许 `--min-release-age=0`,但 PR 必须前缀 `[security]` 并附 CVE 编号 | 第 31 轮 "现在有什么避免 npm 投毒或供应链安全的规则,找一些落实到项目里" | [.npmrc](file:///Users/guoshuyu/workspace/gif-toolkit/.npmrc) + [package.json](file:///Users/guoshuyu/workspace/gif-toolkit/package.json) `scripts.postinstall` / `scripts.lockfile:lint` / `engines` + [R-15](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-15-npm-supply-chain-hygiene.md) |
 
 ---
 
@@ -62,7 +63,7 @@
 每一次 Agent 改代码,必须按这个顺序走:
 
 1. **Read 触发场景** → 翻 [harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios) 看是否有同类问题已有沉淀。如果有,直接复用规则,**不再二次发明**。
-2. **Plan** → 用 TodoWrite 列出步骤;影响 R-01..R-13 中任何一条要在计划里点名。
+2. **Plan** → 用 TodoWrite 列出步骤;影响 R-01..R-15 中任何一条要在计划里点名。
 3. **Execute** → 改代码。
 4. **Verify** → 三步顺序执行,**全部通过才算完成**:
    - `npm run typecheck`
@@ -115,7 +116,7 @@
 - **[docs/embed-resolver.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/embed-resolver.md)** —— yt-dlp resolver 设计(随包分发 + 自动解析)、e2e 验证
 - **[harness/](file:///Users/guoshuyu/workspace/gif-toolkit/harness)** —— 工程级 harness 规则与回归场景库
   - **[harness/run-harness.md](file:///Users/guoshuyu/workspace/gif-toolkit/harness/run-harness.md)** —— 怎么跑 harness
-  - **[harness/rules/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules)** —— R-01..R-14 的细化版,每条一个文件
+  - **[harness/rules/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules)** —— R-01..R-15 的细化版,每条一个文件
   - **[harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios)** —— SC-01..SC-15 已沉淀的回归场景
   - **[harness/checklists/pr-checklist.md](file:///Users/guoshuyu/workspace/gif-toolkit/harness/checklists/pr-checklist.md)** —— 改前自检清单
 
@@ -125,7 +126,7 @@
 
 > 复制以下清单粘到你 PR / 提交说明里,逐条打勾。
 
-- [ ] 我读了 AGENTS.md 第 1 节(R-01..R-14),没违反任何一条
+- [ ] 我读了 AGENTS.md 第 1 节(R-01..R-15),没违反任何一条
 - [ ] 我读了 [harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios),确认我的改动没有让任何已有 SC 失效
 - [ ] `npm run typecheck` 通过
 - [ ] `npm run lint` 通过(0 warning)

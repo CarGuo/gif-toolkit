@@ -183,6 +183,7 @@ npm run package:win   # 打包成 nsis
 - 任何 URL 都只在本地处理,**不会上传到任何第三方服务器**
 - `sniff:url` 通道拒绝 `file://`、`javascript:` 等非 http(s) 协议
 - yt-dlp resolver:**二进制随安装包分发**(Unlicense 无合规风险),解析直链时仅透传白名单 header(User-Agent / Referer / Origin / Accept-* / Range / X-CSRF-Token / X-Requested-With),禁止 Authorization / Cookie / Set-Cookie / Host 沿用;log buffer 写入前 `redactUrls()` 脱敏 signed URL / token
+- **npm 供应链卫生(R-15)**:`.npmrc` 启用 `min-release-age=7`(新版本满 7 天才进 lockfile,挡 npm 投毒 golden hour)+ `ignore-scripts=true`(子依赖 lifecycle hook 全禁,native rebuild 走 `package.json.postinstall` 显式 allowlist)+ `save-exact=true`(精确版本)+ `audit-signatures=true`(sigstore 校验);CI 必须 `npm ci` 而非 `npm install`;`npm run lockfile:lint` 校验所有 resolved 指向官方 npm。详见 [R-15](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-15-npm-supply-chain-hygiene.md)
 
 ---
 
@@ -190,7 +191,7 @@ npm run package:win   # 打包成 nsis
 
 请先读:
 
-1. [AGENTS.md](file:///Users/guoshuyu/workspace/gif-toolkit/AGENTS.md) — 14 条项目级硬规则 (R-01..R-14)
+1. [AGENTS.md](file:///Users/guoshuyu/workspace/gif-toolkit/AGENTS.md) — 15 条项目级硬规则 (R-01..R-15)
 2. [harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/) — 已知问题与对应回归(SC-01..SC-15)
 3. [harness/checklists/pr-checklist.md](file:///Users/guoshuyu/workspace/gif-toolkit/harness/checklists/pr-checklist.md) — 提交前自检
 
