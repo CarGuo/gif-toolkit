@@ -17,13 +17,7 @@ export interface YtdlpStatus {
   binaryPath: string;
   version?: string;
   workingDir: string;
-}
-
-export interface ResolveInstallProgress {
-  stage: 'starting' | 'downloading' | 'done' | 'error';
-  percent: number;
-  version?: string;
-  error?: string;
+  source?: 'packaged' | 'userData' | 'missing';
 }
 
 function ensureString(v: unknown, name: string): string {
@@ -94,26 +88,13 @@ const api = {
     ipcRenderer.on('sniff:progress', handler);
     return () => ipcRenderer.removeListener('sniff:progress', handler);
   },
-  /* ---------------- Embed resolver (yt-dlp, opt-in) ---------------- */
+  /* ---------------- Embed resolver (yt-dlp, bundled) ---------------- */
   async checkYtdlp(): Promise<YtdlpStatus> {
     return ipcRenderer.invoke('resolve:checkYtdlp');
-  },
-  async installYtdlp(): Promise<YtdlpStatus> {
-    return ipcRenderer.invoke('resolve:installYtdlp');
-  },
-  async uninstallYtdlp(): Promise<{ ok: true }> {
-    return ipcRenderer.invoke('resolve:uninstallYtdlp');
   },
   async resolveEmbed(media: SniffedMedia): Promise<ResolvedMedia> {
     ensureObject(media, 'media');
     return ipcRenderer.invoke('resolve:embed', media);
-  },
-  onResolveInstallProgress(cb: (p: ResolveInstallProgress) => void): () => void {
-    const handler = (_: unknown, payload: ResolveInstallProgress) => {
-      try { cb(payload); } catch { /* swallow */ }
-    };
-    ipcRenderer.on('resolve:install-progress', handler);
-    return () => ipcRenderer.removeListener('resolve:install-progress', handler);
   }
 };
 

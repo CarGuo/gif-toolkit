@@ -8,14 +8,15 @@ interface Props {
   onOpen: (id: string) => void;
   onProcessOne?: (id: string) => void;
   isProcessing?: (id: string) => boolean;
-  /** Triggered when the user clicks "解析直链" on an embed-only card. The
-   *  parent App is responsible for calling the resolver IPC and storing the
-   *  ResolvedMedia back into the item (so subsequent renders show ✓). */
-  onResolveEmbed?: (id: string) => void;
+  /** Triggered when the user clicks "重试解析" on an embed card whose
+   *  auto-resolve failed. R-14 moved bulk resolve into App's useEffect, so
+   *  the grid only needs the retry callback (no host allow-list, no
+   *  first-time confirm). */
+  onRetryResolve?: (id: string) => void;
   /** True while a resolve request is mid-flight for a given embed. */
   isResolving?: (id: string) => boolean;
-  /** Allow-list of hosts the resolver can handle (renderer side gate). */
-  resolvableHosts?: Set<string>;
+  /** Per-item resolve error message (sticky until retry). */
+  resolveErrorMap?: Record<string, string>;
 }
 
 function fmtBytes(n?: number): string {
@@ -122,7 +123,7 @@ const Thumb: React.FC<{ media: SniffedMedia }> = ({ media }) => {
   );
 };
 
-export const MediaGrid: React.FC<Props> = ({ items, selected, onToggle, onOpen, onProcessOne, isProcessing, onResolveEmbed, isResolving, resolvableHosts }) => {
+export const MediaGrid: React.FC<Props> = ({ items, selected, onToggle, onOpen, onProcessOne, isProcessing, onRetryResolve, isResolving, resolveErrorMap }) => {
   if (items.length === 0) {
     return (
       <div className="media-grid empty">
@@ -130,15 +131,6 @@ export const MediaGrid: React.FC<Props> = ({ items, selected, onToggle, onOpen, 
       </div>
     );
   }
-  const isHostResolvable = (host?: string): boolean => {
-    if (!host) return false;
-    if (!resolvableHosts) return true; // unknown -> let main-process decide
-    if (resolvableHosts.has(host)) return true;
-    for (const known of resolvableHosts) {
-      if (host === known || host.endsWith('.' + known)) return true;
-    }
-    return false;
-  };
   return (
     <div className="media-grid">
       {items.map((m) => {
@@ -148,20 +140,20 @@ export const MediaGrid: React.FC<Props> = ({ items, selected, onToggle, onOpen, 
         const isEmbed = !!m.requiresExternalDownload;
         const isResolved = !!m.resolved;
         const canProcess = !!onProcessOne && (m.kind === 'video' || m.kind === 'gif') && (!isEmbed || isResolved);
-        const canResolve = isEmbed && !isResolved && !!onResolveEmbed && isHostResolvable(m.embedHost);
         const busy = !!isProcessing && isProcessing(m.id);
         const resolving = !!isResolving && isResolving(m.id);
+        const resolveError = resolveErrorMap?.[m.id];
         const handleProcess = (e: React.SyntheticEvent) => {
           e.stopPropagation();
           e.preventDefault();
           if (!onProcessOne || busy) return;
           onProcessOne(m.id);
         };
-        const handleResolve = (e: React.SyntheticEvent) => {
+        const handleRetry = (e: React.SyntheticEvent) => {
           e.stopPropagation();
           e.preventDefault();
-          if (!onResolveEmbed || resolving) return;
-          onResolveEmbed(m.id);
+          if (!onRetryResolve || resolving) return;
+          onRetryResolve(m.id);
         };
         return (
           <div
@@ -214,30 +206,36 @@ export const MediaGrid: React.FC<Props> = ({ items, selected, onToggle, onOpen, 
                 >
                   {busy ? '处理中…' : isResolved ? '▶ 处理(已解析)' : '▶ 处理此项'}
                 </button>
-              ) : canResolve ? (
+              ) : isEmbed && !isResolved && resolving ? (
+                <span
+                  className="card-embed-tag resolving"
+                  title={`正在解析 ${m.embedHost || '第三方'} 直链…`}
+                >
+                  ⏳ 解析中…
+                </span>
+              ) : isEmbed && !isResolved && resolveError ? (
                 <button
                   type="button"
-                  className={`card-resolve-btn ${resolving ? 'busy' : ''}`}
+                  className="card-resolve-retry"
                   tabIndex={0}
-                  aria-label="解析直链"
-                  title={resolving ? '正在解析…' : `调用 yt-dlp 解析 ${m.embedHost} 的视频直链(用户主动触发)`}
-                  disabled={resolving}
-                  onClick={handleResolve}
+                  aria-label="重试解析"
+                  title={`解析失败:${resolveError} · 点击重试`}
+                  onClick={handleRetry}
                   onMouseDown={(e) => e.stopPropagation()}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' || e.key === ' ') {
-                      handleResolve(e);
+                      handleRetry(e);
                     }
                   }}
                 >
-                  {resolving ? '解析中…' : '🔗 解析直链'}
+                  ↻ 重试解析
                 </button>
               ) : isEmbed && !isResolved ? (
                 <span
                   className="card-embed-tag"
-                  title={`视频由 ${m.embedHost || '第三方'} 嵌入(如 Vimeo/YouTube),无法直接抓取视频流。请到原页面获取 .mp4 直链后再回来嗅探。`}
+                  title={`视频由 ${m.embedHost || '第三方'} 嵌入,等待自动解析…`}
                 >
-                  {m.embedHost || '第三方'} 嵌入 · 无法直抓
+                  {m.embedHost || '第三方'} 嵌入
                 </span>
               ) : null}
               {isResolved ? (

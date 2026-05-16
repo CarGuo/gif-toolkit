@@ -68,32 +68,33 @@ Phase D  兜底               (finalSide=longSideFloor,目标 maxBytes=4MB)
 | 现象 | 行为 |
 |---|---|
 | 页面里是 `<video src=*.mp4>` | 正常嗅出,可直接处理 |
-| 页面里是 **YouTube / X / Bilibili / Vimeo / Twitch / Reddit / TikTok / Instagram / Dailymotion / Facebook** `<iframe>` | 列出来 + **橙色"🔗 解析直链"按钮**,用户主动点击触发 yt-dlp opt-in 解析(见下文 §2.6) |
+| 页面里是 **YouTube / X / Bilibili / Vimeo / Twitch / Reddit / TikTok / Instagram / Dailymotion / Facebook** `<iframe>` | 列出来 + **嗅探完成后自动后台批量解析直链**(yt-dlp 已随包分发,开箱即用,见 §2.6);成功后卡片左下显绿色 `✓ 已解析` chip |
 | 页面里是其他 `<iframe>` 播放器(Wistia / Brightcove / Streamable / TED 等) | 列出来 + 黄色徽章 "嵌入 · 无法直抓" + 禁用处理按钮 |
 | 页面只有 base64 video data URL | 不抓(本地大流量,价值低) |
 
-### 2.6 启用直链解析(opt-in,首次需下载 yt-dlp ~30 MB)
+### 2.6 直链解析(开箱即用,yt-dlp 已随包分发)
 
 > 详细见 [docs/embed-resolver.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/embed-resolver.md)。
 
 为了让 YouTube / X / Bilibili 等 iframe 视频也能进入处理链路,引入 **基于 [yt-dlp](https://github.com/yt-dlp/yt-dlp)(Unlicense,纯开源,无需注册 / 付费 API)的 resolver**。
 
-**opt-in 流程**(R-14):
+**bundled + 自动解析流程**(R-14):
 
-1. App 启动时**不会**自动下载 yt-dlp,也**不会**把 yt-dlp 二进制打进 dmg / installer
-2. 用户嗅探后看到 YouTube/X/B 站等卡片右下角橙色 `🔗 解析直链` 按钮
-3. 用户**主动点击** → 弹 `confirm()` 询问是否下载 yt-dlp
-4. 同意 → 下载到 `userData/bin/yt-dlp_<platform>` → 解析得到 mp4 直链 → 卡片左下显绿色 `✓ 已解析` chip
+1. App 打包时 `electron-builder.asarUnpack` 把 `node_modules/ytdlp-nodejs/bin/**` 镜像到 `app.asar.unpacked/`,**yt-dlp 二进制随 dmg/installer 一起分发**(平均 ~30 MB 包体增量,业界 Stacher / Cobalt 同类做法)
+2. App 启动时**不弹任何**安装确认弹窗,titlebar **没有** `yt-dlp 已就绪 / 未装` 状态徽章 —— 完全开箱即用
+3. 嗅探完成后 `App.tsx` `useEffect([result])` 自动批量调起 `resolveEmbed`,无需用户点按钮
+4. 卡片右下短暂显示蓝色 `⏳ 解析中…` tag,5-15 秒后变绿色 `✓ 已解析 · 720p` chip,自动加入 `selected` 集合
 5. 解析成功的 media 自动并入 processable 集合,后续走和普通 video 一样的下载 → ffmpeg → palette → gif → 压缩链路
-6. 失败(网络抖动 / yt-dlp 上游拒绝 / 直链过期)时 embed 卡片**保留**,用户可重试,**永不卡死**
+6. 失败(网络抖动 / yt-dlp 上游拒绝 / 直链过期)时 embed 卡片**保留**,卡片右下变 `↻ 重试解析` 小按钮,用户单击重试,**永不卡死**
 
 **已支持站点**:YouTube / X(Twitter) / Bilibili / Vimeo / Twitch / Reddit / TikTok / Instagram / Dailymotion / Facebook(yt-dlp 实际覆盖 1800+ 站,本仓 host 白名单做防御纵深)。
 
 **已知限制**:
 
 - **X/Twitter 部分推文**:yt-dlp 上游频繁拒绝(`No video could be found in this tweet`),需 cookies 才能解开,本仓暂不集成 cookies 上传 UI(隐私敏感)
-- **直链过期**:YouTube ~6h、B 站 ~6h;长时间不操作再批处理会 403,重新点"解析直链"即可
+- **直链过期**:YouTube ~6h、B 站 ~6h;长时间不操作再批处理会 403,单击 `↻ 重试解析` 即可
 - **YouTube 1080p+ 多为 DASH/HLS 分片**,被 `pickBestFormat` 过滤,fallback 到 720p 以下 progressive mp4(GIF 主诉求是小尺寸,影响可忽略)
+- **air-gapped 极端场景**:仅当 packaged binary 镜像被人为破坏 + 无网络兜底时才会触发失败兜底,生产环境基本不会出现
 
 ---
 
@@ -109,7 +110,7 @@ gif-toolkit/
 │   ├── compression-pipeline.md
 │   ├── ipc-contract.md
 │   ├── troubleshooting.md
-│   └── embed-resolver.md       # yt-dlp resolver 设计 / opt-in / e2e
+│   └── embed-resolver.md       # yt-dlp resolver 设计(随包分发 + 自动解析)/ e2e
 ├── harness/             ★ 工程级 Harness(规则 + 场景库 + checklist)
 │   ├── run-harness.md
 │   ├── rules/           # R-01..R-14 细化版
@@ -169,8 +170,7 @@ npm run package:win   # 打包成 nsis
 | `gif saved (X.XX MB <= 4.0MB (fallback))` | Phase C/D 命中 fallback | OK,degraded |
 | `gif over 4.0MB, marking skipped` | 兜底也压不下去 | UI 标 skipped,不输出 |
 | `[single] 已跳过(vimeo.com 嵌入,无法直接下载视频流)` | 用户点击了 iframe-embed 卡片的处理按钮(且未解析直链) | 静默跳过 + 写日志 |
-| `YT_DLP_NOT_INSTALLED` | resolver 触发但 yt-dlp 未装 | UI 弹 confirm 提示安装 |
-| `yt-dlp is currently being installed` | 安装途中重复点 install / uninstall / resolve | 互斥保护,提示稍候 |
+| `YT_DLP_UNAVAILABLE` | resolver 触发但 4 级 fallback 全部 miss + 网络下载失败(air-gapped) | embed 卡片保留 + 显示 `↻ 重试解析` 小按钮 |
 | `No video could be found in this tweet` | yt-dlp 上游对部分 X 推文拒绝 | embed 卡片保留,允许重试 |
 | `busy` | 后台已有任务在跑 | 提示用户先取消或等待 |
 
@@ -182,7 +182,7 @@ npm run package:win   # 打包成 nsis
 - 仅暴露白名单 IPC `window.giftk.*`(见 [docs/ipc-contract.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/ipc-contract.md))
 - 任何 URL 都只在本地处理,**不会上传到任何第三方服务器**
 - `sniff:url` 通道拒绝 `file://`、`javascript:` 等非 http(s) 协议
-- yt-dlp resolver:**用户主动同意**才下载二进制(默认不跑、不打包),解析直链时仅透传白名单 header(User-Agent / Referer / Origin / Accept-* / Range / X-CSRF-Token / X-Requested-With),禁止 Authorization / Cookie / Set-Cookie / Host 沿用
+- yt-dlp resolver:**二进制随安装包分发**(Unlicense 无合规风险),解析直链时仅透传白名单 header(User-Agent / Referer / Origin / Accept-* / Range / X-CSRF-Token / X-Requested-With),禁止 Authorization / Cookie / Set-Cookie / Host 沿用;log buffer 写入前 `redactUrls()` 脱敏 signed URL / token
 
 ---
 

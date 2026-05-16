@@ -20,22 +20,6 @@ const giftk = (typeof window !== 'undefined' ? window.giftk : undefined);
 
 const SNIFF_TIMEOUT_MS = 60_000;
 
-// Hosts the renderer's "解析直链" button is allowed to surface for. The main
-// process re-validates this list — this is purely a UX gate so the button
-// never appears for hosts yt-dlp can't handle.
-const RESOLVABLE_HOSTS = new Set<string>([
-  'youtube.com', 'youtu.be', 'm.youtube.com', 'music.youtube.com',
-  'twitter.com', 'x.com', 'mobile.twitter.com', 'video.twimg.com',
-  'bilibili.com', 'm.bilibili.com', 'b23.tv', 'player.bilibili.com', 'www.bilibili.com',
-  'vimeo.com', 'player.vimeo.com',
-  'twitch.tv', 'clips.twitch.tv', 'www.twitch.tv',
-  'reddit.com', 'v.redd.it',
-  'tiktok.com', 'www.tiktok.com',
-  'instagram.com', 'www.instagram.com',
-  'dailymotion.com', 'www.dailymotion.com',
-  'facebook.com', 'www.facebook.com', 'fb.watch'
-]);
-
 const App: React.FC = () => {
   const [url, setUrl] = useState('');
   const [urlError, setUrlError] = useState<string | null>(null);
@@ -55,10 +39,7 @@ const App: React.FC = () => {
   const [processingOne, setProcessingOne] = useState<Set<string>>(new Set());
   const [resolvedMap, setResolvedMap] = useState<Record<string, ResolvedMedia>>({});
   const [resolvingSet, setResolvingSet] = useState<Set<string>>(new Set());
-  const [ytdlpReady, setYtdlpReady] = useState<boolean>(false);
-  const [ytdlpVersion, setYtdlpVersion] = useState<string>('');
-  const [ytdlpInstalling, setYtdlpInstalling] = useState<boolean>(false);
-  const [ytdlpInstallError, setYtdlpInstallError] = useState<string>('');
+  const [resolveErrorMap, setResolveErrorMap] = useState<Record<string, string>>({});
 
   const sniffReqId = useRef(0);
   const previewReqId = useRef(0);
@@ -81,36 +62,10 @@ const App: React.FC = () => {
     const off3 = giftk.onSniffProgress((p) => {
       setSniffProgress(p);
     });
-    let off4: (() => void) | null = null;
-    if (giftk.onResolveInstallProgress) {
-      off4 = giftk.onResolveInstallProgress((p) => {
-        if (p.stage === 'starting') {
-          setYtdlpInstalling(true);
-          setYtdlpInstallError('');
-        } else if (p.stage === 'done') {
-          setYtdlpInstalling(false);
-          setYtdlpReady(true);
-          if (p.version) setYtdlpVersion(p.version);
-        } else if (p.stage === 'error') {
-          setYtdlpInstalling(false);
-          setYtdlpInstallError(p.error || 'install failed');
-        }
-      });
-    }
-    if (giftk.checkYtdlp) {
-      giftk.checkYtdlp().then((s) => {
-        setYtdlpReady(!!s.installed);
-        if (s.version) setYtdlpVersion(s.version);
-      }).catch(() => { /* ignore */ });
-    }
     return () => {
       off1();
       off2();
       off3();
-      if (off4) {
-        off4();
-        off4 = null;
-      }
     };
   }, []);
 
@@ -141,6 +96,7 @@ const App: React.FC = () => {
     setPreview(null);
     setResolvedMap({});
     setResolvingSet(new Set());
+    setResolveErrorMap({});
 
     let finished = false;
     const timeout = setTimeout(() => {
@@ -328,28 +284,6 @@ const App: React.FC = () => {
     void onProcessOne(m);
   }, [items, onProcessOne]);
 
-  const onInstallYtdlp = useCallback(async () => {
-    if (!giftk?.installYtdlp) return;
-    // The 'installing' flag is driven by the 'resolve:install-progress' event
-    // (single source of truth) — see useEffect above. We only seed it here so
-    // the UI reacts instantly even if the 'starting' event has not yet
-    // arrived (event-vs-await race), and we deliberately do NOT clear it in
-    // the finally block (the 'done'/'error' event will).
-    setYtdlpInstalling(true);
-    setYtdlpInstallError('');
-    try {
-      const s = await giftk.installYtdlp();
-      setYtdlpReady(!!s.installed);
-      if (s.version) setYtdlpVersion(s.version);
-      setLogs((prev) => [...prev, `[ytdlp] installed: ${s.binaryPath} (${s.version || 'unknown version'})`].slice(-300));
-    } catch (e) {
-      const msg = (e as Error).message || '';
-      setYtdlpInstallError(msg);
-      setYtdlpInstalling(false);
-      setLogs((prev) => [...prev, `[ytdlp] install failed: ${msg}`].slice(-300));
-    }
-  }, []);
-
   const onResolveEmbedById = useCallback(async (id: string) => {
     if (!giftk?.resolveEmbed) return;
     const m = items.find((i) => i.id === id);
@@ -358,27 +292,12 @@ const App: React.FC = () => {
     if (resolvedMap[id]) return;
     if (resolvingSet.has(id)) return;
 
-    // First-time gate: confirm + install yt-dlp if not present.
-    if (!ytdlpReady) {
-      const ok = window.confirm(
-        `解析直链需要下载 yt-dlp 二进制(开源,MIT License)到本机用户数据目录。\n\n` +
-        `· 不会写入安装目录,不会上传任何信息\n` +
-        `· 仅在你点击"解析直链"时使用,不会自动启动\n\n` +
-        `继续下载?`
-      );
-      if (!ok) return;
-      try {
-        await onInstallYtdlp();
-      } catch { /* error already logged */ }
-      const ready = await giftk.checkYtdlp?.().then((s) => !!s.installed).catch(() => false);
-      if (!ready) {
-        setLogs((prev) => [...prev, `[resolve] yt-dlp 未就绪,已取消解析`].slice(-300));
-        return;
-      }
-    }
-
     setResolvingSet((prev) => {
       const n = new Set(prev); n.add(id); return n;
+    });
+    setResolveErrorMap((prev) => {
+      if (!prev[id]) return prev;
+      const n = { ...prev }; delete n[id]; return n;
     });
     setLogs((prev) => [...prev, `[resolve] ${m.embedHost} ← ${m.pageUrl}`].slice(-300));
     try {
@@ -391,18 +310,35 @@ const App: React.FC = () => {
       setLogs((prev) => [...prev, `[resolve] ✓ ${r.qualityLabel || ''} ${r.width || '?'}x${r.height || '?'} (${r.extractor || 'ytdlp'})`].slice(-300));
     } catch (e) {
       const msg = (e as Error).message || '';
-      if (msg === 'YT_DLP_NOT_INSTALLED') {
-        setLogs((prev) => [...prev, `[resolve] yt-dlp 不在,请先安装`].slice(-300));
-        setYtdlpReady(false);
-      } else {
-        setLogs((prev) => [...prev, `[resolve] 失败: ${msg}`].slice(-300));
-      }
+      const display = msg === 'YT_DLP_UNAVAILABLE'
+        ? 'yt-dlp 不可用(可能离线且本地无缓存),稍后再试'
+        : msg;
+      setResolveErrorMap((prev) => ({ ...prev, [id]: display }));
+      setLogs((prev) => [...prev, `[resolve] 失败: ${display}`].slice(-300));
     } finally {
       setResolvingSet((prev) => {
         const n = new Set(prev); n.delete(id); return n;
       });
     }
-  }, [items, resolvedMap, resolvingSet, ytdlpReady, onInstallYtdlp]);
+  }, [items, resolvedMap, resolvingSet]);
+
+  // Auto-batch-resolve: whenever the sniff result changes, kick off resolve
+  // for every embed that still needs one. Concurrency is bounded inside the
+  // main process resolver (yt-dlp is already CPU-bound), so we just fire all
+  // pending IDs and let the resolver coalesce.
+  useEffect(() => {
+    if (!result || result.items.length === 0) return;
+    const pending = result.items.filter(
+      (m) => m.requiresExternalDownload && !resolvedMap[m.id] && !resolvingSet.has(m.id) && !resolveErrorMap[m.id]
+    );
+    for (const m of pending) {
+      void onResolveEmbedById(m.id);
+    }
+    // Intentionally don't depend on resolvedMap/resolvingSet to avoid an
+    // immediate re-fire on every state delta — onResolveEmbedById's own
+    // guards are enough.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [result]);
 
   const isResolving = useCallback((id: string): boolean => resolvingSet.has(id), [resolvingSet]);
 
@@ -458,18 +394,6 @@ const App: React.FC = () => {
         <h1>Gif Toolkit · 网页媒体一站式抓取与转换</h1>
         <div className="spacer" />
         <div className="actions">
-          <span
-            className={`ytdlp-chip ${ytdlpReady ? 'ready' : 'missing'}`}
-            title={
-              ytdlpReady
-                ? `yt-dlp 已就绪${ytdlpVersion ? ' · ' + ytdlpVersion : ''} · 用于解析嵌入视频(YouTube/X/B 站等)`
-                : ytdlpInstallError
-                  ? `yt-dlp 安装失败: ${ytdlpInstallError}`
-                  : '未安装 yt-dlp,需要时再下载(用于解析嵌入视频直链)'
-            }
-          >
-            {ytdlpInstalling ? '⬇ yt-dlp 安装中…' : ytdlpReady ? '✓ yt-dlp' : '⚠ yt-dlp 未装'}
-          </span>
           <button onClick={onPickDir}>{baseOutputDir ? `根目录: ${shortDir(baseOutputDir)}` : '选择输出目录'}</button>
           <button onClick={onOpenOutput} disabled={!(lastBatchDir || outputDir)}>
             {lastBatchDir ? '打开本次目录' : '打开目录'}
@@ -561,9 +485,9 @@ const App: React.FC = () => {
                 onOpen={openCard}
                 onProcessOne={onProcessOneById}
                 isProcessing={isProcessingOne}
-                onResolveEmbed={onResolveEmbedById}
+                onRetryResolve={onResolveEmbedById}
                 isResolving={isResolving}
-                resolvableHosts={RESOLVABLE_HOSTS}
+                resolveErrorMap={resolveErrorMap}
               />
             </div>
           </div>

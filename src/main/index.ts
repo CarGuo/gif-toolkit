@@ -14,8 +14,6 @@ import {
   resolveEmbed,
   isResolvable,
   checkYtdlp,
-  installYtdlp,
-  uninstallYtdlp,
   YtDlpNotInstalledError
 } from './resolver';
 
@@ -403,53 +401,8 @@ ipcMain.handle('app:defaultDir', async () => {
 
 /* ----------------------- Resolver IPC (yt-dlp) ----------------------- */
 
-let installInflight: Promise<unknown> | null = null;
-
 ipcMain.handle('resolve:checkYtdlp', async () => {
   return checkYtdlp();
-});
-
-ipcMain.handle('resolve:installYtdlp', async () => {
-  if (installInflight) {
-    // Coalesce concurrent installs from the renderer (e.g. user double-clicks).
-    return installInflight;
-  }
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('resolve:install-progress', { stage: 'starting', percent: 0 });
-  }
-  installInflight = (async () => {
-    try {
-      const status = await installYtdlp();
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('resolve:install-progress', {
-          stage: 'done',
-          percent: 100,
-          version: status.version
-        });
-      }
-      return status;
-    } catch (e) {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('resolve:install-progress', {
-          stage: 'error',
-          percent: 100,
-          error: (e as Error).message
-        });
-      }
-      throw e;
-    } finally {
-      installInflight = null;
-    }
-  })();
-  return installInflight;
-});
-
-ipcMain.handle('resolve:uninstallYtdlp', async () => {
-  if (installInflight) {
-    throw new Error('cannot uninstall while installation is in progress');
-  }
-  await uninstallYtdlp();
-  return { ok: true };
 });
 
 ipcMain.handle('resolve:embed', async (_e, media: unknown) => {
@@ -462,16 +415,15 @@ ipcMain.handle('resolve:embed', async (_e, media: unknown) => {
   if (!isResolvable(m)) {
     throw new Error(`embed host not in resolver allow-list: ${m.embedHost || 'unknown'}`);
   }
-  if (installInflight) {
-    throw new Error('yt-dlp is currently being installed; please retry shortly');
-  }
   try {
     return await resolveEmbed(m);
   } catch (e) {
     if (e instanceof YtDlpNotInstalledError) {
-      // Surface this as a structured error so the renderer can prompt the user
-      // to install rather than printing the raw stack.
-      throw new Error('YT_DLP_NOT_INSTALLED');
+      // Bundled-by-default (R-14): the only way we hit this branch is an
+      // air-gapped machine whose packaged binary is missing AND who can't
+      // reach github releases for the fallback download. Surface a typed
+      // error so the renderer can show a per-card retry hint.
+      throw new Error('YT_DLP_UNAVAILABLE');
     }
     throw e;
   }

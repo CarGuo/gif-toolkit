@@ -5,9 +5,9 @@ import { log } from '../logger';
 /**
  * Resolver dispatcher. For now every supported host is delegated to yt-dlp,
  * which already covers YouTube / X / Bilibili / Vimeo / Twitch / Reddit /
- * 1800+ extractors. We keep the host whitelist explicit so the renderer's
- * "解析直链" button can never trigger yt-dlp on an arbitrary URL the user
- * pasted (defense in depth on top of R-14: opt-in only).
+ * 1800+ extractors. We keep the host whitelist explicit so resolver can
+ * never be triggered on an arbitrary URL the user pasted (defense in
+ * depth on top of R-14: bundled binary + auto-resolve).
  */
 
 const SUPPORTED_HOSTS = new Set<string>([
@@ -92,4 +92,4 @@ export async function resolveEmbed(media: SniffedMedia): Promise<ResolvedMedia> 
 }
 
 export { YtDlpNotInstalledError } from './ytdlp';
-export { ytdlpBinaryPath, checkYtdlp, installYtdlp, uninstallYtdlp } from './ytdlp';
+export { ytdlpBinaryPath, checkYtdlp, ensureYtdlp } from './ytdlp';

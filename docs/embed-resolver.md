@@ -1,7 +1,7 @@
 # 第三方播放器 → mp4 直链 resolver
 
 > 解决"YouTube / X / Bilibili 视频嗅探出来后无法处理"的场景。
-> 关联规则：[R-14](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-14-resolver-opt-in.md)
+> 关联规则：[R-14](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-14-resolver-bundled.md)
 
 ---
 
@@ -23,38 +23,58 @@
 |---|---|---|---|---|
 | **yt-dlp** (binary, ~30 MB) | **1800+** | 极活跃（每周更新） | ❌ Unlicense，无需注册 | ✅ |
 | youtube-dl | ~600 | 已停滞 | ❌ | ❌ 弃用 |
+| @distube/ytdl-core / play-dl (纯 JS) | 仅 YouTube | cipher 经常失效 | ❌ | ❌ 不稳定 |
 | RapidAPI / Twitter API | 有限 | 商业 | ✅ 需要 API Key + 付费 | ❌ |
 | 自实现各家 internal API 嗅探 | 极有限 | 不稳定 | ❌ | ❌ 维护成本高 |
 
 `ytdlp-nodejs@^3.4.4` 提供：
-- `helpers.downloadYtDlp(dir)` — 按平台下载 yt-dlp 二进制到指定目录，返回最终路径
+- `helpers.downloadYtDlp(dir)` — 按平台下载 yt-dlp 二进制到指定目录，返回最终路径（仅作为 air-gapped 兜底）
+- `helpers.BIN_DIR` — npm 包内置默认目录（`node_modules/ytdlp-nodejs/bin/`）
 - `new YtDlp({ binaryPath }).getInfoAsync(url)` — 调 yt-dlp `--dump-single-json --flat-playlist` 拿 VideoInfo
 - `VideoInfo.formats[]` — 所有可用格式，含 `url`, `protocol`, `vcodec`, `acodec`, `ext`, `width`, `height`, `tbr`, `format_note`, `http_headers`
 
 ---
 
-## 3. 整体架构
+## 3. 整体架构（开箱即用 / bundled 模型）
 
 ```
+┌─ 打包阶段（electron-builder） ────────────────────────┐
+│ asarUnpack: node_modules/ytdlp-nodejs/bin/**          │
+│   → app.asar.unpacked/.../bin/yt-dlp_<platform>       │
+│ build.files 不再排除 yt-dlp bin                       │
+└───────────────────────────────────────────────────────┘
+                        │
+                        ▼
 ┌─ Renderer ────────────────────────────────────────────┐
 │ App.tsx                                               │
+│   useEffect([result])                                 │
+│     pending = items.filter(requiresExternal           │
+│       && !resolved && !resolving && !errored)         │
+│     for (m of pending) onResolveEmbedById(m.id)       │
+│     —— 嗅探完成 → 自动批量解析（无 confirm/install）  │
 │   onResolveEmbedById(id)                              │
-│     1. confirm()  ← 用户主动同意                      │
-│     2. installYtdlp()  ← 首次才走这步                 │
-│     3. resolveEmbed(media)  ← 真正解析               │
-│     4. resolvedMap[id] = ResolvedMedia                │
+│     1. resolveEmbed(media)（直接调，无 install 步骤） │
+│     2. 成功 → resolvedMap[id] = ResolvedMedia        │
+│     3. 失败 → resolveErrorMap[id] = redacted msg     │
 │ MediaGrid                                             │
-│   canResolve = isEmbed && !isResolved && hostMatch    │
-│   isResolved → 卡片左下绿色 ✓ 已解析 chip            │
+│   resolved → ✓ 已解析 chip（绿色）                    │
+│   resolving → ⏳ 解析中… tag（蓝色）                  │
+│   errored  → ↻ 重试解析 小按钮（琥珀色，仅失败显示） │
 │   processable filter: !requiresExternal || resolved   │
 └───────────────────────┬───────────────────────────────┘
                         │ IPC (contextBridge)
+                        │ resolve:checkYtdlp / resolve:embed
                         ▼
 ┌─ Main (Node) ─────────────────────────────────────────┐
-│ resolve:checkYtdlp / installYtdlp / uninstallYtdlp    │
 │ resolve:embed                                         │
 │   sanitizeMedia → isResolvable(host allow-list)       │
 │   resolveEmbed(media)                                 │
+│     ensureYtdlp() ← 四级 fallback 找 binary          │
+│       1. app.asar.unpacked/.../bin/<name>（生产）    │
+│       2. node_modules/ytdlp-nodejs/bin/<name>（dev）  │
+│       3. helpers.BIN_DIR（npm 包内置）                │
+│       4. userData/bin/<name>（老版本遗留）            │
+│       5. helpers.downloadYtDlp(userData/bin)（兜底）  │
 │     ← media.url（iframe src，不是 pageUrl）          │
 │     pickBestFormat: 排除 m3u8/dash/mhtml             │
 │     sanitizeHeaders: 白名单                          │
@@ -77,14 +97,17 @@
 
 ## 4. 关键不变量
 
-### 4.1 opt-in（R-14）
+### 4.1 随包分发 + 自动解析（R-14）
 
-| 阶段 | 自动调用 | resolver 触发 |
+| 阶段 | 行为 | resolver 触发 |
 |---|---|---|
-| 启动 | `checkYtdlp()`（仅 stat，不联网） | ❌ 不会 |
+| 打包 | `electron-builder.asarUnpack` 包含 `node_modules/ytdlp-nodejs/bin/**`，binary 进 dmg/installer | — |
+| 启动 | `checkYtdlp()` 仅作诊断 IPC 暴露，UI 默认不消费 | ❌ 不会 |
 | 嗅探 | sniffer 仅打 `requiresExternalDownload: true` 标记 | ❌ 不会 |
-| 用户点击"解析直链" | confirm → install（首次）→ resolve | ✅ 唯一入口 |
-| 打包阶段 | `electron-builder.files` 排除 `node_modules/ytdlp-nodejs/bin/**` | ❌ 不进 dmg/exe |
+| 嗅探完成 | `App.tsx` `useEffect([result])` 自动批量调起 `resolveEmbed` | ✅ 自动 |
+| 用户重试 | 失败卡片显示 `↻ 重试解析` 按钮 | ✅ 用户单击单个重试 |
+
+**已删除概念**：`installYtdlp` / `uninstallYtdlp` IPC、`onResolveInstallProgress` 事件、`ytdlp-chip` 状态徽章、确认下载二进制的 `confirm()` 弹窗、橙色 `🔗 解析直链` 按钮。
 
 ### 4.2 安全防御纵深
 
@@ -92,8 +115,8 @@
 
 | 层 | 文件 | 校验 |
 |---|---|---|
-| Renderer | [App.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/App.tsx) RESOLVABLE_HOSTS | host 在白名单才显示按钮 |
-| Renderer | [MediaGrid.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/MediaGrid.tsx) `canResolve` | 二次 host 校验 |
+| Renderer | [App.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/App.tsx) `useEffect([result])` | resolveErrorMap 守卫，避免重复触发 |
+| Renderer | [MediaGrid.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/MediaGrid.tsx) | resolving / resolved / errored 三态正交 |
 | Preload | [preload/index.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/preload/index.ts) ensureObject | 拒绝非对象 payload |
 | Main IPC | [main/index.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/index.ts) `sanitizeMedia` | embedHost 限 `[a-z0-9.-]{<=64}` |
 | Main IPC | [main/index.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/index.ts) `isResolvable` | host allow-list 三次校验 |
@@ -104,7 +127,7 @@
 
 ### 4.3 失败兜底（[SC-15](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-15-resolver-failure-fallback.md)）
 
-任意环节失败 → embed 卡片保留 + 用户可重试，**永不卡死**。
+任意环节失败 → embed 卡片保留 + 用户可重试，**永不卡死**。`resolveErrorMap` 防止 useEffect 无限循环。
 
 ---
 
@@ -125,7 +148,7 @@
 | Dailymotion | dailymotion.com | |
 | Facebook | facebook.com / fb.watch | 公开视频可解析 |
 
-未列入 `SUPPORTED_HOSTS` 的 host 即使 yt-dlp 支持也不会暴露按钮 —— 防御纵深。
+未列入 `SUPPORTED_HOSTS` 的 host 即使 yt-dlp 支持也不会触发自动解析 —— 防御纵深。
 
 ---
 
@@ -139,28 +162,18 @@ npm run typecheck  # tsc --noEmit (main + renderer)
 npm run build      # vite build + tsc -p tsconfig.main.json
 ```
 
-### 6.2 真实 e2e
+### 6.2 真实 e2e（resolver 层级）
 
-`/tmp/giftk-resolver-e2e.js` 不依赖 Electron / IPC，直接调 ytdlp-nodejs：
-
-```bash
-node /tmp/giftk-resolver-e2e.js
-```
-
-预期输出：
+可直接在 main 进程层用 `new YtDlp({ binaryPath: ensureYtdlp() }).getInfoAsync(url)` 探测 YouTube + Bilibili 两个 must-pass case：
 
 ```
-[setup] yt-dlp at /tmp/giftk-e2e-bin/yt-dlp_macos
 [case*] YouTube    https://www.youtube.com/watch?v=jNQXAC9IVRw ... OK 206 240p 320x240 mp4
 [case*] Bilibili   https://www.bilibili.com/video/BV1GJ411x7h7 ... OK 206  852x480 mp4
 [case ] Twitter/X  https://x.com/NASAPersevere/status/... ... INFO-ERROR No video could be found
-
-[e2e] must-pass failures: 0, informational failures: 1
-[e2e] PASSED
 ```
 
 含两类用例：
-- **must-pass** (`*`)：YouTube + Bilibili — 必须通过，否则 e2e exit 1
+- **must-pass** (`*`)：YouTube + Bilibili — 必须通过
 - **informational**：X/Twitter — yt-dlp 上游对未授权访问的限制，UI 必须能兜底（[SC-15](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-15-resolver-failure-fallback.md)）
 
 ### 6.3 探测请求语义
@@ -182,9 +195,9 @@ e2e 不真正下载完整文件，只发 `Range: bytes=0-1023` 探测前 1 KB：
 
 1. **X/Twitter 部分推文**：yt-dlp 上游频繁拒绝（`No video could be found in this tweet`），需用户手动配 cookies 或换站。本仓不集成 cookies 上传 UI（隐私敏感），后续可考虑读浏览器 cookies。
 2. **YouTube 1080p+ 多为 DASH**：被 `pickBestFormat` 过滤，最终 fallback 到 720p 以下 progressive mp4。GIF 主要诉求是小尺寸，影响可忽略。
-3. **直链过期**：YouTube ~6h、B 站 ~6h、X ~24h。用户长时间不操作后再次"开始批处理"会 403，重新点"解析直链"即可。
+3. **直链过期**：YouTube ~6h、B 站 ~6h、X ~24h。用户长时间不操作后再次"开始批处理"会 403，单击 `↻ 重试解析` 即可。
 4. **Bilibili Referer**：必须透传 `Referer: https://www.bilibili.com/` 否则 CDN 403。`sanitizeHeaders` 已在白名单允许 Referer。
-5. **二进制下载源**：`helpers.downloadYtDlp` 走 [github.com/yt-dlp/yt-dlp/releases/latest](https://github.com/yt-dlp/yt-dlp/releases/latest)，国内网络可能慢/失败。后续可加镜像支持。
+5. **air-gapped 兜底**：当 4 级 fallback 全部 miss + 无网络时（人为破坏 packaged binary 镜像），`helpers.downloadYtDlp` 会失败；卡片显示 `↻ 重试解析`，用户联网后再点即可。
 
 ---
 
@@ -198,11 +211,11 @@ e2e 不真正下载完整文件，只发 `Range: bytes=0-1023` 探测前 1 KB：
 - [src/main/processor.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor.ts) embed-only check
 - [src/main/index.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/index.ts) `resolve:*` IPC
 - [src/preload/index.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/preload/index.ts) api 暴露
-- [src/renderer/App.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/App.tsx) `onResolveEmbedById`
-- [src/renderer/components/MediaGrid.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/MediaGrid.tsx) `canResolve` / `isResolved`
+- [src/renderer/App.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/App.tsx) `useEffect([result])` 自动批量解析
+- [src/renderer/components/MediaGrid.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/MediaGrid.tsx) 三态状态机
 
 文档：
-- [harness/rules/R-14-resolver-opt-in.md](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-14-resolver-opt-in.md)
+- [harness/rules/R-14-resolver-bundled.md](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-14-resolver-bundled.md)
 - [harness/scenarios/SC-13-resolver-opt-in.md](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-13-resolver-opt-in.md)
 - [harness/scenarios/SC-14-resolver-bilibili.md](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-14-resolver-bilibili.md)
 - [harness/scenarios/SC-15-resolver-failure-fallback.md](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-15-resolver-failure-fallback.md)

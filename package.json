@@ -57,7 +57,6 @@
     "files": [
       "dist/**/*",
       "node_modules/**/*",
-      "!node_modules/ytdlp-nodejs/bin/**",
       "package.json"
     ],
     "asarUnpack": [
@@ -66,7 +65,8 @@
       "node_modules/gifsicle/**",
       "node_modules/@img/**",
       "node_modules/sharp/**",
-      "node_modules/@ffprobe-installer/**"
+      "node_modules/@ffprobe-installer/**",
+      "node_modules/ytdlp-nodejs/bin/**"
     ],
     "mac": {
       "target": [

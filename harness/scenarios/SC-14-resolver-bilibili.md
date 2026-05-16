@@ -1,7 +1,7 @@
 # SC-14 — Bilibili 视频解析（resolver 主路径）
 
 > **来源**：用户最新一轮 "B 站视频，解析得到可以下载的 mp4 直链"。
-> **关联规则**：[R-14](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-14-resolver-opt-in.md)
+> **关联规则**：[R-14](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-14-resolver-bundled.md)
 
 ---
 
@@ -20,7 +20,7 @@
 ## 期望行为
 
 1. **白名单命中**：`isResolvable(media)` 检查 `embedHost` 命中 `SUPPORTED_HOSTS`（包含 `bilibili.com` / `b23.tv` / `player.bilibili.com`）
-2. **resolver 调用**：用户点击"解析直链"后：
+2. **resolver 调用**：嗅探完成后 `App.tsx useEffect([result])` 自动批量调起：
    - `resolveDirectUrl(media.url)` —— 注意是 `media.url`（iframe `src`），不是 `media.pageUrl`
    - yt-dlp 内部 dispatch 到 `BiliBili` extractor
    - `pickBestFormat()` 排除 `m3u8_native` / `http_dash_segments` / `mhtml`，选最高分辨率的 progressive mp4
@@ -61,7 +61,7 @@ node /tmp/giftk-resolver-e2e.js
 
 ## 关联规则
 
-- [R-14 resolver-opt-in](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-14-resolver-opt-in.md)
+- [R-14 resolver-bundled](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-14-resolver-bundled.md)
 - [docs/embed-resolver.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/embed-resolver.md)
 
 ---
