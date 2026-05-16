@@ -442,6 +442,67 @@ input[type="text"]:focus { border-color: var(--accent); }
   letter-spacing: 0.2px;
 }
 
+.card-resolve-btn {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 2;
+  background: linear-gradient(135deg, #f0a93b, #d97a2b);
+  border: none;
+  color: #1d1408;
+  font-size: 11.5px;
+  font-weight: 700;
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  pointer-events: auto;
+}
+.card-resolve-btn:hover { filter: brightness(1.1); }
+.card-resolve-btn.busy,
+.card-resolve-btn:disabled {
+  background: var(--panel-2);
+  color: var(--muted);
+  cursor: progress;
+}
+
+.card-resolved-tag {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  z-index: 2;
+  background: rgba(40, 110, 60, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: #d6ffd9;
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 4px 8px;
+  border-radius: 6px;
+  pointer-events: auto;
+  letter-spacing: 0.2px;
+}
+
+.ytdlp-chip {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 8px;
+  border-radius: 6px;
+  letter-spacing: 0.2px;
+  cursor: help;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  margin-right: 8px;
+}
+.ytdlp-chip.ready {
+  background: rgba(40, 110, 60, 0.55);
+  color: #d6ffd9;
+}
+.ytdlp-chip.missing {
+  background: rgba(120, 80, 30, 0.55);
+  color: #f5d97c;
+}
+
 .sniff-progress {
   margin-top: 10px;
   display: flex;

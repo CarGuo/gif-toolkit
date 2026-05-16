@@ -8,6 +8,14 @@ interface Props {
   onOpen: (id: string) => void;
   onProcessOne?: (id: string) => void;
   isProcessing?: (id: string) => boolean;
+  /** Triggered when the user clicks "解析直链" on an embed-only card. The
+   *  parent App is responsible for calling the resolver IPC and storing the
+   *  ResolvedMedia back into the item (so subsequent renders show ✓). */
+  onResolveEmbed?: (id: string) => void;
+  /** True while a resolve request is mid-flight for a given embed. */
+  isResolving?: (id: string) => boolean;
+  /** Allow-list of hosts the resolver can handle (renderer side gate). */
+  resolvableHosts?: Set<string>;
 }
 
 function fmtBytes(n?: number): string {
@@ -114,7 +122,7 @@ const Thumb: React.FC<{ media: SniffedMedia }> = ({ media }) => {
   );
 };
 
-export const MediaGrid: React.FC<Props> = ({ items, selected, onToggle, onOpen, onProcessOne, isProcessing }) => {
+export const MediaGrid: React.FC<Props> = ({ items, selected, onToggle, onOpen, onProcessOne, isProcessing, onResolveEmbed, isResolving, resolvableHosts }) => {
   if (items.length === 0) {
     return (
       <div className="media-grid empty">
@@ -122,6 +130,15 @@ export const MediaGrid: React.FC<Props> = ({ items, selected, onToggle, onOpen, 
       </div>
     );
   }
+  const isHostResolvable = (host?: string): boolean => {
+    if (!host) return false;
+    if (!resolvableHosts) return true; // unknown -> let main-process decide
+    if (resolvableHosts.has(host)) return true;
+    for (const known of resolvableHosts) {
+      if (host === known || host.endsWith('.' + known)) return true;
+    }
+    return false;
+  };
   return (
     <div className="media-grid">
       {items.map((m) => {
@@ -129,13 +146,22 @@ export const MediaGrid: React.FC<Props> = ({ items, selected, onToggle, onOpen, 
         const dim = m.width && m.height ? `${m.width}×${m.height}` : '';
         const dur = fmtDuration(m.durationSec);
         const isEmbed = !!m.requiresExternalDownload;
-        const canProcess = !!onProcessOne && (m.kind === 'video' || m.kind === 'gif') && !isEmbed;
+        const isResolved = !!m.resolved;
+        const canProcess = !!onProcessOne && (m.kind === 'video' || m.kind === 'gif') && (!isEmbed || isResolved);
+        const canResolve = isEmbed && !isResolved && !!onResolveEmbed && isHostResolvable(m.embedHost);
         const busy = !!isProcessing && isProcessing(m.id);
+        const resolving = !!isResolving && isResolving(m.id);
         const handleProcess = (e: React.SyntheticEvent) => {
           e.stopPropagation();
           e.preventDefault();
           if (!onProcessOne || busy) return;
           onProcessOne(m.id);
+        };
+        const handleResolve = (e: React.SyntheticEvent) => {
+          e.stopPropagation();
+          e.preventDefault();
+          if (!onResolveEmbed || resolving) return;
+          onResolveEmbed(m.id);
         };
         return (
           <div
@@ -186,14 +212,40 @@ export const MediaGrid: React.FC<Props> = ({ items, selected, onToggle, onOpen, 
                     }
                   }}
                 >
-                  {busy ? '处理中…' : '▶ 处理此项'}
+                  {busy ? '处理中…' : isResolved ? '▶ 处理(已解析)' : '▶ 处理此项'}
                 </button>
-              ) : isEmbed ? (
+              ) : canResolve ? (
+                <button
+                  type="button"
+                  className={`card-resolve-btn ${resolving ? 'busy' : ''}`}
+                  tabIndex={0}
+                  aria-label="解析直链"
+                  title={resolving ? '正在解析…' : `调用 yt-dlp 解析 ${m.embedHost} 的视频直链(用户主动触发)`}
+                  disabled={resolving}
+                  onClick={handleResolve}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      handleResolve(e);
+                    }
+                  }}
+                >
+                  {resolving ? '解析中…' : '🔗 解析直链'}
+                </button>
+              ) : isEmbed && !isResolved ? (
                 <span
                   className="card-embed-tag"
                   title={`视频由 ${m.embedHost || '第三方'} 嵌入(如 Vimeo/YouTube),无法直接抓取视频流。请到原页面获取 .mp4 直链后再回来嗅探。`}
                 >
                   {m.embedHost || '第三方'} 嵌入 · 无法直抓
+                </span>
+              ) : null}
+              {isResolved ? (
+                <span
+                  className="card-resolved-tag"
+                  title={`已解析 · ${m.resolved?.qualityLabel || ''} ${m.resolved?.extractor || ''}`}
+                >
+                  ✓ 已解析{m.resolved?.qualityLabel ? ` · ${m.resolved.qualityLabel}` : ''}
                 </span>
               ) : null}
             </div>

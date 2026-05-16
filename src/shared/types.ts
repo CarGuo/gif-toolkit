@@ -1,5 +1,23 @@
 export type MediaKind = 'video' | 'gif' | 'image';
 
+export interface ResolvedMedia {
+  /** Direct streamable URL (mp4/m4s/webm/etc) extracted by the resolver. */
+  url: string;
+  mime?: string;
+  /** Headers required by the CDN (e.g. Referer for Bilibili). Sanitised by main. */
+  headers?: Record<string, string>;
+  qualityLabel?: string;
+  width?: number;
+  height?: number;
+  durationSec?: number;
+  sizeBytes?: number;
+  /** Provider tag, currently always 'ytdlp'. */
+  source: 'ytdlp';
+  /** Extractor name reported by yt-dlp (e.g. "youtube", "twitter", "bilibili"). */
+  extractor?: string;
+  title?: string;
+}
+
 export interface SniffedMedia {
   id: string;
   url: string;
@@ -19,6 +37,10 @@ export interface SniffedMedia {
   /** Hostname of the embed provider (e.g. "vimeo.com", "youtube.com").
    *  Only set when `requiresExternalDownload` is true. */
   embedHost?: string;
+  /** Populated AFTER the user opts in to "解析直链". Once set, the embed
+   *  becomes a regular video task: processor downloads `resolved.url`
+   *  with `resolved.headers`. */
+  resolved?: ResolvedMedia;
 }
 
 export interface SniffResult {

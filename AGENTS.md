@@ -34,6 +34,7 @@
 | **R-11** | **preload 暴露的 API 必须白名单**;新增方法须同步更新 [src/preload/index.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/preload/index.ts) 和 [src/renderer/global.d.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/global.d.ts) | 否则 `window.giftk.foo` 在生产构建里就是 undefined | — |
 | **R-12** | **不要为了让一个测试通过就改测试,要改的是代码** | 全局 SOP | — |
 | **R-13** | **SPA / anti-bot 页面必须走「静态正则 → headless → CF challenge 报警」三级 fallback**:1) 规则 8 用宽松正则在 `<script>` JSON payload 里抽 player URL;2) `noMedia ‖ looksTooShort ‖ looksLikeCsr` 任一即触发 [headlessFetch](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/headlessFetch.ts);3) 命中 Turnstile / Just-a-moment 时显式 warning。同时 main 入口必须 `app.commandLine.appendSwitch('disable-quic')`,否则部分网络上 Chromium 会 ERR_CONNECTION_RESET。**任何 sniffer 改动都必须先用真实 OpenAI URL 跑通 e2e 才能交付** | 第 23 轮 "OpenAI 还是测试不出来,你不应该测试下这个嗅探成功了才交付吗?" | [extractFromHtml](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/sniffer.ts) 规则 8 + [headlessFetch.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/headlessFetch.ts) + [SC-07](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-07-spa-hydrated-iframe-fallback.md) |
+| **R-14** | **embed resolver 必须 opt-in,yt-dlp 二进制不打包**:1) 启动 / 嗅探阶段不得自动调用 resolver、不得自动下载 yt-dlp;2) 仅当用户主动点 MediaGrid 卡片"🔗 解析直链"按钮才链 `confirm()` → install → resolve;3) `electron-builder.files` 必须排除 `node_modules/ytdlp-nodejs/bin/**`;4) resolver 失败 / 上游拒绝时 embed 卡片必须保留(永不卡死);5) resolver target 必须是 `media.url`(iframe `src`),不是 `media.pageUrl`(文章页);6) header 沿用必须经白名单(User-Agent/Referer/Origin/Accept-*/Range/X-CSRF-Token/X-Requested-With),禁止 Authorization/Cookie/Set-Cookie/Host 沿用;7) log buffer 写入前必须 `redactUrls()` 脱敏。**改 resolver 必须先跑 `node /tmp/giftk-resolver-e2e.js` YouTube + Bilibili must-pass 全绿才能交付** | 第 26-28 轮 "YouTube/X/B 站解析直链特殊支持 + 必须开源不收费" | [resolver/ytdlp.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/resolver/ytdlp.ts) + [resolver/index.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/resolver/index.ts) + [SC-13](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-13-resolver-opt-in.md) / [SC-14](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-14-resolver-bilibili.md) / [SC-15](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-15-resolver-failure-fallback.md) |
 
 ---
 
@@ -85,6 +86,7 @@
 | Win 打 nsis | `npm run package:win` |
 | 探一下嗅探规则的命中(grep) | `grep -nE "video-tag\|source-tag\|iframe-embed" src/main/sniffer.ts` |
 | 看主进程二进制路径 | `node -e "require('./dist/main/binaries.js').printPaths?.()"` |
+| 真实 e2e(yt-dlp resolver) | `node /tmp/giftk-resolver-e2e.js` |
 
 ---
 
@@ -110,10 +112,11 @@
 - **[docs/compression-pipeline.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/compression-pipeline.md)** —— Phase A/B/C/D 压缩管线 & longSideFloor
 - **[docs/ipc-contract.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/ipc-contract.md)** —— preload 暴露的所有 IPC 方法及消息类型
 - **[docs/troubleshooting.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/troubleshooting.md)** —— 故障分类与对应规则
+- **[docs/embed-resolver.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/embed-resolver.md)** —— yt-dlp resolver 设计、opt-in 流程、e2e 验证
 - **[harness/](file:///Users/guoshuyu/workspace/gif-toolkit/harness)** —— 工程级 harness 规则与回归场景库
   - **[harness/run-harness.md](file:///Users/guoshuyu/workspace/gif-toolkit/harness/run-harness.md)** —— 怎么跑 harness
-  - **[harness/rules/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules)** —— R-01..R-13 的细化版,每条一个文件
-  - **[harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios)** —— SC-01..SC-07 已沉淀的回归场景
+  - **[harness/rules/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules)** —— R-01..R-14 的细化版,每条一个文件
+  - **[harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios)** —— SC-01..SC-15 已沉淀的回归场景
   - **[harness/checklists/pr-checklist.md](file:///Users/guoshuyu/workspace/gif-toolkit/harness/checklists/pr-checklist.md)** —— 改前自检清单
 
 ---
@@ -122,7 +125,7 @@
 
 > 复制以下清单粘到你 PR / 提交说明里,逐条打勾。
 
-- [ ] 我读了 AGENTS.md 第 1 节(R-01..R-13),没违反任何一条
+- [ ] 我读了 AGENTS.md 第 1 节(R-01..R-14),没违反任何一条
 - [ ] 我读了 [harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios),确认我的改动没有让任何已有 SC 失效
 - [ ] `npm run typecheck` 通过
 - [ ] `npm run lint` 通过(0 warning)

@@ -25,7 +25,8 @@
     "ffprobe-static": "^3.1.0",
     "gifsicle": "^4.0.1",
     "p-queue": "^6.6.2",
-    "sharp": "^0.33.5"
+    "sharp": "^0.33.5",
+    "ytdlp-nodejs": "^3.4.4"
   },
   "devDependencies": {
     "@types/node": "^20.14.10",
@@ -56,6 +57,7 @@
     "files": [
       "dist/**/*",
       "node_modules/**/*",
+      "!node_modules/ytdlp-nodejs/bin/**",
       "package.json"
     ],
     "asarUnpack": [
@@ -70,11 +72,17 @@
       "target": [
         {
           "target": "dmg",
-          "arch": ["x64", "arm64"]
+          "arch": [
+            "x64",
+            "arm64"
+          ]
         },
         {
           "target": "zip",
-          "arch": ["x64", "arm64"]
+          "arch": [
+            "x64",
+            "arm64"
+          ]
         }
       ],
       "category": "public.app-category.graphics-design"
@@ -83,7 +91,9 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     }

@@ -13,6 +13,10 @@ export interface DownloadOptions {
   signal?: AbortSignal;
   maxBytes?: number;
   onProgress?: (downloadedBytes: number, totalBytes: number | null) => void;
+  /** Extra headers, e.g. Referer required by Bilibili CDN. Caller is
+   *  responsible for sanitising them — main process IPC layer already does
+   *  this for renderer-supplied values. */
+  headers?: Record<string, string>;
 }
 
 export async function downloadToFile(
@@ -39,7 +43,8 @@ export async function downloadToFile(
     responseType: 'stream',
     headers: {
       'User-Agent': UA,
-      ...(opts.referer ? { Referer: opts.referer } : {})
+      ...(opts.referer ? { Referer: opts.referer } : {}),
+      ...(opts.headers || {})
     },
     timeout: 60000,
     maxRedirects: 5,

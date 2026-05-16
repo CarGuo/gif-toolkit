@@ -291,6 +291,24 @@ export interface GifConvertParams {
   speed?: number; // 1.0 = normal; 2.0 = 2x faster; 0.5 = half speed
   cropRect?: { x: number; y: number; w: number; h: number };
   statsMode?: 'diff' | 'full' | 'single';
+  /** Optional HTTP headers (e.g. Referer for Bilibili CDN). Used only when
+   *  `input` is an http(s) URL — ffmpeg's `-headers` flag is otherwise a
+   *  no-op for local files. */
+  headers?: Record<string, string>;
+}
+
+function buildHttpInputArgs(input: string, headers?: Record<string, string>): string[] {
+  if (!headers) return [];
+  if (!/^https?:/i.test(input)) return [];
+  const lines: string[] = [];
+  for (const [k, v] of Object.entries(headers)) {
+    if (typeof k !== 'string' || typeof v !== 'string') continue;
+    if (!/^[A-Za-z0-9-]+$/.test(k)) continue;
+    if (/[\r\n]/.test(v) || v.indexOf('\u0000') !== -1) continue;
+    lines.push(`${k}: ${v}`);
+  }
+  if (lines.length === 0) return [];
+  return ['-headers', lines.join('\r\n') + '\r\n'];
 }
 
 export async function videoToGifPalette(p: GifConvertParams, onLog?: (s: string) => void, signal?: AbortSignal): Promise<void> {
@@ -319,6 +337,7 @@ export async function videoToGifPalette(p: GifConvertParams, onLog?: (s: string)
     // GIF cover exactly p.durationSec of perceived motion (at speed=N), we read
     // p.durationSec * speed seconds from the source.
     const sourceDuration = String(Math.max(0.05, p.durationSec * speed));
+    const httpHeaderArgs = buildHttpInputArgs(p.input, p.headers);
 
     await run(
       ffmpeg,
@@ -331,6 +350,7 @@ export async function videoToGifPalette(p: GifConvertParams, onLog?: (s: string)
         String(p.startSec),
         '-t',
         sourceDuration,
+        ...httpHeaderArgs,
         '-i',
         p.input,
         '-an',
@@ -353,6 +373,7 @@ export async function videoToGifPalette(p: GifConvertParams, onLog?: (s: string)
         String(p.startSec),
         '-t',
         sourceDuration,
+        ...httpHeaderArgs,
         '-i',
         p.input,
         '-i',

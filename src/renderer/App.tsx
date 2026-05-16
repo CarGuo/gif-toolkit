@@ -6,7 +6,8 @@ import type {
   ProcessTask,
   PreviewResult,
   SniffProgress,
-  SniffedMedia
+  SniffedMedia,
+  ResolvedMedia
 } from '../shared/types';
 import { DEFAULT_OPTIONS } from '../shared/types';
 import { MediaGrid } from './components/MediaGrid';
@@ -18,6 +19,22 @@ import { LogBox } from './components/LogBox';
 const giftk = (typeof window !== 'undefined' ? window.giftk : undefined);
 
 const SNIFF_TIMEOUT_MS = 60_000;
+
+// Hosts the renderer's "解析直链" button is allowed to surface for. The main
+// process re-validates this list — this is purely a UX gate so the button
+// never appears for hosts yt-dlp can't handle.
+const RESOLVABLE_HOSTS = new Set<string>([
+  'youtube.com', 'youtu.be', 'm.youtube.com', 'music.youtube.com',
+  'twitter.com', 'x.com', 'mobile.twitter.com', 'video.twimg.com',
+  'bilibili.com', 'm.bilibili.com', 'b23.tv', 'player.bilibili.com', 'www.bilibili.com',
+  'vimeo.com', 'player.vimeo.com',
+  'twitch.tv', 'clips.twitch.tv', 'www.twitch.tv',
+  'reddit.com', 'v.redd.it',
+  'tiktok.com', 'www.tiktok.com',
+  'instagram.com', 'www.instagram.com',
+  'dailymotion.com', 'www.dailymotion.com',
+  'facebook.com', 'www.facebook.com', 'fb.watch'
+]);
 
 const App: React.FC = () => {
   const [url, setUrl] = useState('');
@@ -36,6 +53,12 @@ const App: React.FC = () => {
   const [preview, setPreview] = useState<PreviewResult | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [processingOne, setProcessingOne] = useState<Set<string>>(new Set());
+  const [resolvedMap, setResolvedMap] = useState<Record<string, ResolvedMedia>>({});
+  const [resolvingSet, setResolvingSet] = useState<Set<string>>(new Set());
+  const [ytdlpReady, setYtdlpReady] = useState<boolean>(false);
+  const [ytdlpVersion, setYtdlpVersion] = useState<string>('');
+  const [ytdlpInstalling, setYtdlpInstalling] = useState<boolean>(false);
+  const [ytdlpInstallError, setYtdlpInstallError] = useState<string>('');
 
   const sniffReqId = useRef(0);
   const previewReqId = useRef(0);
@@ -58,14 +81,44 @@ const App: React.FC = () => {
     const off3 = giftk.onSniffProgress((p) => {
       setSniffProgress(p);
     });
+    let off4: (() => void) | null = null;
+    if (giftk.onResolveInstallProgress) {
+      off4 = giftk.onResolveInstallProgress((p) => {
+        if (p.stage === 'starting') {
+          setYtdlpInstalling(true);
+          setYtdlpInstallError('');
+        } else if (p.stage === 'done') {
+          setYtdlpInstalling(false);
+          setYtdlpReady(true);
+          if (p.version) setYtdlpVersion(p.version);
+        } else if (p.stage === 'error') {
+          setYtdlpInstalling(false);
+          setYtdlpInstallError(p.error || 'install failed');
+        }
+      });
+    }
+    if (giftk.checkYtdlp) {
+      giftk.checkYtdlp().then((s) => {
+        setYtdlpReady(!!s.installed);
+        if (s.version) setYtdlpVersion(s.version);
+      }).catch(() => { /* ignore */ });
+    }
     return () => {
       off1();
       off2();
       off3();
+      if (off4) {
+        off4();
+        off4 = null;
+      }
     };
   }, []);
 
-  const items = useMemo(() => result?.items ?? [], [result]);
+  const items = useMemo(() => {
+    const raw = result?.items ?? [];
+    if (Object.keys(resolvedMap).length === 0) return raw;
+    return raw.map((m) => (resolvedMap[m.id] ? { ...m, resolved: resolvedMap[m.id] } : m));
+  }, [result, resolvedMap]);
   const activeMedia = useMemo(
     () => items.find((i) => i.id === activeId) ?? null,
     [items, activeId]
@@ -86,6 +139,8 @@ const App: React.FC = () => {
     setSelected(new Set());
     setActiveId(null);
     setPreview(null);
+    setResolvedMap({});
+    setResolvingSet(new Set());
 
     let finished = false;
     const timeout = setTimeout(() => {
@@ -160,7 +215,7 @@ const App: React.FC = () => {
   }, [activeMedia, options, outputDir]);
 
   const processable = useMemo(
-     () => items.filter((m) => selected.has(m.id) && (m.kind === 'video' || m.kind === 'gif') && !m.requiresExternalDownload),
+     () => items.filter((m) => selected.has(m.id) && (m.kind === 'video' || m.kind === 'gif') && (!m.requiresExternalDownload || !!m.resolved)),
      [items, selected]
   );
 
@@ -212,8 +267,8 @@ const App: React.FC = () => {
       setLogs((prev) => [...prev, `[single] 已跳过(image 不支持处理): ${media.url}`].slice(-300));
       return;
     }
-    if (media.requiresExternalDownload) {
-      setLogs((prev) => [...prev, `[single] 已跳过(${media.embedHost || '第三方'} 嵌入,无法直接下载视频流): ${media.url}`].slice(-300));
+    if (media.requiresExternalDownload && !media.resolved) {
+      setLogs((prev) => [...prev, `[single] 已跳过(${media.embedHost || '第三方'} 嵌入,未解析直链): ${media.url}`].slice(-300));
       return;
     }
     const dir = baseOutputDir || outputDir;
@@ -273,6 +328,84 @@ const App: React.FC = () => {
     void onProcessOne(m);
   }, [items, onProcessOne]);
 
+  const onInstallYtdlp = useCallback(async () => {
+    if (!giftk?.installYtdlp) return;
+    // The 'installing' flag is driven by the 'resolve:install-progress' event
+    // (single source of truth) — see useEffect above. We only seed it here so
+    // the UI reacts instantly even if the 'starting' event has not yet
+    // arrived (event-vs-await race), and we deliberately do NOT clear it in
+    // the finally block (the 'done'/'error' event will).
+    setYtdlpInstalling(true);
+    setYtdlpInstallError('');
+    try {
+      const s = await giftk.installYtdlp();
+      setYtdlpReady(!!s.installed);
+      if (s.version) setYtdlpVersion(s.version);
+      setLogs((prev) => [...prev, `[ytdlp] installed: ${s.binaryPath} (${s.version || 'unknown version'})`].slice(-300));
+    } catch (e) {
+      const msg = (e as Error).message || '';
+      setYtdlpInstallError(msg);
+      setYtdlpInstalling(false);
+      setLogs((prev) => [...prev, `[ytdlp] install failed: ${msg}`].slice(-300));
+    }
+  }, []);
+
+  const onResolveEmbedById = useCallback(async (id: string) => {
+    if (!giftk?.resolveEmbed) return;
+    const m = items.find((i) => i.id === id);
+    if (!m) return;
+    if (!m.requiresExternalDownload) return;
+    if (resolvedMap[id]) return;
+    if (resolvingSet.has(id)) return;
+
+    // First-time gate: confirm + install yt-dlp if not present.
+    if (!ytdlpReady) {
+      const ok = window.confirm(
+        `解析直链需要下载 yt-dlp 二进制(开源,MIT License)到本机用户数据目录。\n\n` +
+        `· 不会写入安装目录,不会上传任何信息\n` +
+        `· 仅在你点击"解析直链"时使用,不会自动启动\n\n` +
+        `继续下载?`
+      );
+      if (!ok) return;
+      try {
+        await onInstallYtdlp();
+      } catch { /* error already logged */ }
+      const ready = await giftk.checkYtdlp?.().then((s) => !!s.installed).catch(() => false);
+      if (!ready) {
+        setLogs((prev) => [...prev, `[resolve] yt-dlp 未就绪,已取消解析`].slice(-300));
+        return;
+      }
+    }
+
+    setResolvingSet((prev) => {
+      const n = new Set(prev); n.add(id); return n;
+    });
+    setLogs((prev) => [...prev, `[resolve] ${m.embedHost} ← ${m.pageUrl}`].slice(-300));
+    try {
+      const r = await giftk.resolveEmbed(m);
+      setResolvedMap((prev) => ({ ...prev, [id]: r }));
+      // Auto-select the now-resolved item so the user can immediately batch.
+      setSelected((prev) => {
+        const n = new Set(prev); n.add(id); return n;
+      });
+      setLogs((prev) => [...prev, `[resolve] ✓ ${r.qualityLabel || ''} ${r.width || '?'}x${r.height || '?'} (${r.extractor || 'ytdlp'})`].slice(-300));
+    } catch (e) {
+      const msg = (e as Error).message || '';
+      if (msg === 'YT_DLP_NOT_INSTALLED') {
+        setLogs((prev) => [...prev, `[resolve] yt-dlp 不在,请先安装`].slice(-300));
+        setYtdlpReady(false);
+      } else {
+        setLogs((prev) => [...prev, `[resolve] 失败: ${msg}`].slice(-300));
+      }
+    } finally {
+      setResolvingSet((prev) => {
+        const n = new Set(prev); n.delete(id); return n;
+      });
+    }
+  }, [items, resolvedMap, resolvingSet, ytdlpReady, onInstallYtdlp]);
+
+  const isResolving = useCallback((id: string): boolean => resolvingSet.has(id), [resolvingSet]);
+
   const onOpenOutput = useCallback(() => {
     if (!giftk) return;
     const target = lastBatchDir || outputDir;
@@ -325,6 +458,18 @@ const App: React.FC = () => {
         <h1>Gif Toolkit · 网页媒体一站式抓取与转换</h1>
         <div className="spacer" />
         <div className="actions">
+          <span
+            className={`ytdlp-chip ${ytdlpReady ? 'ready' : 'missing'}`}
+            title={
+              ytdlpReady
+                ? `yt-dlp 已就绪${ytdlpVersion ? ' · ' + ytdlpVersion : ''} · 用于解析嵌入视频(YouTube/X/B 站等)`
+                : ytdlpInstallError
+                  ? `yt-dlp 安装失败: ${ytdlpInstallError}`
+                  : '未安装 yt-dlp,需要时再下载(用于解析嵌入视频直链)'
+            }
+          >
+            {ytdlpInstalling ? '⬇ yt-dlp 安装中…' : ytdlpReady ? '✓ yt-dlp' : '⚠ yt-dlp 未装'}
+          </span>
           <button onClick={onPickDir}>{baseOutputDir ? `根目录: ${shortDir(baseOutputDir)}` : '选择输出目录'}</button>
           <button onClick={onOpenOutput} disabled={!(lastBatchDir || outputDir)}>
             {lastBatchDir ? '打开本次目录' : '打开目录'}
@@ -416,6 +561,9 @@ const App: React.FC = () => {
                 onOpen={openCard}
                 onProcessOne={onProcessOneById}
                 isProcessing={isProcessingOne}
+                onResolveEmbed={onResolveEmbedById}
+                isResolving={isResolving}
+                resolvableHosts={RESOLVABLE_HOSTS}
               />
             </div>
           </div>
@@ -437,7 +585,7 @@ const App: React.FC = () => {
           preview={preview}
           onClose={closeModal}
           onProcessOne={onProcessOne}
-          processOneDisabled={isProcessingOne(activeMedia.id) || activeMedia.kind === 'image' || !!activeMedia.requiresExternalDownload}
+          processOneDisabled={isProcessingOne(activeMedia.id) || activeMedia.kind === 'image' || (!!activeMedia.requiresExternalDownload && !activeMedia.resolved)}
         />
       ) : null}
     </div>

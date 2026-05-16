@@ -8,8 +8,16 @@ import { killAllProcs } from './ffmpeg';
 import { log } from './logger';
 import { printPaths } from './binaries';
 import { DEFAULT_OPTIONS } from '../shared/types';
-import type { ProcessOptions, ProcessTask, SniffedMedia } from '../shared/types';
+import type { ProcessOptions, ProcessTask, SniffedMedia, ResolvedMedia } from '../shared/types';
 import { isPrivateHost, safeName } from './helpers';
+import {
+  resolveEmbed,
+  isResolvable,
+  checkYtdlp,
+  installYtdlp,
+  uninstallYtdlp,
+  YtDlpNotInstalledError
+} from './resolver';
 
 // Some networks block UDP/QUIC which makes Chromium's TLS over QUIC fall back
 // to a hard ERR_CONNECTION_RESET on the headless sniffer fallback. Disabling
@@ -72,6 +80,58 @@ function assertOutputDir(p: unknown): string {
 
 /* ----------------------- Input sanitisers ----------------------- */
 
+// Mirror src/main/resolver/ytdlp.ts HEADER_ALLOWLIST — IPC payloads coming
+// back from the renderer must be subject to the same strict allow-list as
+// what we synthesise inside the resolver, so a compromised renderer cannot
+// inject Authorization / Host / Set-Cookie headers into the downloader.
+const RESOLVED_HEADER_ALLOWLIST = new Set<string>([
+  'user-agent', 'referer', 'origin',
+  'accept', 'accept-language', 'accept-encoding',
+  'range', 'x-csrf-token', 'x-requested-with'
+]);
+
+function sanitizeResolved(r: unknown): ResolvedMedia | undefined {
+  if (!r || typeof r !== 'object') return undefined;
+  const obj = r as Record<string, unknown>;
+  let url: string;
+  try { url = assertHttpUrl(obj.url); } catch { return undefined; }
+  const headers: Record<string, string> = {};
+  if (obj.headers && typeof obj.headers === 'object') {
+    for (const [k, v] of Object.entries(obj.headers as Record<string, unknown>)) {
+      if (typeof k !== 'string' || typeof v !== 'string') continue;
+      if (!/^[A-Za-z0-9-]+$/.test(k)) continue;
+      if (!RESOLVED_HEADER_ALLOWLIST.has(k.toLowerCase())) continue;
+      if (v.length > 1024) continue;
+      if (/[\r\n]/.test(v) || v.indexOf('\u0000') !== -1) continue;
+      headers[k] = v;
+    }
+  }
+  const num = (v: unknown): number | undefined =>
+    typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+  const str = (v: unknown, max = 200): string | undefined => {
+    if (typeof v !== 'string') return undefined;
+    const t = v.trim();
+    if (!t || t.length > max) return undefined;
+    if (/[\r\n]/.test(t) || t.indexOf('\u0000') !== -1) return undefined;
+    return t;
+  };
+  const source = obj.source === 'ytdlp' ? 'ytdlp' : undefined;
+  if (!source) return undefined;
+  return {
+    url,
+    mime: str(obj.mime, 100),
+    headers: Object.keys(headers).length > 0 ? headers : undefined,
+    qualityLabel: str(obj.qualityLabel, 60),
+    width: num(obj.width),
+    height: num(obj.height),
+    durationSec: num(obj.durationSec),
+    sizeBytes: num(obj.sizeBytes),
+    source,
+    extractor: str(obj.extractor, 60),
+    title: str(obj.title, 300)
+  };
+}
+
 function sanitizeMedia(m: unknown): SniffedMedia {
   if (!m || typeof m !== 'object') throw new Error('invalid media');
   const obj = m as Record<string, unknown>;
@@ -105,7 +165,8 @@ function sanitizeMedia(m: unknown): SniffedMedia {
       typeof obj.sizeBytes === 'number' && Number.isFinite(obj.sizeBytes) ? obj.sizeBytes : undefined,
     poster: typeof obj.poster === 'string' ? obj.poster : undefined,
     requiresExternalDownload: requiresExternalDownload || undefined,
-    embedHost
+    embedHost,
+    resolved: sanitizeResolved(obj.resolved)
   };
 }
 
@@ -338,6 +399,82 @@ ipcMain.handle('app:defaultDir', async () => {
   const d = defaultOutDir();
   if (d) allowedOutputDirs.add(d);
   return d;
+});
+
+/* ----------------------- Resolver IPC (yt-dlp) ----------------------- */
+
+let installInflight: Promise<unknown> | null = null;
+
+ipcMain.handle('resolve:checkYtdlp', async () => {
+  return checkYtdlp();
+});
+
+ipcMain.handle('resolve:installYtdlp', async () => {
+  if (installInflight) {
+    // Coalesce concurrent installs from the renderer (e.g. user double-clicks).
+    return installInflight;
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('resolve:install-progress', { stage: 'starting', percent: 0 });
+  }
+  installInflight = (async () => {
+    try {
+      const status = await installYtdlp();
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('resolve:install-progress', {
+          stage: 'done',
+          percent: 100,
+          version: status.version
+        });
+      }
+      return status;
+    } catch (e) {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('resolve:install-progress', {
+          stage: 'error',
+          percent: 100,
+          error: (e as Error).message
+        });
+      }
+      throw e;
+    } finally {
+      installInflight = null;
+    }
+  })();
+  return installInflight;
+});
+
+ipcMain.handle('resolve:uninstallYtdlp', async () => {
+  if (installInflight) {
+    throw new Error('cannot uninstall while installation is in progress');
+  }
+  await uninstallYtdlp();
+  return { ok: true };
+});
+
+ipcMain.handle('resolve:embed', async (_e, media: unknown) => {
+  // Reuse the same sanitiser the batch pipeline uses so the resolver only ever
+  // sees clean SniffedMedia objects (host already lower-cased + length-bounded).
+  const m = sanitizeMedia(media);
+  if (!m.requiresExternalDownload) {
+    throw new Error('media is not an embed (resolve:embed only works on embed-only items)');
+  }
+  if (!isResolvable(m)) {
+    throw new Error(`embed host not in resolver allow-list: ${m.embedHost || 'unknown'}`);
+  }
+  if (installInflight) {
+    throw new Error('yt-dlp is currently being installed; please retry shortly');
+  }
+  try {
+    return await resolveEmbed(m);
+  } catch (e) {
+    if (e instanceof YtDlpNotInstalledError) {
+      // Surface this as a structured error so the renderer can prompt the user
+      // to install rather than printing the raw stack.
+      throw new Error('YT_DLP_NOT_INSTALLED');
+    }
+    throw e;
+  }
 });
 
 /* ----------------------- App lifecycle ----------------------- */

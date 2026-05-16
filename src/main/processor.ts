@@ -633,14 +633,21 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
   const { media, options } = task;
 
   // Early-fail: embed-only media (Vimeo/YouTube/etc.) cannot be downloaded as
-  // a direct stream. The renderer already filters these out, but the main
-  // process is the security boundary — refuse here too in case a stale task
-  // payload slips past the UI guard.
-  if (media.requiresExternalDownload) {
+  // a direct stream UNLESS the renderer already opted in to "解析直链" and
+  // attached a `resolved` payload. The main process is the security boundary —
+  // refuse here too in case a stale task payload slips past the UI guard.
+  if (media.requiresExternalDownload && !media.resolved) {
     throw new Error(
       `embed-only media: cannot extract direct stream from ${media.embedHost || 'third-party player'}`
     );
   }
+
+  // When `media.resolved` is present, treat the resolved direct URL as the
+  // download source. For Bilibili CDNs we MUST also forward the resolver's
+  // headers (Referer, User-Agent) or the CDN returns HTTP 403.
+  const fetchUrl = media.resolved?.url || media.url;
+  const fetchHeaders = media.resolved?.headers;
+  const fetchReferer = media.resolved ? media.pageUrl : media.pageUrl;
 
   const work = path.join(getCacheDir(), safeMediaId(media.id));
   await ensureDir(work);
@@ -661,8 +668,9 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
   const sourcePath = path.join(work, localName);
   if (!(await fileExistsNonEmpty(sourcePath))) {
     let lastEmit = 0;
-    await downloadToFile(media.url, work, localName, {
-      referer: media.pageUrl,
+    await downloadToFile(fetchUrl, work, localName, {
+      referer: fetchReferer,
+      headers: fetchHeaders,
       signal,
       onProgress: (rec, total) => {
         const now = Date.now();

@@ -63,13 +63,37 @@ Phase D  兜底               (finalSide=longSideFloor,目标 maxBytes=4MB)
 - 渲染端实时收 `process:progress` IPC,带 `substep / detail / elapsedMs / stepIndex / totalSteps`
 - 单段最长 15s,超过自动分段(part1 / part2 …)
 
-### 2.5 第三方播放器嵌入(R-09)
+### 2.5 第三方播放器嵌入(R-09 / R-14)
 
 | 现象 | 行为 |
 |---|---|
 | 页面里是 `<video src=*.mp4>` | 正常嗅出,可直接处理 |
-| 页面里是 Vimeo / YouTube `<iframe>` | 列出来 + 标黄色徽章 "vimeo.com 嵌入 · 无法直抓" + 禁用处理按钮 + 提示用户去原页面取 .mp4 直链 |
+| 页面里是 **YouTube / X / Bilibili / Vimeo / Twitch / Reddit / TikTok / Instagram / Dailymotion / Facebook** `<iframe>` | 列出来 + **橙色"🔗 解析直链"按钮**,用户主动点击触发 yt-dlp opt-in 解析(见下文 §2.6) |
+| 页面里是其他 `<iframe>` 播放器(Wistia / Brightcove / Streamable / TED 等) | 列出来 + 黄色徽章 "嵌入 · 无法直抓" + 禁用处理按钮 |
 | 页面只有 base64 video data URL | 不抓(本地大流量,价值低) |
+
+### 2.6 启用直链解析(opt-in,首次需下载 yt-dlp ~30 MB)
+
+> 详细见 [docs/embed-resolver.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/embed-resolver.md)。
+
+为了让 YouTube / X / Bilibili 等 iframe 视频也能进入处理链路,引入 **基于 [yt-dlp](https://github.com/yt-dlp/yt-dlp)(Unlicense,纯开源,无需注册 / 付费 API)的 resolver**。
+
+**opt-in 流程**(R-14):
+
+1. App 启动时**不会**自动下载 yt-dlp,也**不会**把 yt-dlp 二进制打进 dmg / installer
+2. 用户嗅探后看到 YouTube/X/B 站等卡片右下角橙色 `🔗 解析直链` 按钮
+3. 用户**主动点击** → 弹 `confirm()` 询问是否下载 yt-dlp
+4. 同意 → 下载到 `userData/bin/yt-dlp_<platform>` → 解析得到 mp4 直链 → 卡片左下显绿色 `✓ 已解析` chip
+5. 解析成功的 media 自动并入 processable 集合,后续走和普通 video 一样的下载 → ffmpeg → palette → gif → 压缩链路
+6. 失败(网络抖动 / yt-dlp 上游拒绝 / 直链过期)时 embed 卡片**保留**,用户可重试,**永不卡死**
+
+**已支持站点**:YouTube / X(Twitter) / Bilibili / Vimeo / Twitch / Reddit / TikTok / Instagram / Dailymotion / Facebook(yt-dlp 实际覆盖 1800+ 站,本仓 host 白名单做防御纵深)。
+
+**已知限制**:
+
+- **X/Twitter 部分推文**:yt-dlp 上游频繁拒绝(`No video could be found in this tweet`),需 cookies 才能解开,本仓暂不集成 cookies 上传 UI(隐私敏感)
+- **直链过期**:YouTube ~6h、B 站 ~6h;长时间不操作再批处理会 403,重新点"解析直链"即可
+- **YouTube 1080p+ 多为 DASH/HLS 分片**,被 `pickBestFormat` 过滤,fallback 到 720p 以下 progressive mp4(GIF 主诉求是小尺寸,影响可忽略)
 
 ---
 
@@ -84,11 +108,12 @@ gif-toolkit/
 │   ├── sniffer-rules.md
 │   ├── compression-pipeline.md
 │   ├── ipc-contract.md
-│   └── troubleshooting.md
+│   ├── troubleshooting.md
+│   └── embed-resolver.md       # yt-dlp resolver 设计 / opt-in / e2e
 ├── harness/             ★ 工程级 Harness(规则 + 场景库 + checklist)
 │   ├── run-harness.md
-│   ├── rules/           # R-01..R-12 细化版
-│   ├── scenarios/       # SC-01..SC-06 已沉淀的回归场景
+│   ├── rules/           # R-01..R-14 细化版
+│   ├── scenarios/       # SC-01..SC-15 已沉淀的回归场景
 │   ├── checklists/
 │   └── regression/      # 回归 fixtures(URL / mhtml / 期望输出)
 ├── src/
@@ -143,7 +168,10 @@ npm run package:win   # 打包成 nsis
 | `gif saved (X.XX MB <= 2.0MB (best))` | Phase B 直接命中 softMaxBytes | OK,best target |
 | `gif saved (X.XX MB <= 4.0MB (fallback))` | Phase C/D 命中 fallback | OK,degraded |
 | `gif over 4.0MB, marking skipped` | 兜底也压不下去 | UI 标 skipped,不输出 |
-| `[single] 已跳过(vimeo.com 嵌入,无法直接下载视频流)` | 用户点击了 iframe-embed 卡片的处理按钮 | 静默跳过 + 写日志 |
+| `[single] 已跳过(vimeo.com 嵌入,无法直接下载视频流)` | 用户点击了 iframe-embed 卡片的处理按钮(且未解析直链) | 静默跳过 + 写日志 |
+| `YT_DLP_NOT_INSTALLED` | resolver 触发但 yt-dlp 未装 | UI 弹 confirm 提示安装 |
+| `yt-dlp is currently being installed` | 安装途中重复点 install / uninstall / resolve | 互斥保护,提示稍候 |
+| `No video could be found in this tweet` | yt-dlp 上游对部分 X 推文拒绝 | embed 卡片保留,允许重试 |
 | `busy` | 后台已有任务在跑 | 提示用户先取消或等待 |
 
 ---
@@ -154,6 +182,7 @@ npm run package:win   # 打包成 nsis
 - 仅暴露白名单 IPC `window.giftk.*`(见 [docs/ipc-contract.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/ipc-contract.md))
 - 任何 URL 都只在本地处理,**不会上传到任何第三方服务器**
 - `sniff:url` 通道拒绝 `file://`、`javascript:` 等非 http(s) 协议
+- yt-dlp resolver:**用户主动同意**才下载二进制(默认不跑、不打包),解析直链时仅透传白名单 header(User-Agent / Referer / Origin / Accept-* / Range / X-CSRF-Token / X-Requested-With),禁止 Authorization / Cookie / Set-Cookie / Host 沿用
 
 ---
 
@@ -161,8 +190,8 @@ npm run package:win   # 打包成 nsis
 
 请先读:
 
-1. [AGENTS.md](file:///Users/guoshuyu/workspace/gif-toolkit/AGENTS.md) — 12 条项目级硬规则 (R-01..R-12)
-2. [harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/) — 已知问题与对应回归
+1. [AGENTS.md](file:///Users/guoshuyu/workspace/gif-toolkit/AGENTS.md) — 14 条项目级硬规则 (R-01..R-14)
+2. [harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/) — 已知问题与对应回归(SC-01..SC-15)
 3. [harness/checklists/pr-checklist.md](file:///Users/guoshuyu/workspace/gif-toolkit/harness/checklists/pr-checklist.md) — 提交前自检
 
 只有这样,你的改动才不会"修一个 bug 引出三个老 bug"。
