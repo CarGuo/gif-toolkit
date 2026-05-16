@@ -16,6 +16,16 @@ interface RunOpts {
   signal?: AbortSignal;
 }
 
+// Local cancellation marker. processor.ts has its own CancelledError class,
+// but uses `isAbortError(e)` (which checks `e.name === 'CancelledError'`) so
+// any Error with that name is treated as a cancellation. Keep semantics
+// consistent with processor without creating a circular import.
+function makeCancelledError(): Error {
+  const e = new Error('cancelled');
+  e.name = 'CancelledError';
+  return e;
+}
+
 const liveProcs = new Set<ChildProcess>();
 
 export function killAllProcs(): void {
@@ -53,12 +63,12 @@ function run(cmd: string, args: string[], opts: RunOpts = {}): Promise<void> {
     if (opts.signal) {
       if (opts.signal.aborted) {
         try { child.kill('SIGKILL'); } catch { /* ignore */ }
-        settleReject(new Error('aborted'));
+        settleReject(makeCancelledError());
         return;
       }
       onAbort = () => {
         try { child.kill('SIGKILL'); } catch { /* ignore */ }
-        settleReject(new Error('aborted'));
+        settleReject(makeCancelledError());
       };
       opts.signal.addEventListener('abort', onAbort, { once: true });
     }
@@ -182,7 +192,9 @@ export async function extractFrameDataUrl(
   const signal = options.signal;
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
-      reject(new Error('aborted'));
+      const ce = new Error('cancelled');
+      ce.name = 'CancelledError';
+      reject(ce);
       return;
     }
     const child = spawn(
@@ -237,7 +249,11 @@ export async function extractFrameDataUrl(
     };
 
     if (signal) {
-      onAbort = () => failReject(new Error('aborted'));
+      onAbort = () => {
+        const ce = new Error('cancelled');
+        ce.name = 'CancelledError';
+        failReject(ce);
+      };
       signal.addEventListener('abort', onAbort, { once: true });
     }
 
@@ -286,12 +302,23 @@ export async function videoToGifPalette(p: GifConvertParams, onLog?: (s: string)
       ? `crop=${Math.max(2, Math.round(p.cropRect.w))}:${Math.max(2, Math.round(p.cropRect.h))}:${Math.max(
           0,
           Math.round(p.cropRect.x)
-        )}:${Math.max(0, Math.round(p.cropRect.y))},`
+        )}:${Math.max(0, Math.round(p.cropRect.y))}`
       : '';
-    const scaleFilter = p.width > 0 ? `scale=${p.width}:-2:flags=lanczos,` : '';
+    const scaleFilter = p.width > 0 ? `scale=${p.width}:-2:flags=lanczos` : '';
     const speed = p.speed && p.speed > 0 && p.speed !== 1 ? p.speed : 1;
-    const setptsFilter = speed !== 1 ? `setpts=PTS/${speed},` : '';
-    const baseFilter = `${setptsFilter}fps=${p.fps},${cropFilter}${scaleFilter}`;
+    const setptsFilter = speed !== 1 ? `setpts=PTS/${speed}` : '';
+    // Compose the base filter chain WITHOUT a trailing comma; consumers add
+    // their own separator. Empty parts are filtered out so we never emit an
+    // empty filter ("No such filter: ''").
+    const baseChain = [setptsFilter, `fps=${p.fps}`, cropFilter, scaleFilter]
+      .filter((s) => s.length > 0)
+      .join(',');
+
+    // -t at input level cuts SOURCE duration. setpts=PTS/speed compresses output
+    // PTS, so output duration = sourceDuration / speed. To make the resulting
+    // GIF cover exactly p.durationSec of perceived motion (at speed=N), we read
+    // p.durationSec * speed seconds from the source.
+    const sourceDuration = String(Math.max(0.05, p.durationSec * speed));
 
     await run(
       ffmpeg,
@@ -303,13 +330,13 @@ export async function videoToGifPalette(p: GifConvertParams, onLog?: (s: string)
         '-ss',
         String(p.startSec),
         '-t',
-        String(p.durationSec),
+        sourceDuration,
         '-i',
         p.input,
         '-an',
         '-sn',
         '-vf',
-        `${baseFilter}palettegen=stats_mode=${statsMode}`,
+        `${baseChain},palettegen=stats_mode=${statsMode}`,
         palette
       ],
       { onStderr: (s) => onLog?.(s.trim()), signal }
@@ -325,7 +352,7 @@ export async function videoToGifPalette(p: GifConvertParams, onLog?: (s: string)
         '-ss',
         String(p.startSec),
         '-t',
-        String(p.durationSec),
+        sourceDuration,
         '-i',
         p.input,
         '-i',
@@ -333,7 +360,7 @@ export async function videoToGifPalette(p: GifConvertParams, onLog?: (s: string)
         '-an',
         '-sn',
         '-lavfi',
-        `${baseFilter}[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle`,
+        `${baseChain}[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle`,
         p.output
       ],
       { onStderr: (s) => onLog?.(s.trim()), signal }
@@ -369,12 +396,12 @@ export async function gifsicleOptimize(
 }
 
 export async function imageResizeKeepAspect(input: string, output: string, targetWidth: number, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted) throw new Error('aborted');
+  if (signal?.aborted) throw makeCancelledError();
   await sharp(input, { animated: true })
     .resize({ width: targetWidth, withoutEnlargement: true })
     .gif()
     .toFile(output);
-  if (signal?.aborted) throw new Error('aborted');
+  if (signal?.aborted) throw makeCancelledError();
 }
 
 export function statSizeMB(p: string): Promise<number> {

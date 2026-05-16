@@ -42,6 +42,12 @@ const api = {
   async cancelAll(): Promise<void> {
     return ipcRenderer.invoke('process:cancelAll');
   },
+  async cancelSniff(): Promise<void> {
+    return ipcRenderer.invoke('sniff:cancel');
+  },
+  async getLogBuffer(): Promise<string[]> {
+    return ipcRenderer.invoke('app:logBuffer');
+  },
   async pickOutputDir(): Promise<string | null> {
     return ipcRenderer.invoke('app:pickDir');
   },

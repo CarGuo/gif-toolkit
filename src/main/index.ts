@@ -6,6 +6,7 @@ import { sniffPage } from './sniffer';
 import { previewMedia, startBatch, cancelAllTasks, prefetchThumbnail } from './processor';
 import { killAllProcs } from './ffmpeg';
 import { log } from './logger';
+import { printPaths } from './binaries';
 import { DEFAULT_OPTIONS } from '../shared/types';
 import type { ProcessOptions, ProcessTask, SniffedMedia } from '../shared/types';
 import { isPrivateHost, safeName } from './helpers';
@@ -81,6 +82,14 @@ function sanitizeMedia(m: unknown): SniffedMedia {
   if (kind !== 'video' && kind !== 'gif' && kind !== 'image') throw new Error('invalid media.kind');
   const pageUrl = obj.pageUrl ? assertHttpUrl(obj.pageUrl) : url;
   const source = obj.source as SniffedMedia['source'];
+  // Preserve embed-only flags so the main-process security boundary can refuse
+  // a task even if a stale renderer payload slips them past the UI guard.
+  const requiresExternalDownload = obj.requiresExternalDownload === true;
+  const embedHostRaw = typeof obj.embedHost === 'string' ? obj.embedHost.toLowerCase().trim() : undefined;
+  const embedHost =
+    embedHostRaw && /^[a-z0-9.-]+$/.test(embedHostRaw) && embedHostRaw.length <= 64
+      ? embedHostRaw
+      : undefined;
   return {
     id,
     url,
@@ -94,7 +103,9 @@ function sanitizeMedia(m: unknown): SniffedMedia {
       typeof obj.durationSec === 'number' && Number.isFinite(obj.durationSec) ? obj.durationSec : undefined,
     sizeBytes:
       typeof obj.sizeBytes === 'number' && Number.isFinite(obj.sizeBytes) ? obj.sizeBytes : undefined,
-    poster: typeof obj.poster === 'string' ? obj.poster : undefined
+    poster: typeof obj.poster === 'string' ? obj.poster : undefined,
+    requiresExternalDownload: requiresExternalDownload || undefined,
+    embedHost
   };
 }
 
@@ -200,13 +211,37 @@ async function createWindow(): Promise<void> {
 
 /* ----------------------- IPC handlers ----------------------- */
 
+let currentSniffCtrl: AbortController | null = null;
+
 ipcMain.handle('sniff:url', async (_e, url: unknown) => {
   const safe = assertHttpUrl(url);
-  return sniffPage(safe, (p) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('sniff:progress', p);
-    }
-  });
+  // Cancel any sniff that is still mid-flight before starting a new one.
+  if (currentSniffCtrl) {
+    try { currentSniffCtrl.abort(); } catch { /* ignore */ }
+  }
+  const ctrl = new AbortController();
+  currentSniffCtrl = ctrl;
+  try {
+    return await sniffPage(
+      safe,
+      (p) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('sniff:progress', p);
+        }
+      },
+      ctrl.signal
+    );
+  } finally {
+    if (currentSniffCtrl === ctrl) currentSniffCtrl = null;
+  }
+});
+
+ipcMain.handle('sniff:cancel', async () => {
+  if (currentSniffCtrl) {
+    try { currentSniffCtrl.abort(); } catch { /* ignore */ }
+    currentSniffCtrl = null;
+  }
+  return { ok: true };
 });
 
 ipcMain.handle('media:preview', async (_e, media: unknown, options: unknown) => {
@@ -271,7 +306,7 @@ ipcMain.handle('process:start', async (_e, payload: unknown) => {
 });
 
 ipcMain.handle('process:cancelAll', async () => {
-  cancelAllTasks();
+  await cancelAllTasks();
   return { ok: true };
 });
 
@@ -344,6 +379,11 @@ if (!gotLock) {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
     log('app ready');
+    try {
+      printPaths();
+    } catch (e) {
+      log(`binaries probe failed: ${(e as Error).message}`);
+    }
   });
 }
 
@@ -352,6 +392,9 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
-  cancelAllTasks();
+  // Fire-and-forget: cancelAllTasks is async but the lifecycle hook is sync.
+  // killAllProcs() is synchronous and ensures spawned children die before the
+  // process actually exits.
+  void cancelAllTasks();
   killAllProcs();
 });

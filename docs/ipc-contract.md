@@ -28,17 +28,19 @@
 
 | 通道 | 入参 | 出参 |
 |---|---|---|
-| `preview:run` | `media: SniffedMedia, opts: ProcessOptions` | `PreviewResult`(含帧 URL 数组) |
-| `thumbnail:get` | `media: SniffedMedia` | `ThumbnailResult` |
+| `media:preview` | `media: SniffedMedia, opts: ProcessOptions` | `PreviewResult`(含帧 URL 数组) |
+| `media:thumbnail` | `media: SniffedMedia` | `ThumbnailResult` |
 
 ### 2.3 处理 / 批处理
 
 | 通道 | 入参 | 出参 |
 |---|---|---|
-| `start:batch` | `tasks: ProcessTask[], title?: string` | `{ outputDir: string }` |
-| `cancel:all` | — | `void` |
-| `pick:outputDir` | — | `string \| null` |
-| `open:dir` | `dirPath: string` | `void` |
+| `process:start` | `{ tasks: ProcessTask[], pageTitle?: string }` | `BatchStartResult` |
+| `process:cancelAll` | — | `void` |
+| `app:pickDir` | — | `string \| null` |
+| `app:openDir` | `dirPath: string` | `void` |
+| `app:defaultDir` | — | `string` |
+| `app:logBuffer` | — | `string[]`(最近 500 行内存日志) |
 
 ### 2.4 推送(Main → Renderer)
 
@@ -46,7 +48,7 @@
 |---|---|---|
 | `process:progress` | `TaskProgress` | 每个 substep / 每秒~ |
 | `sniff:progress` | `SniffProgress` | 每 200ms~ |
-| `log:append` | `string` | 主进程日志 |
+| `app:log` | `string` | 主进程日志 |
 
 ---
 

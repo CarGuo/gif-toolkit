@@ -30,6 +30,11 @@ const MAX_CONCURRENCY = 8;
 let currentConcurrency = DEFAULT_CONCURRENCY;
 const queue = new PQueue({ concurrency: DEFAULT_CONCURRENCY });
 const activeAborts: Set<AbortController> = new Set();
+// Tracks the currently running batch (if any). cancelAllTasks awaits this so
+// that startBatch's "busy" check is race-free: the OLD batch must fully settle
+// (including in-flight ffmpeg/gifsicle child processes) before a new batch may
+// take its place.
+let activeBatchPromise: Promise<void> | null = null;
 
 function clampConcurrency(n: number | undefined): number {
   if (!Number.isFinite(n) || !n || n <= 0) return DEFAULT_CONCURRENCY;
@@ -80,13 +85,21 @@ function shortSideAfterCap(longest: number, shortest: number, cap: number): numb
   return Math.max(1, Math.round(shortest * (cap / longest)));
 }
 
-export function cancelAllTasks(): void {
+export async function cancelAllTasks(): Promise<void> {
   for (const ctrl of activeAborts) {
     try { ctrl.abort(); } catch { /* ignore */ }
   }
-  activeAborts.clear();
   queue.clear();
   killAllProcs();
+  // Wait for the in-flight batch to fully settle (workers observing the abort,
+  // child processes exiting, finally{} blocks running). Without this, a fresh
+  // startBatch() call could race with the still-draining old batch and the
+  // queue would re-acquire concurrency before the old workers vacated.
+  const inflight = activeBatchPromise;
+  if (inflight) {
+    try { await inflight; } catch { /* ignore */ }
+  }
+  activeAborts.clear();
 }
 
 function safeMediaId(id: string): string {
@@ -492,8 +505,10 @@ async function compressLoop(
 /* ----------------------- Thumbnail prefetch ----------------------- */
 
 const THUMB_CACHE_MAX = 200;
+const THUMB_ERR_TTL_MS = 30_000;
 const thumbCache = new Map<string, ThumbnailResult>();
 const inflightThumb = new Map<string, Promise<ThumbnailResult>>();
+const thumbErrAt = new Map<string, number>();
 
 function cacheThumb(id: string, result: ThumbnailResult): void {
   if (thumbCache.has(id)) thumbCache.delete(id);
@@ -511,6 +526,12 @@ export async function prefetchThumbnail(media: SniffedMedia): Promise<ThumbnailR
     thumbCache.delete(media.id);
     thumbCache.set(media.id, cached);
     return cached;
+  }
+  // Negative cache: avoid hammering huge / failing assets with repeated
+  // download+probe attempts. Re-try after THUMB_ERR_TTL_MS.
+  const errAt = thumbErrAt.get(media.id);
+  if (errAt && Date.now() - errAt < THUMB_ERR_TTL_MS) {
+    return { id: media.id, status: 'error', error: 'thumbnail temporarily unavailable (cached failure)' };
   }
   const inflight = inflightThumb.get(media.id);
   if (inflight) return inflight;
@@ -536,9 +557,11 @@ export async function prefetchThumbnail(media: SniffedMedia): Promise<ThumbnailR
         height: t.height
       };
       cacheThumb(media.id, result);
+      thumbErrAt.delete(media.id);
       return result;
     } catch (e) {
       const msg = (e as Error).message || String(e);
+      thumbErrAt.set(media.id, Date.now());
       return { id: media.id, status: 'error', error: msg } as ThumbnailResult;
     } finally {
       inflightThumb.delete(media.id);
@@ -608,6 +631,17 @@ interface RunArgs {
 
 async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }: RunArgs): Promise<void> {
   const { media, options } = task;
+
+  // Early-fail: embed-only media (Vimeo/YouTube/etc.) cannot be downloaded as
+  // a direct stream. The renderer already filters these out, but the main
+  // process is the security boundary — refuse here too in case a stale task
+  // payload slips past the UI guard.
+  if (media.requiresExternalDownload) {
+    throw new Error(
+      `embed-only media: cannot extract direct stream from ${media.embedHost || 'third-party player'}`
+    );
+  }
+
   const work = path.join(getCacheDir(), safeMediaId(media.id));
   await ensureDir(work);
   await ensureDir(outputBaseDir);
@@ -710,9 +744,19 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
   }
 
   if (media.kind === 'image') {
+    // Derive the file extension from the URL pathname (NOT the full URL),
+    // so query strings like `?w=400&v=2` don't leak into the filename and
+    // break Windows write semantics (`.gif?w=400` is illegal on NTFS).
+    const cleanExt = (() => {
+      try {
+        const ext = path.extname(new URL(media.url).pathname).toLowerCase();
+        if (/^\.[a-z0-9]{1,5}$/.test(ext)) return ext;
+      } catch { /* fall through */ }
+      return '.bin';
+    })();
     const finalOut = path.join(
       outputBaseDir,
-      fileNameFor(media, path.extname(media.url) || '.bin', batchTaken)
+      fileNameFor(media, cleanExt, batchTaken)
     );
     await fsp.copyFile(sourcePath, finalOut);
     emit({
@@ -833,7 +877,8 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
               cropRect: options.cropRect,
               statsMode
             },
-            (s) => log(`ffmpeg: ${s}`)
+            (s) => log(`ffmpeg: ${s}`),
+            signal
           );
           baseGif = out;
           baseFps = fps;
@@ -926,8 +971,9 @@ export async function startBatch(
   outputBaseDir: string,
   emit: (p: TaskProgress) => void
 ): Promise<void> {
-  // A9: refuse new batch if one is already running
-  if (activeAborts.size > 0) {
+  // Single-flight guard: refuse new batch if one is still draining. cancelAllTasks()
+  // now awaits this same promise, so a UI flow of `cancel → await → start` is safe.
+  if (activeBatchPromise) {
     throw new Error('busy');
   }
   // Honour per-batch concurrency override (first task's options wins; UI-level
@@ -942,31 +988,37 @@ export async function startBatch(
   activeAborts.add(ctrl);
   const signal = ctrl.signal;
   const batchTaken = new Set<string>();
-  try {
-    await Promise.all(
-      tasks.map((task) =>
-        queue.add(async () => {
-          try {
-            if (signal.aborted) {
-              emit({ taskId: task.id, status: 'cancelled', percent: 100, message: 'cancelled before start' });
-              return;
+  const run = (async (): Promise<void> => {
+    try {
+      await Promise.all(
+        tasks.map((task) =>
+          queue.add(async () => {
+            try {
+              if (signal.aborted) {
+                emit({ taskId: task.id, status: 'cancelled', percent: 100, message: 'cancelled before start' });
+                return;
+              }
+              emit({ taskId: task.id, status: 'pending', percent: 0 });
+              await processOneTask({ task, outputBaseDir, emit, signal, batchTaken });
+            } catch (err) {
+              if (isAbortError(err)) {
+                log(`task ${task.id} cancelled`);
+                emit({ taskId: task.id, status: 'cancelled', percent: 100, message: 'cancelled' });
+                return;
+              }
+              const msg = (err as Error).message || String(err);
+              log(`task ${task.id} failed: ${msg}`);
+              emit({ taskId: task.id, status: 'failed', percent: 100, error: msg });
             }
-            emit({ taskId: task.id, status: 'pending', percent: 0 });
-            await processOneTask({ task, outputBaseDir, emit, signal, batchTaken });
-          } catch (err) {
-            if (isAbortError(err)) {
-              log(`task ${task.id} cancelled`);
-              emit({ taskId: task.id, status: 'cancelled', percent: 100, message: 'cancelled' });
-              return;
-            }
-            const msg = (err as Error).message || String(err);
-            log(`task ${task.id} failed: ${msg}`);
-            emit({ taskId: task.id, status: 'failed', percent: 100, error: msg });
-          }
-        })
-      )
-    );
-  } finally {
-    activeAborts.delete(ctrl);
-  }
+          })
+        )
+      );
+    } finally {
+      activeAborts.delete(ctrl);
+    }
+  })();
+  activeBatchPromise = run.finally(() => {
+    activeBatchPromise = null;
+  });
+  return activeBatchPromise;
 }

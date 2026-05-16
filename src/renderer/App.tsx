@@ -200,8 +200,11 @@ const App: React.FC = () => {
 
   const onCancel = useCallback(() => {
     if (!giftk) return;
+    if (sniffing) {
+      giftk.cancelSniff?.().catch(() => { /* ignore */ });
+    }
     giftk.cancelAll().catch(() => { /* ignore */ });
-  }, []);
+  }, [sniffing]);
 
   const onProcessOne = useCallback(async (media: SniffedMedia) => {
     if (!giftk) return;

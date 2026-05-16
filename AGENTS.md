@@ -122,7 +122,7 @@
 
 > 复制以下清单粘到你 PR / 提交说明里,逐条打勾。
 
-- [ ] 我读了 AGENTS.md 第 1 节(R-01..R-12),没违反任何一条
+- [ ] 我读了 AGENTS.md 第 1 节(R-01..R-13),没违反任何一条
 - [ ] 我读了 [harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios),确认我的改动没有让任何已有 SC 失效
 - [ ] `npm run typecheck` 通过
 - [ ] `npm run lint` 通过(0 warning)

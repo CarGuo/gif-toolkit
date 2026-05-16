@@ -1,5 +1,6 @@
 import { BrowserWindow, session as electronSession } from 'electron';
 import { URL } from 'url';
+import crypto from 'crypto';
 import { isPrivateHost } from './helpers';
 import { log } from './logger';
 
@@ -7,7 +8,6 @@ const HEADLESS_TIMEOUT_MS = 60000;
 const HEADLESS_QUIET_MS = 2500;
 const HEADLESS_HARD_TTL_MS = 75000;
 const HEADLESS_POST_LOAD_MS = 5000;
-const HEADLESS_PARTITION = 'persist:gif-toolkit-sniffer';
 
 const UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
@@ -25,15 +25,62 @@ function assertSafeUrl(u: string): URL {
   return parsed;
 }
 
+function isUnsafeRequestUrl(raw: string): boolean {
+  if (!raw) return true;
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return true;
+  }
+  // Block file://, data:, blob:, ftp://, javascript:, chrome://, etc.
+  if (!/^https?:$/.test(parsed.protocol)) return true;
+  if (!parsed.hostname) return true;
+  if (isPrivateHost(parsed.hostname)) return true;
+  return false;
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// Single-flight mutex: one headless render at a time. Multiple concurrent
+// `webRequest.onBeforeXxx` setters share the same Session object globally
+// (when using the same partition) and last-writer-wins, which would create
+// nasty cross-talk. We serialise to keep semantics correct + RAM bounded.
+let activeChain: Promise<HeadlessResult> = Promise.resolve({ finalUrl: '', html: '', iframes: [] });
+
 export async function fetchRenderedDom(pageUrl: string): Promise<HeadlessResult> {
+  const next = activeChain.then(
+    () => fetchRenderedDomInner(pageUrl),
+    () => fetchRenderedDomInner(pageUrl)
+  );
+  // The chain itself must never reject (would poison the queue).
+  activeChain = next.catch(() => ({ finalUrl: '', html: '', iframes: [] }));
+  return next;
+}
+
+async function fetchRenderedDomInner(pageUrl: string): Promise<HeadlessResult> {
   assertSafeUrl(pageUrl);
 
-  const ses = electronSession.fromPartition(HEADLESS_PARTITION);
+  // Use a fresh, NON-persistent partition per render so cookies/storage
+  // never leak between sniffs and there is no `persist:` disk footprint.
+  const partition = `giftk-sniffer-${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`;
+  const ses = electronSession.fromPartition(partition);
   ses.setUserAgent(UA);
+
+  // SSRF defence in depth: block any sub-resource that resolves to a
+  // private/loopback host or non-http(s) scheme. The host page passed
+  // assertSafeUrl, but redirects, soft-navigations, document.fetch, and
+  // <img>/<iframe> from compromised CDNs could all aim at internals.
+  ses.webRequest.onBeforeRequest((details, cb) => {
+    if (isUnsafeRequestUrl(details.url)) {
+      log(`headless: blocked unsafe sub-resource ${details.url}`);
+      cb({ cancel: true });
+      return;
+    }
+    cb({});
+  });
 
   // Some sites (Cloudflare, OpenAI's CDN, etc.) sniff Client Hints and the
   // `Sec-CH-UA` header to detect Headless Chromium / Electron. Override these
@@ -161,6 +208,12 @@ export async function fetchRenderedDom(pageUrl: string): Promise<HeadlessResult>
     if (networkIdleTimer) {
       clearTimeout(networkIdleTimer);
       networkIdleTimer = null;
+    }
+    try {
+      // Clear ephemeral storage from this partition (defensive).
+      ses.clearStorageData().catch(() => undefined);
+    } catch {
+      /* ignore */
     }
     try {
       win.destroy();

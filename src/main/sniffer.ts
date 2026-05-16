@@ -49,27 +49,52 @@ function classifyByExt(url: string): MediaKind | null {
  * (e.g. `player.vimeo.com/video/<id>`, `youtube.com/embed/<id>`); a random
  * `<iframe src="https://example.com/foo">` is not enough.
  */
+interface EmbedRule {
+  hostSuffix: string;
+  needsPath?: string;
+  provider: string;
+  // Optional explicit regex used for the static-HTML scan (rule 8). When
+  // omitted, a default regex is auto-derived from hostSuffix + needsPath
+  // so that EMBED_PATTERNS and EMBED_RULES cannot drift out of sync.
+  pattern?: RegExp;
+}
+
+const EMBED_RULES: EmbedRule[] = [
+  { hostSuffix: 'player.vimeo.com', needsPath: '/video/', provider: 'vimeo.com',
+    pattern: /https?:(?:\\?\/){2}player\.vimeo\.com(?:\\?\/)video(?:\\?\/)\d+(?:[?][^\s"'<>]*)?/gi },
+  { hostSuffix: 'vimeo.com', needsPath: '/video/', provider: 'vimeo.com',
+    pattern: /https?:(?:\\?\/){2}vimeo\.com(?:\\?\/)video(?:\\?\/)\d+(?:[?][^\s"'<>]*)?/gi },
+  { hostSuffix: 'youtube.com', needsPath: '/embed/', provider: 'youtube.com',
+    pattern: /https?:(?:\\?\/){2}(?:www\.)?youtube\.com(?:\\?\/)embed(?:\\?\/)[A-Za-z0-9_-]+(?:[?][^\s"'<>]*)?/gi },
+  { hostSuffix: 'youtube-nocookie.com', needsPath: '/embed/', provider: 'youtube.com',
+    pattern: /https?:(?:\\?\/){2}(?:www\.)?youtube-nocookie\.com(?:\\?\/)embed(?:\\?\/)[A-Za-z0-9_-]+(?:[?][^\s"'<>]*)?/gi },
+  { hostSuffix: 'youtu.be', provider: 'youtube.com',
+    pattern: /https?:(?:\\?\/){2}youtu\.be(?:\\?\/)[A-Za-z0-9_-]+(?:[?][^\s"'<>]*)?/gi },
+  { hostSuffix: 'player.bilibili.com', provider: 'bilibili.com',
+    pattern: /https?:(?:\\?\/){2}player\.bilibili\.com(?:\\?\/)player\.html[^\s"'<>]*/gi },
+  { hostSuffix: 'bilibili.com', needsPath: '/player', provider: 'bilibili.com',
+    pattern: /https?:(?:\\?\/){2}(?:www\.)?bilibili\.com(?:\\?\/)player[^\s"'<>]*/gi },
+  { hostSuffix: 'dailymotion.com', needsPath: '/embed/', provider: 'dailymotion.com',
+    pattern: /https?:(?:\\?\/){2}(?:www\.)?dailymotion\.com(?:\\?\/)embed(?:\\?\/)video(?:\\?\/)[A-Za-z0-9]+/gi },
+  { hostSuffix: 'fast.wistia.net', provider: 'wistia.com',
+    pattern: /https?:(?:\\?\/){2}fast\.wistia\.net(?:\\?\/)embed(?:\\?\/)iframe(?:\\?\/)[A-Za-z0-9]+/gi },
+  { hostSuffix: 'wistia.com', needsPath: '/embed/', provider: 'wistia.com',
+    pattern: /https?:(?:\\?\/){2}(?:[a-z0-9.-]+\.)?wistia\.com(?:\\?\/)embed(?:\\?\/)[^\s"'<>]+/gi },
+  { hostSuffix: 'players.brightcove.net', provider: 'brightcove.com',
+    pattern: /https?:(?:\\?\/){2}players\.brightcove\.net(?:\\?\/)\d+[^\s"'<>]*/gi },
+  { hostSuffix: 'streamable.com', needsPath: '/o/', provider: 'streamable.com',
+    pattern: /https?:(?:\\?\/){2}streamable\.com(?:\\?\/)o(?:\\?\/)[A-Za-z0-9]+/gi },
+  { hostSuffix: 'streamable.com', needsPath: '/e/', provider: 'streamable.com',
+    pattern: /https?:(?:\\?\/){2}streamable\.com(?:\\?\/)e(?:\\?\/)[A-Za-z0-9]+/gi },
+  { hostSuffix: 'embed.ted.com', provider: 'ted.com',
+    pattern: /https?:(?:\\?\/){2}embed\.ted\.com(?:\\?\/)[^\s"'<>]+/gi },
+  { hostSuffix: 'video.twimg.com', provider: 'twitter.com',
+    pattern: /https?:(?:\\?\/){2}video\.twimg\.com(?:\\?\/)[^\s"'<>]+/gi }
+];
+
 function matchEmbedProvider(host: string, fullUrl: string): string | null {
   const lowerUrl = fullUrl.toLowerCase();
-  // host suffix → required path fragment (use an empty string for "any path")
-  const RULES: Array<{ hostSuffix: string; needsPath?: string; provider: string }> = [
-    { hostSuffix: 'player.vimeo.com', needsPath: '/video/', provider: 'vimeo.com' },
-    { hostSuffix: 'vimeo.com', needsPath: '/video/', provider: 'vimeo.com' },
-    { hostSuffix: 'youtube.com', needsPath: '/embed/', provider: 'youtube.com' },
-    { hostSuffix: 'youtube-nocookie.com', needsPath: '/embed/', provider: 'youtube.com' },
-    { hostSuffix: 'youtu.be', provider: 'youtube.com' },
-    { hostSuffix: 'player.bilibili.com', provider: 'bilibili.com' },
-    { hostSuffix: 'bilibili.com', needsPath: '/player', provider: 'bilibili.com' },
-    { hostSuffix: 'dailymotion.com', needsPath: '/embed/', provider: 'dailymotion.com' },
-    { hostSuffix: 'fast.wistia.net', provider: 'wistia.com' },
-    { hostSuffix: 'wistia.com', needsPath: '/embed/', provider: 'wistia.com' },
-    { hostSuffix: 'players.brightcove.net', provider: 'brightcove.com' },
-    { hostSuffix: 'streamable.com', needsPath: '/o/', provider: 'streamable.com' },
-    { hostSuffix: 'streamable.com', needsPath: '/e/', provider: 'streamable.com' },
-    { hostSuffix: 'embed.ted.com', provider: 'ted.com' },
-    { hostSuffix: 'video.twimg.com', provider: 'twitter.com' }
-  ];
-  for (const r of RULES) {
+  for (const r of EMBED_RULES) {
     if (host === r.hostSuffix || host.endsWith('.' + r.hostSuffix)) {
       if (!r.needsPath) return r.provider;
       if (lowerUrl.includes(r.needsPath)) return r.provider;
@@ -304,9 +329,21 @@ function isCancelLikeError(e: unknown): boolean {
 async function fetchHtmlStreamed(
   pageUrl: string,
   maxBytes: number,
-  emit: (p: SniffProgress) => void
+  emit: (p: SniffProgress) => void,
+  signal?: AbortSignal
 ): Promise<string> {
   const controller = new AbortController();
+  if (signal) {
+    if (signal.aborted) {
+      const e = new Error('cancelled');
+      e.name = 'CancelledError';
+      throw e;
+    }
+    const onAbort = () => {
+      try { controller.abort(); } catch { /* ignore */ }
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+  }
   emit({ stage: 'fetching', percent: 5, message: '请求文章 HTML…' });
   const res = await axios.get<NodeJS.ReadableStream>(pageUrl, {
     headers: { 'User-Agent': UA, Accept: 'text/html,application/xhtml+xml' },
@@ -543,26 +580,35 @@ function extractFromHtml(
   //    scanning the raw HTML — including JSON-escaped variants like
   //    `https:\/\/player.vimeo.com\/video\/...` — we still surface the embed
   //    even when the static DOM has zero <iframe> nodes.
-  const normaliseEmbed = (raw: string): string =>
-    raw
-      .replace(/\\\//g, '/')
-      .replace(/\\u002[fF]/g, '/')
-      .replace(/\\u0026/gi, '&')
-      .replace(/&amp;/g, '&')
-      .replace(/\\+$/g, '')
-      .replace(/[)\]}>,.;]+$/g, '');
-  const EMBED_PATTERNS: RegExp[] = [
-    /https?:(?:\\?\/){2}player\.vimeo\.com(?:\\?\/)video(?:\\?\/)\d+(?:[?][^\s"'<>]*)?/gi,
-    /https?:(?:\\?\/){2}vimeo\.com(?:\\?\/)video(?:\\?\/)\d+(?:[?][^\s"'<>]*)?/gi,
-    /https?:(?:\\?\/){2}(?:www\.)?youtube\.com(?:\\?\/)embed(?:\\?\/)[A-Za-z0-9_-]+(?:[?][^\s"'<>]*)?/gi,
-    /https?:(?:\\?\/){2}(?:www\.)?youtube-nocookie\.com(?:\\?\/)embed(?:\\?\/)[A-Za-z0-9_-]+(?:[?][^\s"'<>]*)?/gi,
-    /https?:(?:\\?\/){2}player\.bilibili\.com(?:\\?\/)player\.html[^\s"'<>]*/gi,
-    /https?:(?:\\?\/){2}(?:www\.)?dailymotion\.com(?:\\?\/)embed(?:\\?\/)video(?:\\?\/)[A-Za-z0-9]+/gi,
-    /https?:(?:\\?\/){2}fast\.wistia\.net(?:\\?\/)embed(?:\\?\/)iframe(?:\\?\/)[A-Za-z0-9]+/gi,
-    /https?:(?:\\?\/){2}players\.brightcove\.net(?:\\?\/)\d+[^\s"'<>]*/gi,
-    /https?:(?:\\?\/){2}streamable\.com(?:\\?\/)[oe](?:\\?\/)[A-Za-z0-9]+/gi,
-    /https?:(?:\\?\/){2}embed\.ted\.com(?:\\?\/)[^\s"'<>]+/gi
-  ];
+  const normaliseEmbed = (raw: string): string => {
+    let s = raw;
+    // First pass: collapse JSON / unicode escapes into their canonical char.
+    s = s.replace(/\\\//g, '/');
+    s = s.replace(/\\u00([0-9a-fA-F]{2})/g, (_m, hh: string) =>
+      String.fromCharCode(parseInt(hh, 16))
+    );
+    // HTML entity un-escape — loop because pages occasionally double-encode
+    // (`&amp;amp;v=42` → `&amp;v=42` → `&v=42`).
+    let prev = '';
+    while (prev !== s && s.includes('&amp;')) {
+      prev = s;
+      s = s.replace(/&amp;/g, '&');
+    }
+    // Strip trailing JSON-string padding / punctuation noise.
+    s = s.replace(/\\+$/g, '').replace(/[)\]}>,.;]+$/g, '');
+    return s;
+  };
+  // Data-driven: the regex list is derived from EMBED_RULES so they cannot
+  // drift out of sync. Fall back to a host-based default when a rule omits
+  // an explicit pattern.
+  const EMBED_PATTERNS: RegExp[] = EMBED_RULES.map((r) => {
+    if (r.pattern) return r.pattern;
+    const hostEsc = r.hostSuffix.replace(/\./g, '\\.');
+    return new RegExp(
+      `https?:(?:\\\\?/){2}(?:[a-z0-9.-]+\\.)?${hostEsc}(?:\\\\?/)[^\\s"'<>]+`,
+      'gi'
+    );
+  });
   for (const rx of EMBED_PATTERNS) {
     let m: RegExpExecArray | null;
     while ((m = rx.exec(html)) !== null) {
@@ -594,11 +640,19 @@ function extractFromHtml(
 
 export async function sniffPage(
   pageUrl: string,
-  onProgress?: (p: SniffProgress) => void
+  onProgress?: (p: SniffProgress) => void,
+  signal?: AbortSignal
 ): Promise<SniffResult> {
   log(`sniff start: ${pageUrl}`);
   const emit = (p: SniffProgress) => {
     try { onProgress?.(p); } catch { /* swallow */ }
+  };
+  const checkCancel = (): void => {
+    if (signal?.aborted) {
+      const e = new Error('cancelled');
+      e.name = 'CancelledError';
+      throw e;
+    }
   };
   // Validate page URL
   const parsed = new URL(pageUrl);
@@ -610,7 +664,9 @@ export async function sniffPage(
   const map = new Map<string, SniffedMedia>();
 
   emit({ stage: 'fetching', percent: 2, message: '请求文章 HTML…' });
-  const html = await fetchHtmlStreamed(pageUrl, MAX_HTML_BYTES, emit);
+  checkCancel();
+  const html = await fetchHtmlStreamed(pageUrl, MAX_HTML_BYTES, emit, signal);
+  checkCancel();
   emit({ stage: 'parsing', percent: 32, message: '解析页面 DOM…' });
 
   // Cloudflare Turnstile / "Just a moment..." JS challenges return HTTP 200
@@ -639,8 +695,10 @@ export async function sniffPage(
   //   - we found nothing in the static HTML (the most reliable signal — even
   //     well-known SPA flags like __NEXT_DATA__ can be missing when the page
   //     is heavily SSR-optimised), OR
-  //   - the page is very short (clearly a stub), OR
-  //   - the HTML is clearly a CSR shell or a Cloudflare/Akamai challenge.
+  //   - the HTML is clearly a CSR shell AND happens to also be very short
+  //     (every typical Next.js SSR page would otherwise trip looksLikeCsr;
+  //     keeping that flag standalone forced ~30s of headless on every Next
+  //     site, even when static parsing already found media).
   // In any of these cases re-load through a headless Electron BrowserWindow
   // so JS can hydrate the iframe / <video> elements that were not in the
   // static HTML, and read the live DOM.
@@ -650,7 +708,7 @@ export async function sniffPage(
     /just a moment\.\.\.|attention required|cf-browser-verification/i.test(html);
   const noMedia = map.size === 0;
 
-  if (noMedia || looksTooShort || looksLikeCsr) {
+  if (noMedia || (looksTooShort && looksLikeCsr)) {
     try {
       emit({
         stage: 'parsing',
@@ -733,6 +791,7 @@ export async function sniffPage(
     list.map((item) =>
       headQueue.add(async () => {
         try {
+          if (signal?.aborted) return;
           // Pre-check the source URL host before HEAD
           try {
             const u = new URL(item.url);
@@ -744,7 +803,8 @@ export async function sniffPage(
             headers: { 'User-Agent': UA, Referer: pageUrl },
             timeout: 8000,
             maxRedirects: 5,
-            validateStatus: (s) => s >= 200 && s < 400
+            validateStatus: (s) => s >= 200 && s < 400,
+            signal: signal as AbortSignal | undefined
           });
           // Re-check the post-redirect final URL
           const finalUrl =
@@ -779,6 +839,7 @@ export async function sniffPage(
     )
   );
 
+  checkCancel();
   emit({
     stage: 'done',
     percent: 100,
