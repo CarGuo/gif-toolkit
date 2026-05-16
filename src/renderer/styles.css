@@ -197,6 +197,29 @@ input[type="text"]:focus { border-color: var(--accent); }
   font-weight: 700;
   font-size: 16px;
 }
+/* Thumbnail error is an INDEPENDENT failure (just the preview image),
+ * NOT the resolve / convert pipeline. Render a small bottom-right badge
+ * instead of a full-card red overlay so users don't think the whole
+ * card has failed. Hover reveals a tooltip clarifying the scope. */
+.thumb-error-corner {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgba(239, 91, 110, 0.85);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 12px;
+  line-height: 1;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  pointer-events: none;
+  z-index: 2;
+}
 .media-item .name {
   font-weight: 500;
   white-space: nowrap;

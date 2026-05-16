@@ -127,6 +127,14 @@ interface CompressResult {
   width: number;
   given: boolean; // true = could not even reach the hard target
   reachedSoft: boolean; // true = within best-quality target (e.g. 2MB)
+  /** Diagnostic trail of swallowed phase failures (R-08). When non-empty
+   *  AND `given === true`, the caller MUST surface them to the user — this
+   *  is the difference between "we tried but couldn't shrink it enough"
+   *  vs. "every phase actually crashed and bestPath fell back to inputGif". */
+  phaseFailures: string[];
+  /** True when no phase actually produced any output (bestPath === inputGif).
+   *  Used by the caller to flip task status from 'done' to 'failed'. */
+  allPhasesFailed: boolean;
 }
 
 interface CompressEmit {
@@ -196,6 +204,25 @@ async function compressLoop(
   const maxSide = Math.max(minSide, options.maxWidth);
   const TOTAL_STEPS = 12;
   let stepCounter = 0;
+  // R-08 / Bug B: track every silently-swallowed phase failure so the caller
+  // can distinguish "we tried hard, couldn't shrink" from "every phase
+  // actually crashed and we silently kept the original file".
+  const phaseFailures: string[] = [];
+  let producedAny = false;
+  const recordPhaseFailure = (phase: string, err: unknown): void => {
+    const msg = (err as Error)?.message || String(err);
+    const short = msg.length > 200 ? `${msg.slice(0, 200)}…` : msg;
+    phaseFailures.push(`${phase}: ${short}`);
+    log(`compressLoop ${phase} failed (will swallow): ${short}`);
+    emit({
+      message: `${phase} failed (continuing with best so far)`,
+      percent: Math.min(95, 60 + stepCounter * 2),
+      substep: 'phase-failed',
+      stepIndex: ++stepCounter,
+      totalSteps: TOTAL_STEPS,
+      detail: short
+    });
+  };
 
   // ---------- Phase A: probe + resize-first ----------
   let origW = 0;
@@ -204,8 +231,9 @@ async function compressLoop(
     const info = await probe(inputGif);
     origW = info.width || 0;
     origH = info.height || 0;
-  } catch {
+  } catch (e) {
     /* sharp/ffprobe may fail on exotic gifs; fall back to no-resize */
+    recordPhaseFailure('probe', e);
   }
 
   // The longest / shortest side of the source.
@@ -254,9 +282,10 @@ async function compressLoop(
       workSrc = resized;
       workWidth = targetWidth;
       workSide = maxSide;
+      producedAny = true;
     } catch (e) {
       if (isAbortError(e)) throw new CancelledError();
-      log(`initial resize failed: ${(e as Error).message}`);
+      recordPhaseFailure('phase-A-resize', e);
     }
   }
 
@@ -283,7 +312,9 @@ async function compressLoop(
       sizeMB: initialSize,
       width: workWidth,
       given: false,
-      reachedSoft: true
+      reachedSoft: true,
+      phaseFailures,
+      allPhasesFailed: false
     };
   }
 
@@ -322,6 +353,7 @@ async function compressLoop(
     const out = path.join(workDir, `${baseName}.w${width}.c${colors}l${lossy}.gif`);
     await gifsicleOptimize(src, out, lossy, colors, signal);
     const s = await statSizeMB(out);
+    producedAny = true;
     recordBest(out, s, width);
     emit({
       message: label,
@@ -363,7 +395,7 @@ async function compressLoop(
       lastSize = await tryOptimize(src, width, start, colors, `${phase} start lossy=${start}`);
     } catch (e) {
       if (isAbortError(e)) throw new CancelledError();
-      log(`gifsicle start lossy=${start} failed: ${(e as Error).message}`);
+      recordPhaseFailure(`${phase}-start-lossy=${start}`, e);
       return Number.POSITIVE_INFINITY;
     }
     if (lastSize <= target) {
@@ -380,7 +412,7 @@ async function compressLoop(
         s = await tryOptimize(src, width, mid, colors, `${phase} binary lossy=${mid}`);
       } catch (e) {
         if (isAbortError(e)) throw new CancelledError();
-        log(`gifsicle lossy=${mid} failed: ${(e as Error).message}`);
+        recordPhaseFailure(`${phase}-binary-lossy=${mid}`, e);
         break;
       }
       lastSize = s;
@@ -395,10 +427,19 @@ async function compressLoop(
     curSize = await lossySearch(workSrc, workWidth, softMB, 256, 'soft');
   } catch (e) {
     if (isAbortError(e)) throw new CancelledError();
+    recordPhaseFailure('phase-B-lossySearch', e);
     curSize = bestSize;
   }
   if (bestUnderSoft) {
-    return { finalPath: bestPath, sizeMB: bestSize, width: bestWidth, given: false, reachedSoft: true };
+    return {
+      finalPath: bestPath,
+      sizeMB: bestSize,
+      width: bestWidth,
+      given: false,
+      reachedSoft: true,
+      phaseFailures,
+      allPhasesFailed: false
+    };
   }
 
   // ---------- Phase C: geometric shrink, target HARD then re-probe SOFT ----------
@@ -444,9 +485,10 @@ async function compressLoop(
     });
     try {
       await imageResizeKeepAspect(inputGif, resized, nextWidth, signal);
+      producedAny = true;
     } catch (e) {
       if (isAbortError(e)) throw new CancelledError();
-      log(`shrink failed at side=${nextSide}: ${(e as Error).message}`);
+      recordPhaseFailure(`phase-C-shrink-side=${nextSide}`, e);
       break;
     }
     curSrc = resized;
@@ -461,6 +503,7 @@ async function compressLoop(
       curSize = await lossySearch(curSrc, curWidth, retryTarget, 256, `r${round + 1}`);
     } catch (e) {
       if (isAbortError(e)) throw new CancelledError();
+      recordPhaseFailure(`phase-C-r${round + 1}-lossySearch`, e);
       break;
     }
   }
@@ -482,6 +525,7 @@ async function compressLoop(
           return Math.max(1, Math.round(origW * (finalSide / longestSide)));
         })();
         await imageResizeKeepAspect(inputGif, finalSrc, finalWidth, signal);
+        producedAny = true;
         curSrc = finalSrc;
         curWidth = finalWidth;
         curSide = finalSide;
@@ -489,7 +533,7 @@ async function compressLoop(
       await tryOptimize(curSrc, curWidth, 200, 64, `last-resort lossy=200 colors=64`);
     } catch (e) {
       if (isAbortError(e)) throw new CancelledError();
-      log(`final aggressive step failed: ${(e as Error).message}`);
+      recordPhaseFailure('phase-D-last-resort', e);
     }
   }
 
@@ -498,7 +542,9 @@ async function compressLoop(
     sizeMB: bestSize,
     width: bestWidth,
     given: !bestUnderHard,
-    reachedSoft: bestUnderSoft
+    reachedSoft: bestUnderSoft,
+    phaseFailures,
+    allPhasesFailed: !producedAny
   };
 }
 
@@ -734,17 +780,50 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
       : !result.given
         ? `<= ${targetMB.toFixed(1)}MB (fallback)`
         : `over ${targetMB.toFixed(1)}MB`;
+
+    // R-08 / Bug B: distinguish "we tried hard, couldn't shrink" from
+    // "every phase actually failed and we silently kept the original".
+    // If allPhasesFailed === true, surface the diagnostics through `error`
+    // and flip status to 'failed' instead of 'done'.
+    if (result.allPhasesFailed) {
+      const diag = result.phaseFailures.length
+        ? result.phaseFailures.slice(0, 3).join(' | ')
+        : 'no phase produced any output (input file kept as-is)';
+      emit({
+        taskId: task.id,
+        status: 'failed',
+        percent: 100,
+        currentSizeMB: result.sizeMB,
+        error: `gif compression: every phase failed → kept original ${result.sizeMB.toFixed(2)}MB. ${diag}`,
+        message: 'gif compression failed (no phase produced output)',
+        elapsedMs: elapsed()
+      });
+      return;
+    }
+
+    let warning: string | undefined;
+    if (result.given) {
+      warning = `final size ${result.sizeMB.toFixed(2)}MB exceeds hard target ${targetMB.toFixed(1)}MB at min ${options.minSize}px`;
+      if (result.phaseFailures.length > 0) {
+        warning += ` (with ${result.phaseFailures.length} phase failure(s): ${result.phaseFailures.slice(0, 2).join(' | ')})`;
+      }
+    } else if (!result.reachedSoft) {
+      warning = `did not reach soft target ${softMB.toFixed(1)}MB; saved at ${result.sizeMB.toFixed(2)}MB`;
+      if (result.phaseFailures.length > 0) {
+        warning += ` (with ${result.phaseFailures.length} phase failure(s))`;
+      }
+    } else if (result.phaseFailures.length > 0) {
+      // Reached soft target but some phases still failed along the way.
+      warning = `reached soft target with ${result.phaseFailures.length} phase failure(s) ignored: ${result.phaseFailures.slice(0, 2).join(' | ')}`;
+    }
+
     emit({
       taskId: task.id,
       status: 'done',
       percent: 100,
       outputs: [finalOut],
       currentSizeMB: result.sizeMB,
-      warning: result.given
-        ? `final size ${result.sizeMB.toFixed(2)}MB exceeds hard target ${targetMB.toFixed(1)}MB at min ${options.minSize}px`
-        : !result.reachedSoft
-          ? `did not reach soft target ${softMB.toFixed(1)}MB; saved at ${result.sizeMB.toFixed(2)}MB`
-          : undefined,
+      warning,
       message: `gif saved (${result.sizeMB.toFixed(2)}MB ${tier})`,
       elapsedMs: elapsed()
     });
@@ -951,9 +1030,21 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
     await fsp.copyFile(compressed.finalPath, finalOut);
     outputs.push(finalOut);
 
-    if (compressed.given) {
+    if (compressed.allPhasesFailed) {
+      const diag = compressed.phaseFailures.length
+        ? compressed.phaseFailures.slice(0, 2).join(' | ')
+        : 'no phase produced any output';
+      warnings.push(`seg ${i + 1} compress: every phase failed (${diag}); kept ${compressed.sizeMB.toFixed(2)}MB`);
+    } else if (compressed.given) {
+      const trail = compressed.phaseFailures.length
+        ? ` [${compressed.phaseFailures.length} phase failure(s)]`
+        : '';
       warnings.push(
-        `seg ${i + 1} final ${compressed.sizeMB.toFixed(2)}MB exceeds ${targetMB.toFixed(1)}MB target`
+        `seg ${i + 1} final ${compressed.sizeMB.toFixed(2)}MB exceeds ${targetMB.toFixed(1)}MB target${trail}`
+      );
+    } else if (compressed.phaseFailures.length > 0) {
+      warnings.push(
+        `seg ${i + 1} reached target but ${compressed.phaseFailures.length} phase(s) failed silently`
       );
     }
   }

@@ -110,14 +110,25 @@ const Thumb: React.FC<{ media: SniffedMedia }> = ({ media }) => {
   }, [media, media.id, media.url]);
 
   return (
-    <div ref={ref} className="card-thumb" title={state.status === 'error' ? state.error : undefined}>
+    <div
+      ref={ref}
+      className="card-thumb"
+      title={
+        state.status === 'error'
+          ? `缩略图生成失败:${state.error}\n(仅缩略图链路失败,不影响后续解析与转换尝试)`
+          : undefined
+      }
+    >
       {state.status === 'ok' && <img src={state.dataUrl} alt="" loading="lazy" />}
       {state.status === 'loading' && <div className="thumb-skeleton" />}
       {state.status === 'idle' && <div className="thumb-skeleton dim" />}
       {state.status === 'error' && (
-        <div className="thumb-error">
-          <span>!</span>
-        </div>
+        <>
+          <div className="thumb-skeleton dim" />
+          <div className="thumb-error-corner" aria-label="缩略图生成失败">
+            <span>!</span>
+          </div>
+        </>
       )}
     </div>
   );

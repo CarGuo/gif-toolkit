@@ -43,6 +43,12 @@ export async function downloadToFile(
     responseType: 'stream',
     headers: {
       'User-Agent': UA,
+      // Force identity so googlevideo / Bilibili CDNs don't return a
+      // gzipped or chunked-throttled stream that ffprobe later fails on.
+      // SABR throttling tends to be much milder when no `Accept-Encoding`
+      // negotiation is offered.
+      'Accept-Encoding': 'identity',
+      Connection: 'keep-alive',
       ...(opts.referer ? { Referer: opts.referer } : {}),
       ...(opts.headers || {})
     },
@@ -98,6 +104,19 @@ export async function downloadToFile(
 
     res.data.pipe(out);
   });
+
+  // Short-read self-check: SABR-throttled googlevideo streams sometimes
+  // close cleanly mid-way and we end up with a header-truncated file that
+  // ffprobe later rejects with "Invalid data found when processing input".
+  // Treat any short-read >5% as a download failure so the caller can retry
+  // (or report a clear error rather than corrupt cache).
+  if (total && received > 0 && received < Math.floor(total * 0.95)) {
+    await fsp.unlink(tmp).catch(() => undefined);
+    throw new Error(
+      `incomplete download: received ${received} of expected ${total} bytes ` +
+      `(short-read; remote may be SABR-throttled or the signed URL has expired)`
+    );
+  }
 
   await fsp.rename(tmp, target);
   return target;

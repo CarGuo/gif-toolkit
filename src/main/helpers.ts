@@ -76,6 +76,28 @@ export function safeName(input: string, batchTaken?: Set<string>): string {
   return s;
 }
 
+/** Best-effort extension for cache files when the URL pathname has none.
+ *  ffprobe / ffmpeg / sharp are far more tolerant when the input filename
+ *  hints at the container (e.g. SABR-throttled googlevideo streams whose
+ *  header bytes are dirty still get correctly demuxed when the file ends
+ *  in `.mp4`). Without this hint, ffprobe often errors with
+ *  "Invalid data found when processing input". */
+function defaultExtFor(media: SniffedMedia): string {
+  const mime = (media.resolved?.mime || media.mime || '').toLowerCase();
+  if (mime.includes('mp4')) return '.mp4';
+  if (mime.includes('webm')) return '.webm';
+  if (mime.includes('quicktime') || mime.includes('mov')) return '.mov';
+  if (mime.includes('matroska') || mime.includes('mkv')) return '.mkv';
+  if (mime.includes('gif')) return '.gif';
+  if (mime.includes('png')) return '.png';
+  if (mime.includes('jpeg') || mime.includes('jpg')) return '.jpg';
+  if (mime.includes('webp')) return '.webp';
+  if (media.kind === 'video') return '.mp4';
+  if (media.kind === 'gif') return '.gif';
+  if (media.kind === 'image') return '.bin';
+  return '';
+}
+
 export function fileNameFor(media: SniffedMedia, suffix = '', batchTaken?: Set<string>): string {
   let base: string;
   try {
@@ -84,8 +106,15 @@ export function fileNameFor(media: SniffedMedia, suffix = '', batchTaken?: Set<s
     base = media.id;
   }
   const cleaned = safeName(base);
+  const hadExt = /\.[^.]+$/.test(cleaned);
   const stem = cleaned.replace(/\.[^.]+$/, '') || safeName(media.id);
-  const final = `${stem}${suffix}`;
+  // When suffix already carries an extension (e.g. ".gif" / ".part1.gif" or
+  // ".s0.f12.w800.diff"), leave the basename untouched. Otherwise, when the
+  // source URL had no extension AND no suffix override, infer one from the
+  // resolved mime / media.kind so ffprobe gets a usable container hint.
+  const suffixHasExt = /\.[a-zA-Z0-9]{1,6}$/.test(suffix);
+  const inferredExt = !hadExt && !suffixHasExt ? defaultExtFor(media) : '';
+  const final = `${stem}${suffix}${inferredExt}`;
   if (batchTaken) {
     if (batchTaken.has(final)) {
       const hash = crypto.createHash('sha1').update(`${final}-${media.id}`).digest('hex').slice(0, 6);
