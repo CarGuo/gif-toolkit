@@ -4,6 +4,13 @@ import type { SniffedMedia, TaskProgress } from '../../shared/types';
 interface Props {
   items: SniffedMedia[];
   progress: Record<string, TaskProgress>;
+  /**
+   * Optional retry hook. When supplied, failed / cancelled tasks render a
+   * "重试" button that re-enqueues the same media via the host's processing
+   * pipeline. Kept optional so the component still works in read-only views
+   * (e.g. tests, screenshots) where retry is meaningless.
+   */
+  onRetry?: (media: SniffedMedia) => void | Promise<void>;
 }
 
 function fileName(u: string): string {
@@ -98,8 +105,12 @@ const WarningDetailModal: React.FC<{ s: DetailModalState; onClose: () => void }>
   );
 };
 
-export const TaskTable: React.FC<Props> = ({ items, progress }) => {
+export const TaskTable: React.FC<Props> = ({ items, progress, onRetry }) => {
   const [detail, setDetail] = useState<DetailModalState | null>(null);
+  // Track which task IDs are currently mid-retry so we can disable the button
+  // until a fresh progress event arrives. Without this, double-clicks would
+  // enqueue the same media twice while the IPC round-trip is in flight.
+  const [retrying, setRetrying] = useState<Set<string>>(new Set());
   const rows = items.filter((m) => progress[m.id]);
   if (rows.length === 0) {
     return (
@@ -167,7 +178,48 @@ export const TaskTable: React.FC<Props> = ({ items, progress }) => {
               ) : null}
             </div>
             <div className={`size`}>{p.currentSizeMB ? `${p.currentSizeMB.toFixed(2)} MB` : ''}</div>
-            <div className={`status ${cls}`}>{p.status}</div>
+            <div className={`status ${cls}`}>
+              <span>{p.status}</span>
+              {onRetry && (p.status === 'failed' || p.status === 'cancelled') ? (
+                <button
+                  type="button"
+                  className="retry-btn"
+                  disabled={retrying.has(m.id)}
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    if (retrying.has(m.id)) return;
+                    setRetrying((prev) => {
+                      const n = new Set(prev);
+                      n.add(m.id);
+                      return n;
+                    });
+                    try {
+                      await onRetry(m);
+                    } finally {
+                      // Clear the local "retrying" flag shortly after kicking
+                      // off; the next progress event will replace the row
+                      // status anyway, but a short window prevents accidental
+                      // double-fires while the IPC promise resolves.
+                      window.setTimeout(() => {
+                        setRetrying((prev) => {
+                          const n = new Set(prev);
+                          n.delete(m.id);
+                          return n;
+                        });
+                      }, 1500);
+                    }
+                  }}
+                  title="重新处理这个任务"
+                  style={{
+                    marginLeft: 8, fontSize: 11, padding: '2px 8px',
+                    cursor: retrying.has(m.id) ? 'wait' : 'pointer',
+                    opacity: retrying.has(m.id) ? 0.5 : 1
+                  }}
+                >
+                  {retrying.has(m.id) ? '重试中…' : '重试'}
+                </button>
+              ) : null}
+            </div>
           </div>
         );
       })}

@@ -552,7 +552,7 @@ const App: React.FC = () => {
         aria-orientation="horizontal"
       />
       <div className="bottom">
-        <TaskTable items={items} progress={progress} />
+        <TaskTable items={items} progress={progress} onRetry={onProcessOne} />
         <LogBox lines={logs} />
       </div>
 

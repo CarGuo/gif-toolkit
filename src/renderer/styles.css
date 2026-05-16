@@ -923,7 +923,7 @@ input[type="text"]:focus { border-color: var(--accent); }
 }
 .task {
   display: grid;
-  grid-template-columns: 80px 1fr 90px 90px;
+  grid-template-columns: 80px 1fr 90px 140px;
   gap: 10px;
   align-items: center;
   padding: 6px 8px;
@@ -951,11 +951,29 @@ input[type="text"]:focus { border-color: var(--accent); }
   text-transform: uppercase;
   letter-spacing: 0.5px;
   text-align: right;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 .task .status.done { color: var(--good); }
 .task .status.failed { color: var(--bad); }
 .task .status.skipped { color: var(--warn); }
 .task .status.cancelled { color: var(--muted); }
+.task .retry-btn {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.task .retry-btn:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
 .task .size { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 11.5px; text-align: right; }
 .task-warn {
   color: var(--warn);

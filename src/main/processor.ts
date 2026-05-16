@@ -31,11 +31,11 @@ const MAX_CONCURRENCY = 8;
 let currentConcurrency = DEFAULT_CONCURRENCY;
 const queue = new PQueue({ concurrency: DEFAULT_CONCURRENCY });
 const activeAborts: Set<AbortController> = new Set();
-// Tracks the currently running batch (if any). cancelAllTasks awaits this so
-// that startBatch's "busy" check is race-free: the OLD batch must fully settle
-// (including in-flight ffmpeg/gifsicle child processes) before a new batch may
-// take its place.
-let activeBatchPromise: Promise<void> | null = null;
+// Tracks all currently-running batches. cancelAllTasks awaits every one of
+// them so a retry-while-draining flow ('cancel → await → start') is race-free:
+// the OLD batches must fully settle (including in-flight ffmpeg/gifsicle child
+// processes) before a new batch may take their place.
+const activeBatchPromises: Set<Promise<void>> = new Set();
 
 function clampConcurrency(n: number | undefined): number {
   if (!Number.isFinite(n) || !n || n <= 0) return DEFAULT_CONCURRENCY;
@@ -92,13 +92,13 @@ export async function cancelAllTasks(): Promise<void> {
   }
   queue.clear();
   killAllProcs();
-  // Wait for the in-flight batch to fully settle (workers observing the abort,
-  // child processes exiting, finally{} blocks running). Without this, a fresh
-  // startBatch() call could race with the still-draining old batch and the
-  // queue would re-acquire concurrency before the old workers vacated.
-  const inflight = activeBatchPromise;
-  if (inflight) {
-    try { await inflight; } catch { /* ignore */ }
+  // Wait for EVERY in-flight batch to fully settle (workers observing the
+  // abort, child processes exiting, finally{} blocks running). Without this,
+  // a fresh startBatch() call could race with the still-draining old batches
+  // and the queue would re-acquire concurrency before the old workers vacated.
+  const inflight = Array.from(activeBatchPromises);
+  if (inflight.length > 0) {
+    try { await Promise.allSettled(inflight); } catch { /* ignore */ }
   }
   activeAborts.clear();
 }
@@ -1293,15 +1293,17 @@ export async function startBatch(
   outputBaseDir: string,
   emit: (p: TaskProgress) => void
 ): Promise<void> {
-  // Single-flight guard: refuse new batch if one is still draining. cancelAllTasks()
-  // now awaits this same promise, so a UI flow of `cancel → await → start` is safe.
-  if (activeBatchPromise) {
-    throw new Error('busy');
-  }
+  // R-20: tasks may be enqueued at any time — including while a previous batch
+  // is still draining. This is what powers the "重试" button on a failed task:
+  // the user clicks retry, the renderer calls startBatch with one task, and we
+  // simply append it to the shared PQueue. We no longer reject with 'busy'.
+  // cancelAllTasks() still aborts EVERY in-flight controller, so cancellation
+  // semantics are unchanged.
   // Honour per-batch concurrency override (first task's options wins; UI-level
-  // setting is consistent across all tasks in a batch).
+  // setting is consistent across all tasks in a batch). Only adjust the queue
+  // when no other batch is currently relying on the existing concurrency.
   const desired = clampConcurrency(tasks[0]?.options?.concurrency);
-  if (desired !== currentConcurrency) {
+  if (desired !== currentConcurrency && activeAborts.size === 0) {
     queue.concurrency = desired;
     currentConcurrency = desired;
     log(`batch concurrency set to ${desired}`);
@@ -1339,8 +1341,12 @@ export async function startBatch(
       activeAborts.delete(ctrl);
     }
   })();
-  activeBatchPromise = run.finally(() => {
-    activeBatchPromise = null;
+  // Track ALL in-flight batches (not just the latest) so cancelAllTasks can
+  // await every one before returning. Without this, a retry kicked off while
+  // an earlier batch is still draining would leak past cancelAll.
+  activeBatchPromises.add(run);
+  run.finally(() => {
+    activeBatchPromises.delete(run);
   });
-  return activeBatchPromise;
+  return run;
 }
