@@ -65,7 +65,7 @@ const App: React.FC = () => {
     };
   }, []);
 
-  const items = result?.items ?? [];
+  const items = useMemo(() => result?.items ?? [], [result]);
   const activeMedia = useMemo(
     () => items.find((i) => i.id === activeId) ?? null,
     [items, activeId]

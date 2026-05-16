@@ -90,7 +90,7 @@ const Thumb: React.FC<{ media: SniffedMedia }> = ({ media }) => {
       cancelled = true;
       io.disconnect();
     };
-  }, [media.id, media.url]);
+  }, [media, media.id, media.url]);
 
   return (
     <div ref={ref} className="thumb" title={state.status === 'error' ? state.error : undefined}>

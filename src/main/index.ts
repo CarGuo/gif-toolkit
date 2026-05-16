@@ -10,6 +10,12 @@ import { DEFAULT_OPTIONS } from '../shared/types';
 import type { ProcessOptions, ProcessTask, SniffedMedia } from '../shared/types';
 import { isPrivateHost, safeName } from './helpers';
 
+// Some networks block UDP/QUIC which makes Chromium's TLS over QUIC fall back
+// to a hard ERR_CONNECTION_RESET on the headless sniffer fallback. Disabling
+// QUIC keeps HTTP traffic on TCP/TLS where axios already proves the route works.
+app.commandLine.appendSwitch('disable-quic');
+app.commandLine.appendSwitch('disable-features', 'NetworkServiceCodeIntegrity,IsolateOrigins,site-per-process');
+
 let mainWindow: BrowserWindow | null = null;
 const allowedOutputDirs: Set<string> = new Set();
 

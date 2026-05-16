@@ -33,6 +33,7 @@
 | **R-10** | **renderer 永远不许直接读本地路径或运行 child_process**;contextIsolation 永远 ON,nodeIntegration 永远 OFF | Electron 安全基线 | [BrowserWindow webPreferences](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/index.ts) |
 | **R-11** | **preload 暴露的 API 必须白名单**;新增方法须同步更新 [src/preload/index.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/preload/index.ts) 和 [src/renderer/global.d.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/global.d.ts) | 否则 `window.giftk.foo` 在生产构建里就是 undefined | — |
 | **R-12** | **不要为了让一个测试通过就改测试,要改的是代码** | 全局 SOP | — |
+| **R-13** | **SPA / anti-bot 页面必须走「静态正则 → headless → CF challenge 报警」三级 fallback**:1) 规则 8 用宽松正则在 `<script>` JSON payload 里抽 player URL;2) `noMedia ‖ looksTooShort ‖ looksLikeCsr` 任一即触发 [headlessFetch](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/headlessFetch.ts);3) 命中 Turnstile / Just-a-moment 时显式 warning。同时 main 入口必须 `app.commandLine.appendSwitch('disable-quic')`,否则部分网络上 Chromium 会 ERR_CONNECTION_RESET。**任何 sniffer 改动都必须先用真实 OpenAI URL 跑通 e2e 才能交付** | 第 23 轮 "OpenAI 还是测试不出来,你不应该测试下这个嗅探成功了才交付吗?" | [extractFromHtml](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/sniffer.ts) 规则 8 + [headlessFetch.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/headlessFetch.ts) + [SC-07](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-07-spa-hydrated-iframe-fallback.md) |
 
 ---
 
@@ -60,7 +61,7 @@
 每一次 Agent 改代码,必须按这个顺序走:
 
 1. **Read 触发场景** → 翻 [harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios) 看是否有同类问题已有沉淀。如果有,直接复用规则,**不再二次发明**。
-2. **Plan** → 用 TodoWrite 列出步骤;影响 R-01..R-12 中任何一条要在计划里点名。
+2. **Plan** → 用 TodoWrite 列出步骤;影响 R-01..R-13 中任何一条要在计划里点名。
 3. **Execute** → 改代码。
 4. **Verify** → 三步顺序执行,**全部通过才算完成**:
    - `npm run typecheck`
@@ -111,8 +112,8 @@
 - **[docs/troubleshooting.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/troubleshooting.md)** —— 故障分类与对应规则
 - **[harness/](file:///Users/guoshuyu/workspace/gif-toolkit/harness)** —— 工程级 harness 规则与回归场景库
   - **[harness/run-harness.md](file:///Users/guoshuyu/workspace/gif-toolkit/harness/run-harness.md)** —— 怎么跑 harness
-  - **[harness/rules/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules)** —— R-01..R-12 的细化版,每条一个文件
-  - **[harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios)** —— SC-01..SC-06 已沉淀的回归场景
+  - **[harness/rules/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules)** —— R-01..R-13 的细化版,每条一个文件
+  - **[harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios)** —— SC-01..SC-07 已沉淀的回归场景
   - **[harness/checklists/pr-checklist.md](file:///Users/guoshuyu/workspace/gif-toolkit/harness/checklists/pr-checklist.md)** —— 改前自检清单
 
 ---

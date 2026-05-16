@@ -6,6 +6,7 @@ import { URL } from 'url';
 import type { SniffResult, SniffedMedia, MediaKind, SniffProgress } from '../shared/types';
 import { log } from './logger';
 import { isPrivateHost } from './helpers';
+import { fetchRenderedDom } from './headlessFetch';
 
 const UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
@@ -378,26 +379,19 @@ async function fetchHtmlStreamed(
   });
 }
 
-export async function sniffPage(
+/**
+ * Apply rules 1..7 against an HTML string and write hits into `map`.
+ * Returns the document title (if any) so the caller can use it.
+ *
+ * This is split out as a stand-alone function because we run it twice in
+ * the SPA / anti-bot fallback path: once on the raw HTTP response, then
+ * again on the headless-rendered DOM if the first pass yielded nothing.
+ */
+function extractFromHtml(
+  html: string,
   pageUrl: string,
-  onProgress?: (p: SniffProgress) => void
-): Promise<SniffResult> {
-  log(`sniff start: ${pageUrl}`);
-  const emit = (p: SniffProgress) => {
-    try { onProgress?.(p); } catch { /* swallow */ }
-  };
-  // Validate page URL
-  const parsed = new URL(pageUrl);
-  if (!/^https?:$/.test(parsed.protocol)) {
-    throw new Error('Only http(s) URLs are supported');
-  }
-
-  const warnings: string[] = [];
-  const map = new Map<string, SniffedMedia>();
-
-  emit({ stage: 'fetching', percent: 2, message: '请求文章 HTML…' });
-  const html = await fetchHtmlStreamed(pageUrl, MAX_HTML_BYTES, emit);
-  emit({ stage: 'parsing', percent: 32, message: '解析页面 DOM…' });
+  map: Map<string, SniffedMedia>
+): string | undefined {
   const $ = cheerio.load(html);
   const title = $('title').first().text().trim() || undefined;
 
@@ -450,7 +444,9 @@ export async function sniffPage(
   });
 
   // 3) og:video / twitter:player:stream
-  const ogVideo = $('meta[property="og:video"]').attr('content') || $('meta[property="og:video:url"]').attr('content');
+  const ogVideo =
+    $('meta[property="og:video"]').attr('content') ||
+    $('meta[property="og:video:url"]').attr('content');
   if (ogVideo) {
     const u = abs(pageUrl, ogVideo);
     if (u) {
@@ -503,7 +499,8 @@ export async function sniffPage(
   //    was on the page and jump to the original to grab a direct .mp4 link.
   $('iframe').each((_, el) => {
     const $el = $(el);
-    const rawSrc = $el.attr('src') || $el.attr('data-src') || $el.attr('data-lazy-src') || '';
+    const rawSrc =
+      $el.attr('src') || $el.attr('data-src') || $el.attr('data-lazy-src') || '';
     if (!rawSrc) return;
     const u = abs(pageUrl, rawSrc);
     if (!u) return;
@@ -537,6 +534,183 @@ export async function sniffPage(
     seen.add(key);
     const kind = classifyByExt(raw) ?? 'video';
     pushUnique(map, { id: id(raw), url: raw, kind, source: 'pattern', pageUrl });
+  }
+
+  // 8) Regex fallback for known-provider embed URLs that are referenced inside
+  //    <script>/JSON payloads instead of as real <iframe> tags. SPA frameworks
+  //    (Next.js / Nuxt / etc.) often serialize the embed URL into a JSON blob
+  //    and only mount the actual <iframe> on the client after hydration. By
+  //    scanning the raw HTML — including JSON-escaped variants like
+  //    `https:\/\/player.vimeo.com\/video\/...` — we still surface the embed
+  //    even when the static DOM has zero <iframe> nodes.
+  const normaliseEmbed = (raw: string): string =>
+    raw
+      .replace(/\\\//g, '/')
+      .replace(/\\u002[fF]/g, '/')
+      .replace(/\\u0026/gi, '&')
+      .replace(/&amp;/g, '&')
+      .replace(/\\+$/g, '')
+      .replace(/[)\]}>,.;]+$/g, '');
+  const EMBED_PATTERNS: RegExp[] = [
+    /https?:(?:\\?\/){2}player\.vimeo\.com(?:\\?\/)video(?:\\?\/)\d+(?:[?][^\s"'<>]*)?/gi,
+    /https?:(?:\\?\/){2}vimeo\.com(?:\\?\/)video(?:\\?\/)\d+(?:[?][^\s"'<>]*)?/gi,
+    /https?:(?:\\?\/){2}(?:www\.)?youtube\.com(?:\\?\/)embed(?:\\?\/)[A-Za-z0-9_-]+(?:[?][^\s"'<>]*)?/gi,
+    /https?:(?:\\?\/){2}(?:www\.)?youtube-nocookie\.com(?:\\?\/)embed(?:\\?\/)[A-Za-z0-9_-]+(?:[?][^\s"'<>]*)?/gi,
+    /https?:(?:\\?\/){2}player\.bilibili\.com(?:\\?\/)player\.html[^\s"'<>]*/gi,
+    /https?:(?:\\?\/){2}(?:www\.)?dailymotion\.com(?:\\?\/)embed(?:\\?\/)video(?:\\?\/)[A-Za-z0-9]+/gi,
+    /https?:(?:\\?\/){2}fast\.wistia\.net(?:\\?\/)embed(?:\\?\/)iframe(?:\\?\/)[A-Za-z0-9]+/gi,
+    /https?:(?:\\?\/){2}players\.brightcove\.net(?:\\?\/)\d+[^\s"'<>]*/gi,
+    /https?:(?:\\?\/){2}streamable\.com(?:\\?\/)[oe](?:\\?\/)[A-Za-z0-9]+/gi,
+    /https?:(?:\\?\/){2}embed\.ted\.com(?:\\?\/)[^\s"'<>]+/gi
+  ];
+  for (const rx of EMBED_PATTERNS) {
+    let m: RegExpExecArray | null;
+    while ((m = rx.exec(html)) !== null) {
+      const candidate = normaliseEmbed(m[0]);
+      const u = abs(pageUrl, candidate);
+      if (!u) continue;
+      let host: string;
+      try {
+        host = new URL(u).hostname.toLowerCase();
+      } catch {
+        continue;
+      }
+      const provider = matchEmbedProvider(host, u);
+      if (!provider) continue;
+      pushUnique(map, {
+        id: id(u),
+        url: u,
+        kind: 'video',
+        source: 'iframe-embed',
+        pageUrl,
+        requiresExternalDownload: true,
+        embedHost: provider
+      });
+    }
+  }
+
+  return title;
+}
+
+export async function sniffPage(
+  pageUrl: string,
+  onProgress?: (p: SniffProgress) => void
+): Promise<SniffResult> {
+  log(`sniff start: ${pageUrl}`);
+  const emit = (p: SniffProgress) => {
+    try { onProgress?.(p); } catch { /* swallow */ }
+  };
+  // Validate page URL
+  const parsed = new URL(pageUrl);
+  if (!/^https?:$/.test(parsed.protocol)) {
+    throw new Error('Only http(s) URLs are supported');
+  }
+
+  const warnings: string[] = [];
+  const map = new Map<string, SniffedMedia>();
+
+  emit({ stage: 'fetching', percent: 2, message: '请求文章 HTML…' });
+  const html = await fetchHtmlStreamed(pageUrl, MAX_HTML_BYTES, emit);
+  emit({ stage: 'parsing', percent: 32, message: '解析页面 DOM…' });
+
+  // Cloudflare Turnstile / "Just a moment..." JS challenges return HTTP 200
+  // with a tiny stub HTML that has none of the real page content. Detect this
+  // up-front so we can surface a clear error rather than pretending we sniffed
+  // the page and finding zero items.
+  const looksLikeCfChallenge =
+    /<title>\s*Just a moment\.\.\.\s*<\/title>/i.test(html) ||
+    /challenges\.cloudflare\.com\/turnstile/i.test(html) ||
+    /\/cdn-cgi\/challenge-platform\//i.test(html) ||
+    /cf-browser-verification|cf_chl_jschl_tk/i.test(html);
+  if (looksLikeCfChallenge) {
+    warnings.push(
+      'Page is behind a Cloudflare bot challenge (Turnstile / "Just a moment..."). ' +
+        'In the current network/IP we cannot pass it automatically. Open the URL ' +
+        'in a normal browser, finish the verification once, then retry — or save ' +
+        'the page locally and use the offline file path.'
+    );
+  }
+
+  let title = extractFromHtml(html, pageUrl, map);
+
+  // Fallback: SPA / anti-bot / CDN-protected pages may not expose any
+  // <video>/<iframe>/<img>.gif via the raw HTTP HTML. Triggers (any one is
+  // sufficient):
+  //   - we found nothing in the static HTML (the most reliable signal — even
+  //     well-known SPA flags like __NEXT_DATA__ can be missing when the page
+  //     is heavily SSR-optimised), OR
+  //   - the page is very short (clearly a stub), OR
+  //   - the HTML is clearly a CSR shell or a Cloudflare/Akamai challenge.
+  // In any of these cases re-load through a headless Electron BrowserWindow
+  // so JS can hydrate the iframe / <video> elements that were not in the
+  // static HTML, and read the live DOM.
+  const looksTooShort = html.length < 50 * 1024;
+  const looksLikeCsr =
+    /__NEXT_DATA__|__NUXT__|window\.__INITIAL_STATE__|data-reactroot/i.test(html) ||
+    /just a moment\.\.\.|attention required|cf-browser-verification/i.test(html);
+  const noMedia = map.size === 0;
+
+  if (noMedia || looksTooShort || looksLikeCsr) {
+    try {
+      emit({
+        stage: 'parsing',
+        percent: 40,
+        message: '静态 HTML 未发现媒体,尝试浏览器渲染…'
+      });
+      const rendered = await fetchRenderedDom(pageUrl);
+      emit({
+        stage: 'parsing',
+        percent: 50,
+        message: `浏览器渲染完成 (${(rendered.html.length / 1024).toFixed(0)} KB),重新解析 DOM…`
+      });
+      const renderedIsCfChallenge =
+        /<title>\s*Just a moment\.\.\.\s*<\/title>/i.test(rendered.html) ||
+        /challenges\.cloudflare\.com\/turnstile/i.test(rendered.html) ||
+        /\/cdn-cgi\/challenge-platform\//i.test(rendered.html);
+      if (renderedIsCfChallenge) {
+        warnings.push(
+          'Headless render also hit a Cloudflare bot challenge — automatic ' +
+            'sniffing is not possible from this network. Visit the page in a ' +
+            'normal browser to clear the challenge once, or use a saved local copy.'
+        );
+      }
+      const renderedTitle = extractFromHtml(rendered.html, rendered.finalUrl || pageUrl, map);
+      if (!title && renderedTitle) title = renderedTitle;
+
+      // Belt-and-suspenders: also classify any iframes captured directly from
+      // the live document (some sites build the iframe as a child of a Shadow
+      // DOM or attach it after our snapshot — using the live `document` lets
+      // us catch them too).
+      for (const iframeUrl of rendered.iframes) {
+        const u = abs(rendered.finalUrl || pageUrl, iframeUrl);
+        if (!u) continue;
+        let host: string;
+        try {
+          host = new URL(u).hostname.toLowerCase();
+        } catch {
+          continue;
+        }
+        const provider = matchEmbedProvider(host, u);
+        if (!provider) continue;
+        pushUnique(map, {
+          id: id(u),
+          url: u,
+          kind: 'video',
+          source: 'iframe-embed',
+          pageUrl,
+          requiresExternalDownload: true,
+          embedHost: provider
+        });
+      }
+      if (map.size === 0) {
+        warnings.push(
+          'Headless render also found no <video>/<iframe>; the page may require login or block automation.'
+        );
+      }
+    } catch (e) {
+      warnings.push(`headless fallback failed: ${(e as Error).message}`);
+      log(`headless fallback failed: ${(e as Error).message}`);
+    }
   }
 
   if (map.size === 0) {
