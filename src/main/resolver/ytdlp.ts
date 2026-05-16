@@ -355,3 +355,79 @@ export class YtDlpNotInstalledError extends Error {
     this.binaryPath = binaryPath;
   }
 }
+
+/**
+ * R-24: download ONLY the requested time ranges from a yt-dlp source page,
+ * concatenated into a single mp4 at `outPath`. Saves bandwidth + local
+ * decode time for long videos where the user has selected only a few
+ * segments via the BatchSegmentModal / PreviewPanel.
+ *
+ * Each `range` is half-open `[startSec, endSec)` and forwarded to yt-dlp
+ * as `--download-sections "*<start>-<end>"`. yt-dlp internally requests
+ * byte ranges from the CDN where possible (HTTP Range / DASH / HLS) and
+ * falls back to "download the whole stream then trim" only when the
+ * extractor doesn't expose seekable ranges.
+ *
+ * Spawns the installed binary directly (not via ytdlp-nodejs) so the
+ * --download-sections flag is reliably forwarded; ytdlp-nodejs wraps
+ * info-extraction APIs but does not expose the section flag yet.
+ */
+export interface DownloadSection {
+  startSec: number;
+  endSec: number;
+}
+
+export async function downloadYtdlpSections(
+  pageUrl: string,
+  outPath: string,
+  sections: DownloadSection[],
+  signal?: AbortSignal
+): Promise<void> {
+  ensurePublicHttp(pageUrl);
+  if (!Array.isArray(sections) || sections.length === 0) {
+    throw new Error('downloadYtdlpSections: sections must be non-empty');
+  }
+  const validated = sections
+    .filter((s) => Number.isFinite(s.startSec) && Number.isFinite(s.endSec) && s.endSec > s.startSec)
+    .map((s) => ({ startSec: Math.max(0, s.startSec), endSec: s.endSec }));
+  if (validated.length === 0) throw new Error('downloadYtdlpSections: no valid sections');
+
+  const bin = await ensureYtdlp();
+  const args: string[] = [
+    '--no-warnings',
+    '--no-progress',
+    '--no-playlist',
+    '-o',
+    outPath,
+    '-f',
+    'bv*+ba/b',
+    '--merge-output-format',
+    'mp4'
+  ];
+  for (const s of validated) {
+    args.push('--download-sections', `*${s.startSec}-${s.endSec}`);
+  }
+  args.push(pageUrl);
+
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { spawn } = require('child_process') as typeof import('child_process');
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stderr = '';
+    child.stderr?.on('data', (c: Buffer) => { stderr += c.toString(); });
+    const onAbort = () => { try { child.kill('SIGKILL'); } catch { /* ignore */ } };
+    if (signal) {
+      if (signal.aborted) { onAbort(); reject(new Error('aborted')); return; }
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+    child.on('close', (code: number | null) => {
+      if (signal) signal.removeEventListener('abort', onAbort);
+      if (code === 0) resolve();
+      else reject(new Error(`yt-dlp exited with code ${code}: ${stderr.trim().slice(0, 500)}`));
+    });
+    child.on('error', (e: Error) => {
+      if (signal) signal.removeEventListener('abort', onAbort);
+      reject(e);
+    });
+  });
+}

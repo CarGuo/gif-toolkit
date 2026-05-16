@@ -93,3 +93,4 @@ export async function resolveEmbed(media: SniffedMedia): Promise<ResolvedMedia> 
 
 export { YtDlpNotInstalledError } from './ytdlp';
 export { ytdlpBinaryPath, checkYtdlp, ensureYtdlp } from './ytdlp';
+export { downloadYtdlpSections, type DownloadSection } from './ytdlp';

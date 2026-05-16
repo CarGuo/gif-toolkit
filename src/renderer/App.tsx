@@ -15,6 +15,7 @@ import { OptionsForm } from './components/OptionsForm';
 import { PreviewModal } from './components/PreviewModal';
 import { TaskTable } from './components/TaskTable';
 import { LogBox } from './components/LogBox';
+import { BatchSegmentModal, type BatchSegmentEntry } from './components/BatchSegmentModal';
 
 const giftk = (typeof window !== 'undefined' ? window.giftk : undefined);
 
@@ -40,6 +41,7 @@ const App: React.FC = () => {
   const [resolvedMap, setResolvedMap] = useState<Record<string, ResolvedMedia>>({});
   const [resolvingSet, setResolvingSet] = useState<Set<string>>(new Set());
   const [resolveErrorMap, setResolveErrorMap] = useState<Record<string, string>>({});
+  const [batchModal, setBatchModal] = useState<BatchSegmentEntry[] | null>(null);
 
   // Bottom panel (TaskTable + LogBox) resizable height.
   // Persisted in localStorage so the user's preference survives reloads.
@@ -187,32 +189,28 @@ const App: React.FC = () => {
      [items, selected]
   );
 
-  const onStart = useCallback(async () => {
+  const dispatchBatch = useCallback(async (
+    perIdSelection: Record<string, number[]> | null
+  ) => {
     if (!giftk) return;
-    if (processable.length === 0) {
-      setLogs((prev) => [...prev, `[batch] 没有可处理的任务(只支持 video / gif)`].slice(-300));
-      return;
-    }
     setProgress({});
     const dir = baseOutputDir || outputDir;
-    // R-22: for video tasks whose duration exceeds maxSegmentSec, default to
-    // processing only segment #0 (i.e. the first 0..maxSegmentSec slice).
-    // This avoids spawning N tasks for a 10-min video when the user just
-    // dragged a URL in. Users who want more segments select them in the
-    // PreviewPanel before clicking ▶. Skipped when:
-    //   - clip range already set explicitly (startSec/endSec) → trust user
-    //   - selectedSegments already set on the global options → trust user
-    //   - duration unknown (sniff didn't probe) → fall through, processor
-    //     will still emit one task per segment (same as before R-22)
     const tasks: ProcessTask[] = processable.map((m) => {
       const opt: ProcessOptions = { ...options, outDir: dir };
       const dur = m.resolved?.durationSec ?? m.durationSec ?? 0;
       const tooLong = m.kind === 'video' && dur > options.maxSegmentSec;
-      const userPickedRange =
+      const userExplicit =
         opt.startSec !== undefined ||
         opt.endSec !== undefined ||
         (opt.selectedSegments && opt.selectedSegments.length > 0);
-      if (tooLong && !userPickedRange) {
+      // Priority order:
+      // 1. Modal-confirmed selection wins (explicit user choice this batch).
+      // 2. Per-task options.selectedSegments / startSec / endSec already set
+      //    in the OptionsForm or PreviewPanel are honoured untouched.
+      // 3. Long video without any explicit pick → R-22 fallback to [0].
+      if (perIdSelection && perIdSelection[m.id] && perIdSelection[m.id].length > 0) {
+        opt.selectedSegments = perIdSelection[m.id];
+      } else if (tooLong && !userExplicit) {
         opt.selectedSegments = [0];
       }
       return { id: m.id, media: m, options: opt };
@@ -247,6 +245,35 @@ const App: React.FC = () => {
       }
     }
   }, [processable, options, baseOutputDir, outputDir, result]);
+
+  const onStart = useCallback(async () => {
+    if (!giftk) return;
+    if (processable.length === 0) {
+      setLogs((prev) => [...prev, `[batch] 没有可处理的任务(只支持 video / gif)`].slice(-300));
+      return;
+    }
+    // R-23: surface a confirm modal listing every long video with its own
+    // segment picker BEFORE dispatching. Skip the modal when:
+    //   - no video exceeds maxSegmentSec → nothing to ask
+    //   - the user already set selectedSegments / startSec / endSec on the
+    //     global options form (treat as "I know what I'm doing")
+    const longCandidates: BatchSegmentEntry[] = processable
+      .filter((m) => {
+        if (m.kind !== 'video') return false;
+        const dur = m.resolved?.durationSec ?? m.durationSec ?? 0;
+        return dur > options.maxSegmentSec;
+      })
+      .map((m) => ({ media: m, durationSec: m.resolved?.durationSec ?? m.durationSec ?? 0 }));
+    const userExplicitGlobal =
+      options.startSec !== undefined ||
+      options.endSec !== undefined ||
+      (options.selectedSegments && options.selectedSegments.length > 0);
+    if (longCandidates.length > 0 && !userExplicitGlobal) {
+      setBatchModal(longCandidates);
+      return;
+    }
+    await dispatchBatch(null);
+  }, [processable, options, dispatchBatch]);
 
   const onCancel = useCallback(() => {
     if (!giftk) return;
@@ -611,6 +638,18 @@ const App: React.FC = () => {
           onClose={closeModal}
           onProcessOne={onProcessOne}
           processOneDisabled={isProcessingOne(activeMedia.id) || activeMedia.kind === 'image' || (!!activeMedia.requiresExternalDownload && !activeMedia.resolved)}
+        />
+      ) : null}
+
+      {batchModal ? (
+        <BatchSegmentModal
+          entries={batchModal}
+          maxSegmentSec={options.maxSegmentSec}
+          onCancel={() => setBatchModal(null)}
+          onConfirm={(perId) => {
+            setBatchModal(null);
+            void dispatchBatch(perId);
+          }}
         />
       ) : null}
     </div>

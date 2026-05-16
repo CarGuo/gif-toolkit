@@ -38,6 +38,8 @@
 | **R-15** | **npm 供应链卫生**(五道闸门,缺一不可):1) `.npmrc` 设 `min-release-age=7`(npm 单位是*天*,不要混淆 pnpm 的*分钟*单位写成 10080)— 新版本必须满 7 天才进 lockfile;2) `ignore-scripts=true` 全局禁止子依赖 lifecycle hook,native rebuild 通过根 `package.json` 的 `scripts.postinstall` 显式 allowlist(`sharp` / `ffmpeg-static` / `ffprobe-static` / `gifsicle` / `ytdlp-nodejs` 五个);3) `save-exact=true` + `save-prefix=` — 新增依赖固定到精确版本而非 caret 范围;4) CI / 部署必须用 `npm ci`,禁止 `npm install`(后者会默默改 lockfile);5) `npm run lockfile:lint` 校验 `package-lock.json` 所有 resolved 都指向官方 npm + integrity 是 sha512(挡 lockfile injection)。辅助:`engine-strict=true` + `audit-signatures=true` + `engines.node>=20 / npm>=11.10`。紧急 CVE 通道允许 `--min-release-age=0`,但 PR 必须前缀 `[security]` 并附 CVE 编号 | 第 31 轮 "现在有什么避免 npm 投毒或供应链安全的规则,找一些落实到项目里" | [.npmrc](file:///Users/guoshuyu/workspace/gif-toolkit/.npmrc) + [package.json](file:///Users/guoshuyu/workspace/gif-toolkit/package.json) `scripts.postinstall` / `scripts.lockfile:lint` / `engines` + [R-15](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-15-npm-supply-chain-hygiene.md) |
 | **R-16** | **新功能必须随测试**:1) 新增的纯函数 / 组件 / IPC handler 必须配套 `tests/**/*.test.{ts,tsx}` 断言其行为契约(包括边界与失败路径);2) 修 bug 时必须先写一个会因该 bug 而失败的回归测试再修代码;3) `npm test` 必须 0 失败,不允许 `*.skip` 兜底;4) `npm test` 是 SOP 第 4 步的硬关卡(typecheck → lint → **test** → build),任何一步失败都不允许合并;5) 测试栈固定为 vitest 2.1.8 + happy-dom + @testing-library/react,Electron API 用 `vi.mock('electron', …)` 隔离;6) 强 I/O 模块(sniffer/headlessFetch/downloader/resolver)豁免单测,由 [harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios) 兜底,但其内部可纯化的子函数应当抽出再测 | 第 39 轮 "给所有功能增加测试用例，这样有利于回归测试功能的正常，后续新加的每个功能也都要需要这个规则" | [vitest.config.ts](file:///Users/guoshuyu/workspace/gif-toolkit/vitest.config.ts) + [tests/](file:///Users/guoshuyu/workspace/gif-toolkit/tests) + [R-16](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-16-tests-required.md) |
 | **R-22** | **长视频默认只跑第 1 段**:1) `ProcessOptions.maxSegmentSec` 默认 20(原 15);2) 新增 `selectedSegments?: number[]` 字段贯通 IPC,`undefined` = 全跑(向后兼容),`[0]` = 仅第 1 段,`[0,2]` = 跨段子集;3) renderer 在 `onStart`/`onProcessOne` 对 `kind==='video' && durationSec > maxSegmentSec` 的 task 自动注入 `selectedSegments=[0]`(用户已显式设 startSec/endSec/selectedSegments 时跳过)且必须给日志提示;4) processor.ts 必须走纯函数 [enumerateSegments](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor-utils.ts) + [filterSelectedSegments](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor-utils.ts),不允许内联;5) PreviewPanel 必须显示 chip 列表 + 全选/仅第1段按钮;6) main 层 `sanitizeOptions` 必须 dedup + 整数过滤 + 排序 + 越界 drop | 第 39 轮 "视频默认只支持 20s 最长，可配置，如果超过提示用户选择时段……一次处理一堆片段太夸张" | [R-22](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-22-clip-segment-cap.md) + [SC-19](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-19-clip-segment-cap.md) + [src/main/processor-utils.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor-utils.ts) |
+| **R-23** | **批处理前必须弹「分段选择」对话框**:1) [App.tsx onStart](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/App.tsx) 在派发任务前必须 `filter(t => t.media.kind==='video' && durationSec > maxSegmentSec)`,只要有 ≥1 个长视频且用户没显式全选,**必须**打开 [BatchSegmentModal](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/BatchSegmentModal.tsx),完全不打 IPC;2) modal 取消 / 点 backdrop = 不派发,modal 确认 = 注入 perId selectedSegments;3) 默认每个长视频只勾 `[0]`(等价 R-22 自动截断),用户取消等价默认行为 — 不会出错;4) [SegmentPicker](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/SegmentPicker.tsx) 必须抽成纯组件,PreviewPanel + BatchSegmentModal 共享;5) `dispatchBatch` 注入选项优先级:modal 选项 > task 已存在的 selectedSegments > R-22 fallback `[0]`;6) BatchSegmentModal 内 `setOne` 空数组归一为 `[0]`,确保至少 1 段 | 第 41 轮 "我点击批处理之后,没有让我选择片段的流程啊?你把流程坐在那里?" | [R-23](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-23-batch-confirm-modal.md) + [src/renderer/components/SegmentPicker.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/SegmentPicker.tsx) + [src/renderer/components/BatchSegmentModal.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/BatchSegmentModal.tsx) |
+| **R-24** | **ffmpeg single-pass + palettegen 抽帧 + yt-dlp section 下载**:1) **O6** [videoToGifPalette](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/ffmpeg.ts) 必须用一次 ffmpeg + `-filter_complex '[0:v]base,split[full][low];[low]fps=pf,palettegen[pal];[full][pal]paletteuse'`,不允许中间 palette.png + 二次 spawn;2) **O7** `paletteFps = Math.max(2, Math.round(p.fps/2))`,palettegen 抽帧采样,质量肉眼无感而解码量减半;3) **O8** SEG_CONCURRENCY 必须 = `Math.max(2, Math.min(4, Math.ceil(os.cpus().length/2)))`,不允许硬编码 2(8 核机器浪费 50%+ CPU);4) **net** yt-dlp 当 `resolved.source==='ytdlp'` && `selectedSegments` 是严格子集时必须直接 spawn binary `--download-sections "*s-e"` 多段(不走 ytdlp-nodejs 包装层),只下选中部分;5) partial-fetch 成功后 [processOneTask](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor.ts) 必须重置 `options.selectedSegments/startSec/endSec=undefined`(本地文件已是拼接结果),为此 `options` 必须是 `let` 而非 destructured const;6) section 下载失败必须静默 fallback 到全量 [downloadToFile](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor.ts),不抛错给用户 | 第 41 轮 "我总觉得现在的压缩速度还是有点慢" + "我们只需要下载需要处理的片段就好了吧" | [R-24](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-24-ffmpeg-single-pass-and-section-fetch.md) + [src/main/ffmpeg.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/ffmpeg.ts) + [src/main/resolver/ytdlp.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/resolver/ytdlp.ts) |
 
 ---
 
@@ -65,7 +67,7 @@
 每一次 Agent 改代码,必须按这个顺序走:
 
 1. **Read 触发场景** → 翻 [harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios) 看是否有同类问题已有沉淀。如果有,直接复用规则,**不再二次发明**。
-2. **Plan** → 用 TodoWrite 列出步骤;影响 R-01..R-16 / R-22 中任何一条要在计划里点名。
+2. **Plan** → 用 TodoWrite 列出步骤;影响 R-01..R-16 / R-22..R-24 中任何一条要在计划里点名。
 3. **Execute** → 改代码。
 4. **Verify** → 三步顺序执行,**全部通过才算完成**:
    - `npm run typecheck`
@@ -118,7 +120,7 @@
 - **[docs/embed-resolver.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/embed-resolver.md)** —— yt-dlp resolver 设计(随包分发 + 自动解析)、e2e 验证
 - **[harness/](file:///Users/guoshuyu/workspace/gif-toolkit/harness)** —— 工程级 harness 规则与回归场景库
   - **[harness/run-harness.md](file:///Users/guoshuyu/workspace/gif-toolkit/harness/run-harness.md)** —— 怎么跑 harness
-  - **[harness/rules/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules)** —— R-01..R-16 + R-22 的细化版,每条一个文件
+  - **[harness/rules/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules)** —— R-01..R-16 + R-22..R-24 的细化版,每条一个文件
   - **[harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios)** —— SC-01..SC-15 已沉淀的回归场景
   - **[harness/checklists/pr-checklist.md](file:///Users/guoshuyu/workspace/gif-toolkit/harness/checklists/pr-checklist.md)** —— 改前自检清单
 
@@ -128,7 +130,7 @@
 
 > 复制以下清单粘到你 PR / 提交说明里,逐条打勾。
 
-- [ ] 我读了 AGENTS.md 第 1 节(R-01..R-16 + R-22),没违反任何一条
+- [ ] 我读了 AGENTS.md 第 1 节(R-01..R-16 + R-22..R-24),没违反任何一条
 - [ ] 我读了 [harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios),确认我的改动没有让任何已有 SC 失效
 - [ ] `npm run typecheck` 通过
 - [ ] `npm run lint` 通过(0 warning)

@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { ProcessOptions, SniffedMedia, PreviewResult } from '../../shared/types';
 import { CropBox } from './CropBox';
 import { Timeline } from './Timeline';
+import { SegmentPicker, buildSegmentPreviews } from './SegmentPicker';
 
 interface Props {
   media: SniffedMedia;
@@ -39,47 +40,13 @@ export const PreviewPanel: React.FC<Props> = ({
   const segmentPreviews = useMemo(() => {
     if (isGif || isImage) return [];
     if (duration <= 0) return [];
-    const start = Math.max(0, Math.min(duration, options.startSec ?? 0));
-    const end = Math.max(start, Math.min(duration, options.endSec ?? duration));
-    const range = end - start;
-    if (range <= 0) return [];
-    const segLen = Math.max(1, options.maxSegmentSec);
-    if (range <= segLen) return []; // single segment: no need to ask the user
-    const segCount = Math.max(1, Math.ceil(range / segLen));
-    const segActual = range / segCount;
-    return Array.from({ length: segCount }, (_, i) => ({
-      index: i,
-      start: start + i * segActual,
-      end: start + (i + 1) * segActual
-    }));
+    const start = options.startSec ?? 0;
+    const end = options.endSec ?? duration;
+    return buildSegmentPreviews(start, end, options.maxSegmentSec);
   }, [isGif, isImage, duration, options.startSec, options.endSec, options.maxSegmentSec]);
 
-  const effectiveSelected: Set<number> = useMemo(() => {
-    if (segmentPreviews.length === 0) return new Set();
-    if (options.selectedSegments && options.selectedSegments.length > 0) {
-      return new Set(options.selectedSegments);
-    }
-    // No explicit selection but we have multiple segments → mirror App.tsx's
-    // batch behaviour: default to segment #0 only. Users see #1 ticked here
-    // and the "select all"/"clear" buttons let them lift this fast.
-    return new Set([0]);
-  }, [segmentPreviews.length, options.selectedSegments]);
-
-  const toggleSegment = (idx: number) => {
-    const next = new Set(effectiveSelected);
-    if (next.has(idx)) next.delete(idx);
-    else next.add(idx);
-    const arr = Array.from(next).sort((a, b) => a - b);
-    onChangeOptions({ ...options, selectedSegments: arr.length === 0 ? undefined : arr });
-  };
-  const selectAllSegments = () => {
-    onChangeOptions({
-      ...options,
-      selectedSegments: segmentPreviews.map((s) => s.index)
-    });
-  };
-  const selectFirstSegment = () => {
-    onChangeOptions({ ...options, selectedSegments: [0] });
+  const setSelectedSegments = (next: number[] | undefined) => {
+    onChangeOptions({ ...options, selectedSegments: next });
   };
 
   useEffect(() => {
@@ -195,50 +162,11 @@ export const PreviewPanel: React.FC<Props> = ({
       )}
 
       {segmentPreviews.length > 0 && (
-        <div className="segment-picker" style={{ marginTop: 12 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, flexWrap: 'wrap' }}>
-            <b style={{ fontSize: 12 }}>分段选择 (R-22)</b>
-            <span style={{ color: 'var(--muted)', fontSize: 11 }}>
-              已勾 {effectiveSelected.size} / {segmentPreviews.length} 段 · 默认仅第 1 段
-            </span>
-            <span style={{ flex: 1 }} />
-            <button type="button" onClick={selectFirstSegment} style={{ fontSize: 11 }}>仅第 1 段</button>
-            <button type="button" onClick={selectAllSegments} style={{ fontSize: 11 }}>全选</button>
-          </div>
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-            {segmentPreviews.map((s) => {
-              const checked = effectiveSelected.has(s.index);
-              return (
-                <label
-                  key={s.index}
-                  className={`segment-chip${checked ? ' active' : ''}`}
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 6,
-                    padding: '4px 8px',
-                    borderRadius: 4,
-                    background: checked ? 'var(--accent-bg, #1f3a52)' : 'var(--surface-2, #1a1c20)',
-                    border: `1px solid ${checked ? 'var(--accent, #4aa3ff)' : 'var(--border, #2a2d33)'}`,
-                    cursor: 'pointer',
-                    fontSize: 12
-                  }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={() => toggleSegment(s.index)}
-                    aria-label={`segment ${s.index + 1}`}
-                  />
-                  <span>#{s.index + 1}</span>
-                  <span style={{ color: 'var(--muted)' }}>
-                    {s.start.toFixed(1)}–{s.end.toFixed(1)}s
-                  </span>
-                </label>
-              );
-            })}
-          </div>
-        </div>
+        <SegmentPicker
+          segments={segmentPreviews}
+          selectedSegments={options.selectedSegments}
+          onChange={setSelectedSegments}
+        />
       )}
 
       {preview && preview.frames.length > 0 && (
