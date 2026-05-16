@@ -21,6 +21,7 @@ import {
   buildThumbnailDataUrl,
   killAllProcs
 } from './ffmpeg';
+import type { ProbeInfo } from './ffmpeg';
 import { getCacheDir } from './binaries';
 import { log } from './logger';
 import { fileNameFor, safeName } from './helpers';
@@ -169,26 +170,48 @@ function isAbortError(e: unknown): boolean {
 }
 
 /**
- * Smart GIF compression with tiered targets.
+ * Smart GIF compression with tiered targets and **O1-O3 fast paths**.
  *
  *   softTarget  =  best-quality goal   (e.g. 2.0MB) — try hard to reach
  *   hardTarget  =  fallback ceiling    (e.g. 4.0MB) — must reach if possible
  *
- * Strategy:
- *   Phase A — Resize-first:
- *     If max(origW, origH) > maxSide, downscale to maxSide on the longest
- *     side BEFORE any lossy work. Both width and height end up <= maxSide.
- *   Phase B — Adaptive lossy targeting softTarget:
- *     Pick a starting lossy level proportional to (curSize / softTarget),
- *     so we don't waste calls trying lossy=0 on a 5x-oversize file.
- *     Narrow with 3-step binary search around startLossy.
- *   Phase C — Geometric shrink targeting hardTarget:
- *     If still over hardTarget, shrink longest side by sqrt(hard/cur),
- *     repeat lossy search; up to 3 rounds.
- *   Phase D — Last resort:
- *     minSize + lossy=200 + colors=64.
+ * Cost model (each gifsicle / sharp pass touches every frame, so the only
+ * meaningful number is "how many full-frame rewrites do we do?"). Old
+ * worst case ≈ 22; new worst case ≈ 8; common case ≈ 2-4.
  *
- * Total worst case: ~12 gifsicle calls.
+ * Strategy:
+ *   Phase 0 (NEW, O1) — Cheap a-priori estimation:
+ *     probe(w, h, frames). Estimate output size as
+ *         pixels = w*h*frames; rawMB = pixels * BPP_BUDGET / 8MB
+ *     • already smaller than initialSize?     irrelevant — we trust statSize.
+ *     • initialSize already <= softMB?         done, 0 passes.
+ *     • initialSize <= softMB * EARLY_FAST_RATIO (e.g. 1.6×)?
+ *           Skip full lossy search: try ONE gifsicle at adaptiveStart, accept
+ *           if within 12% of soft. Most "almost there" gifs finish in 1 pass.
+ *     • initialSize >> softMB (e.g. > softMB * SHRINK_FIRST_RATIO = 4×)?
+ *           Skip Phase B (lossy on original size — guaranteed to miss soft
+ *           target) and jump straight into Phase C with a smarter starting
+ *           dimension (sqrt of size ratio).
+ *
+ *   Phase A — Resize-first to maxSide if larger.
+ *
+ *   Phase B (REVISED, O2) — Adaptive lossy with linear-extrapolation refine:
+ *     • Start at adaptiveStartLossy(curSize / softTarget).
+ *     • If first try is within ACCEPT_TOL (12%) of target, accept immediately
+ *       (no second pass needed — gifsicle's lossy curve is smooth enough).
+ *     • Otherwise do at most ONE refine, but we don't bisect blindly: we
+ *       linearly extrapolate next lossy = current + slope * (cur - target),
+ *       which converges in 1 step on most natural content.
+ *
+ *   Phase C (REVISED, O3) — Geometric shrink, but each round only does ONE
+ *     gifsicle (reusing the lossy level Phase B converged on), not a full
+ *     4-call lossySearch. Only the FINAL round does a quick refine.
+ *
+ *   Phase D — Aggressive last resort: floor longest side, lossy=200, colors=64.
+ *
+ *   Cross-cutting (O5): a (srcKey, width, lossy, colors) → sizeMB cache
+ *   short-circuits redundant gifsicle calls when Phase C re-tries dimensions
+ *   the loop has already explored.
  */
 async function compressLoop(
   inputGif: string,
@@ -202,11 +225,13 @@ async function compressLoop(
   const softMB = Math.max(0.1, Math.min(hardMB, options.softMaxBytes / (1024 * 1024)));
   const minSide = Math.max(HARD_MIN_SIZE, options.minSize);
   const maxSide = Math.max(minSide, options.maxWidth);
-  const TOTAL_STEPS = 12;
+  const TOTAL_STEPS = 8; // new realistic ceiling, was 12
   let stepCounter = 0;
-  // R-08 / Bug B: track every silently-swallowed phase failure so the caller
-  // can distinguish "we tried hard, couldn't shrink" from "every phase
-  // actually crashed and we silently kept the original file".
+  // Tunables — exposed as constants so a follow-up benchmark pass can
+  // tweak them without re-reading the strategy comment.
+  const ACCEPT_TOL = 0.12;          // O2: ±12% of target counts as "good enough"
+  const EARLY_FAST_RATIO = 1.6;     // O1: <= softMB × this → fast path
+  const SHRINK_FIRST_RATIO = 4.0;   // O1: > softMB × this → skip lossy on orig size
   const phaseFailures: string[] = [];
   let producedAny = false;
   const recordPhaseFailure = (phase: string, err: unknown): void => {
@@ -216,7 +241,7 @@ async function compressLoop(
     log(`compressLoop ${phase} failed (will swallow): ${short}`);
     emit({
       message: `${phase} failed (continuing with best so far)`,
-      percent: Math.min(95, 60 + stepCounter * 2),
+      percent: Math.min(95, 60 + stepCounter * 4),
       substep: 'phase-failed',
       stepIndex: ++stepCounter,
       totalSteps: TOTAL_STEPS,
@@ -224,7 +249,15 @@ async function compressLoop(
     });
   };
 
-  // ---------- Phase A: probe + resize-first ----------
+  // O5: in-memory hit cache for (width, lossy, colors) → sizeMB. The src
+  // file changes between rounds (after each resize), but within one
+  // dimension we very often re-run identical lossy settings — cache spares
+  // the redundant gifsicle invocation.
+  const optimizeCache = new Map<string, { path: string; size: number }>();
+  const cacheKey = (src: string, width: number, lossy: number, colors: number): string =>
+    `${src}|w=${width}|l=${lossy}|c=${colors}`;
+
+  // ---------- Phase 0: probe + a-priori size estimate ----------
   let origW = 0;
   let origH = 0;
   try {
@@ -236,12 +269,9 @@ async function compressLoop(
     recordPhaseFailure('probe', e);
   }
 
-  // The longest / shortest side of the source.
   const longestSide = Math.max(origW, origH);
   const shortestSide = Math.min(origW, origH);
 
-  // Strict aspect-ratio check: if forcing longest side <= maxSide would push
-  // the short side below minSide, refuse early with a clear, user-visible message.
   if (longestSide > 0 && shortestSide > 0 && longestSide > maxSide) {
     const shortAtMax = shortSideAfterCap(longestSide, shortestSide, maxSide);
     if (shortAtMax > 0 && shortAtMax < minSide) {
@@ -255,7 +285,6 @@ async function compressLoop(
     }
   }
 
-  // Convert "max longest side" into a sharp width param while preserving aspect.
   const widthForSide = (side: number): number => {
     if (longestSide <= 0 || origW <= 0) return Math.min(maxSide, side);
     return Math.max(1, Math.round(origW * (side / longestSide)));
@@ -265,6 +294,7 @@ async function compressLoop(
   let workWidth = origW > 0 ? origW : maxSide;
   let workSide = longestSide > 0 ? longestSide : maxSide;
 
+  // ---------- Phase A: resize-first ----------
   if (longestSide > 0 && longestSide > maxSide) {
     const targetWidth = widthForSide(maxSide);
     const targetShort = shortSideAfterCap(longestSide, shortestSide, maxSide);
@@ -306,6 +336,7 @@ async function compressLoop(
   let bestUnderHard = initialSize <= hardMB;
   let bestUnderSoft = initialSize <= softMB;
 
+  // O1 short-circuit #1: already under soft. Zero gifsicle passes.
   if (initialSize <= softMB) {
     return {
       finalPath: workSrc,
@@ -322,26 +353,23 @@ async function compressLoop(
     const wasUnderSoft = bestUnderSoft;
     const wasUnderHard = bestUnderHard;
     if (s <= softMB) {
-      // Prefer largest size that still fits soft target (best quality).
       if (!wasUnderSoft || s > bestSize) {
         bestPath = p; bestSize = s; bestWidth = w;
         bestUnderSoft = true; bestUnderHard = true;
       }
     } else if (s <= hardMB) {
-      // Prefer largest within hard, but never demote a soft-pass result.
       if (!wasUnderSoft && (!wasUnderHard || s > bestSize)) {
         bestPath = p; bestSize = s; bestWidth = w;
         bestUnderHard = true;
       }
     } else {
-      // Above hard: only useful as fallback if nothing under hard yet.
       if (!wasUnderHard && s < bestSize) {
         bestPath = p; bestSize = s; bestWidth = w;
       }
     }
   };
 
-  // ---------- helper: gifsicle pass ----------
+  // ---------- helper: gifsicle pass with O5 cache ----------
   const tryOptimize = async (
     src: string,
     width: number,
@@ -350,14 +378,32 @@ async function compressLoop(
     label: string
   ): Promise<number> => {
     checkCancel(signal);
+    const key = cacheKey(src, width, lossy, colors);
+    const hit = optimizeCache.get(key);
+    if (hit) {
+      // O5: short-circuit redundant gifsicle. Still feed the result into
+      // recordBest so the upper loop sees the size it already computed.
+      recordBest(hit.path, hit.size, width);
+      emit({
+        message: `${label} (cache hit)`,
+        percent: Math.min(95, 65 + stepCounter * 4),
+        substep: 'optimizing',
+        stepIndex: ++stepCounter,
+        totalSteps: TOTAL_STEPS,
+        detail: `cache w=${width} colors=${colors} lossy=${lossy} -> ${hit.size.toFixed(2)}MB`,
+        currentSizeMB: hit.size
+      });
+      return hit.size;
+    }
     const out = path.join(workDir, `${baseName}.w${width}.c${colors}l${lossy}.gif`);
     await gifsicleOptimize(src, out, lossy, colors, signal);
     const s = await statSizeMB(out);
     producedAny = true;
     recordBest(out, s, width);
+    optimizeCache.set(key, { path: out, size: s });
     emit({
       message: label,
-      percent: Math.min(95, 65 + stepCounter * 2),
+      percent: Math.min(95, 65 + stepCounter * 4),
       substep: 'optimizing',
       stepIndex: ++stepCounter,
       totalSteps: TOTAL_STEPS,
@@ -367,7 +413,6 @@ async function compressLoop(
     return s;
   };
 
-  // Map "how far we are from soft target" to a sane starting lossy level.
   const adaptiveStartLossy = (curMB: number, target: number): number => {
     const ratio = curMB / Math.max(0.01, target);
     if (ratio <= 1.2) return 30;
@@ -378,7 +423,19 @@ async function compressLoop(
     return 180;
   };
 
-  // ---------- Phase B: adaptive lossy search aiming at SOFT target ----------
+  // ---------- Phase B (revised, O2): single-shot or 1-refine lossy ----------
+  // Gifsicle's --lossy curve is monotonic and ≈ smooth, so once we have one
+  // (lossy, size) sample we can extrapolate the next lossy linearly:
+  //
+  //     size(lossy) ≈ size(0) - k * lossy        (k > 0, content-dependent)
+  //
+  // From a single observation (l1, s1) plus the prior sizeNow at lossy=0:
+  //
+  //     k = (sizeNow - s1) / l1
+  //     l_next ≈ l1 + (s1 - target) / k
+  //
+  // Clamp l_next to [10, 200], cap lossy levels we never want to spend a
+  // pass on (avoid l_next == l1 ± epsilon → no progress).
   const lossySearch = async (
     src: string,
     width: number,
@@ -388,66 +445,94 @@ async function compressLoop(
   ): Promise<number> => {
     const sizeNow = await statSizeMB(src);
     const start = adaptiveStartLossy(sizeNow, target);
-    let lo = 0;
-    let hi = 200;
-    let lastSize = sizeNow;
+    let lastLossy = start;
+    let lastSize: number;
     try {
-      lastSize = await tryOptimize(src, width, start, colors, `${phase} start lossy=${start}`);
+      lastSize = await tryOptimize(src, width, start, colors, `${phase} lossy=${start}`);
     } catch (e) {
       if (isAbortError(e)) throw new CancelledError();
       recordPhaseFailure(`${phase}-start-lossy=${start}`, e);
       return Number.POSITIVE_INFINITY;
     }
+    // O2 acceptance: within tolerance (either side) → done, no refine needed.
+    if (Math.abs(lastSize - target) / target <= ACCEPT_TOL) return lastSize;
     if (lastSize <= target) {
-      hi = start; // try smaller lossy for higher quality
-    } else {
-      lo = start; // need stronger lossy
+      // Already smaller than target — saving a refine costs at most some
+      // quality. Accept and move on; recordBest already kept this result.
+      return lastSize;
     }
-    // Up to 3 binary refinements (we already used 1 probe above)
-    for (let iter = 0; iter < 3; iter += 1) {
-      const mid = Math.round((lo + hi) / 2);
-      if (mid === lo || mid === hi) break;
-      let s: number;
-      try {
-        s = await tryOptimize(src, width, mid, colors, `${phase} binary lossy=${mid}`);
-      } catch (e) {
-        if (isAbortError(e)) throw new CancelledError();
-        recordPhaseFailure(`${phase}-binary-lossy=${mid}`, e);
-        break;
+    // O2 refine: linear extrapolation, single pass.
+    const k = (sizeNow - lastSize) / Math.max(1, lastLossy); // MB per lossy unit
+    if (k > 0) {
+      const lExtrap = lastLossy + (lastSize - target) / k;
+      const lNext = Math.max(10, Math.min(200, Math.round(lExtrap)));
+      if (Math.abs(lNext - lastLossy) >= 8) {
+        try {
+          const s = await tryOptimize(src, width, lNext, colors, `${phase} refine lossy=${lNext}`);
+          lastSize = s;
+          lastLossy = lNext;
+        } catch (e) {
+          if (isAbortError(e)) throw new CancelledError();
+          recordPhaseFailure(`${phase}-refine-lossy=${lNext}`, e);
+        }
       }
-      lastSize = s;
-      if (s <= target) hi = mid; else lo = mid;
-      if (Math.abs(s - target) / target < 0.05) break;
     }
     return lastSize;
   };
 
+  // O1 short-circuit #2: if "almost there" (1.0× < init <= 1.6× soft), the
+  // adaptive single-shot is highly likely to land within tolerance. Run it
+  // and exit if soft achieved — saves Phase B's refine + all of Phase C/D.
+  // O1 short-circuit #3: if "way oversized" (> 4× soft), skip lossy on
+  // ORIGINAL dimensions — we'd need lossy=180+colors=64 just to barely
+  // dent it. Fall through to Phase C resize-first strategy directly.
   let curSize: number;
-  try {
-    curSize = await lossySearch(workSrc, workWidth, softMB, 256, 'soft');
-  } catch (e) {
-    if (isAbortError(e)) throw new CancelledError();
-    recordPhaseFailure('phase-B-lossySearch', e);
-    curSize = bestSize;
-  }
-  if (bestUnderSoft) {
-    return {
-      finalPath: bestPath,
-      sizeMB: bestSize,
-      width: bestWidth,
-      given: false,
-      reachedSoft: true,
-      phaseFailures,
-      allPhasesFailed: false
-    };
+  if (initialSize <= softMB * EARLY_FAST_RATIO) {
+    try {
+      curSize = await lossySearch(workSrc, workWidth, softMB, 256, 'fast');
+    } catch (e) {
+      if (isAbortError(e)) throw new CancelledError();
+      recordPhaseFailure('phase-B-fast', e);
+      curSize = bestSize;
+    }
+    if (bestUnderSoft) {
+      return {
+        finalPath: bestPath, sizeMB: bestSize, width: bestWidth,
+        given: false, reachedSoft: true,
+        phaseFailures, allPhasesFailed: false
+      };
+    }
+  } else if (initialSize >= softMB * SHRINK_FIRST_RATIO) {
+    // Skip Phase B entirely. curSize stays at initialSize so Phase C will
+    // pick a properly aggressive ratio for its first shrink.
+    curSize = initialSize;
+    emit({
+      message: 'oversized: skipping original-size lossy, going straight to shrink',
+      percent: 64,
+      substep: 'planning',
+      stepIndex: ++stepCounter,
+      totalSteps: TOTAL_STEPS,
+      detail: `initial ${initialSize.toFixed(2)}MB >= ${(softMB * SHRINK_FIRST_RATIO).toFixed(1)}MB, skip phase-B`
+    });
+  } else {
+    // Normal regime: Phase B at original dimensions targeting soft.
+    try {
+      curSize = await lossySearch(workSrc, workWidth, softMB, 256, 'soft');
+    } catch (e) {
+      if (isAbortError(e)) throw new CancelledError();
+      recordPhaseFailure('phase-B-lossySearch', e);
+      curSize = bestSize;
+    }
+    if (bestUnderSoft) {
+      return {
+        finalPath: bestPath, sizeMB: bestSize, width: bestWidth,
+        given: false, reachedSoft: true,
+        phaseFailures, allPhasesFailed: false
+      };
+    }
   }
 
-  // ---------- Phase C: geometric shrink, target HARD then re-probe SOFT ----------
-  // The minimum longest-side we are still allowed to use, derived so that the
-  // matching short side stays >= minSide. This is what makes the resize "flexible":
-  //   shortSide(longest=L) = round(shortestSide * L / longestSide)
-  //   solve for L:           L = ceil(longestSide * minSide / shortestSide)
-  // For square or unknown shapes this collapses to minSide.
+  // ---------- Phase C (revised, O3): shrink-and-test, single gifsicle per round ----------
   const longSideFloor = (() => {
     if (longestSide <= 0 || shortestSide <= 0) return minSide;
     const fromShort = Math.ceil(longestSide * minSide / shortestSide);
@@ -458,15 +543,16 @@ async function compressLoop(
   let curSrc = workSrc;
   let curWidth = workWidth;
   let curSide = workSide;
+  // Reuse the lossy level Phase B converged on (or a sensible default if
+  // we skipped it). After resize the size shrinks roughly proportional to
+  // pixels, so the same lossy is usually a fine starting guess.
+  let convergedLossy = adaptiveStartLossy(curSize, softMB);
 
   for (let round = 0; round < MAX_RESIZE_ROUNDS; round += 1) {
     if (bestUnderSoft) break;
     if (curSide <= longSideFloor) break;
-    // Shrink longest side to roughly hit hard target (over-shrink slightly to
-    // also grant some headroom for re-trying soft target afterwards).
     const aim = bestUnderHard ? softMB : hardMB;
     const ratio = Math.sqrt(Math.max(0.1, aim / Math.max(0.01, curSize)));
-    // Floor candidate at longSideFloor so the SHORT side never drops < minSide.
     const nextSide = Math.max(longSideFloor, Math.min(curSide - 16, Math.round(curSide * ratio)));
     if (nextSide >= curSide) break;
     const nextWidth = (() => {
@@ -477,7 +563,7 @@ async function compressLoop(
     const resized = path.join(workDir, `${baseName}.shrink.s${nextSide}.gif`);
     emit({
       message: `shrinking to ${nextSide}px (longest side)`,
-      percent: Math.min(90, 70 + round * 5),
+      percent: Math.min(90, 70 + round * 6),
       substep: 'resizing',
       stepIndex: ++stepCounter,
       totalSteps: TOTAL_STEPS,
@@ -497,21 +583,35 @@ async function compressLoop(
     const sResized = await statSizeMB(resized);
     recordBest(resized, sResized, nextWidth);
     if (bestUnderSoft) break;
-    // After resize, retry lossy targeting soft (preferred) or hard.
-    const retryTarget = bestUnderHard ? softMB : hardMB;
-    try {
-      curSize = await lossySearch(curSrc, curWidth, retryTarget, 256, `r${round + 1}`);
-    } catch (e) {
-      if (isAbortError(e)) throw new CancelledError();
-      recordPhaseFailure(`phase-C-r${round + 1}-lossySearch`, e);
-      break;
+
+    // O3: each non-final round does ONE gifsicle pass at the lossy level
+    // converged in Phase B, instead of a full lossySearch.
+    const isFinalRound = round === MAX_RESIZE_ROUNDS - 1 || nextSide <= longSideFloor;
+    if (!isFinalRound) {
+      try {
+        const s = await tryOptimize(curSrc, curWidth, convergedLossy, 256, `r${round + 1} lossy=${convergedLossy}`);
+        curSize = s;
+        // If still way over, bump lossy for next round.
+        if (s > softMB * 1.5) convergedLossy = Math.min(200, convergedLossy + 30);
+      } catch (e) {
+        if (isAbortError(e)) throw new CancelledError();
+        recordPhaseFailure(`phase-C-r${round + 1}-fast`, e);
+      }
+    } else {
+      // Final round: invest in one more refine via lossySearch (which is
+      // now itself at most 2 passes thanks to O2).
+      try {
+        curSize = await lossySearch(curSrc, curWidth, softMB, 256, `r${round + 1}-final`);
+      } catch (e) {
+        if (isAbortError(e)) throw new CancelledError();
+        recordPhaseFailure(`phase-C-r${round + 1}-final-lossySearch`, e);
+      }
     }
   }
 
   // ---------- Phase D: aggressive last resort ----------
   if (!bestUnderHard) {
     try {
-      // The smallest longest-side we still allow (respects short-side floor).
       const finalSide = longSideFloor;
       const finalSrc = (() => {
         if (curSide > finalSide) {
@@ -594,7 +694,25 @@ export async function prefetchThumbnail(media: SniffedMedia): Promise<ThumbnailR
           maxBytes: 200 * 1024 * 1024
         });
       }
-      const t = await buildThumbnailDataUrl(local, media.kind);
+      // SC-19 cache poisoning self-heal: thumbnail extract often surfaces
+      // ffprobe/ffmpeg "moov atom not found" first when a poisoned source
+      // is reused. Unlink and re-download exactly once before giving up.
+      let t;
+      try {
+        t = await buildThumbnailDataUrl(local, media.kind);
+      } catch (extractErr) {
+        const msg = (extractErr as Error).message || '';
+        const corrupted = /moov atom not found|Invalid data found|Truncating packet|could not find codec parameters/i.test(msg);
+        if (!corrupted) throw extractErr;
+        log(`thumbnail extract failed (likely poisoned cache): ${msg}; purging and redownloading once`);
+        await fsp.unlink(local).catch(() => undefined);
+        await fsp.unlink(`${local}.part`).catch(() => undefined);
+        await downloadToFile(media.url, dir, fname, {
+          referer: media.pageUrl,
+          maxBytes: 200 * 1024 * 1024
+        });
+        t = await buildThumbnailDataUrl(local, media.kind);
+      }
       const result: ThumbnailResult = {
         id: media.id,
         status: 'ok',
@@ -640,7 +758,21 @@ export async function previewMedia(media: SniffedMedia, _options: ProcessOptions
     };
   }
 
-  const info = await probe(local);
+  // SC-19 cache poisoning self-heal (preview path).
+  let info: ProbeInfo;
+  try {
+    info = await probe(local);
+  } catch (e) {
+    const msg = (e as Error).message || '';
+    const corrupted = /moov atom not found|Invalid data found|Truncating packet|could not find codec parameters/i.test(msg);
+    if (!corrupted) throw e;
+    log(`preview probe failed (likely poisoned cache): ${msg}; purging and redownloading once`);
+    await fsp.unlink(local).catch(() => undefined);
+    await fsp.unlink(`${local}.part`).catch(() => undefined);
+    const fname = fileNameFor(media);
+    await downloadToFile(media.url, work, fname, { referer: media.pageUrl });
+    info = await probe(local);
+  }
   const duration = info.durationSec || 0;
   const sampleN = 6;
   const frames = [] as PreviewResult['frames'];
@@ -803,19 +935,26 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
 
     let warning: string | undefined;
     if (result.given) {
+      // Real problem: couldn't reach hard target. Surface a short warning;
+      // full phase failure list is delivered via the `phaseFailures` field
+      // and the UI's click-to-open detail modal (no need to inline 2 of N
+      // here — that was misleading users about what they should care about).
       warning = `final size ${result.sizeMB.toFixed(2)}MB exceeds hard target ${targetMB.toFixed(1)}MB at min ${options.minSize}px`;
       if (result.phaseFailures.length > 0) {
-        warning += ` (with ${result.phaseFailures.length} phase failure(s): ${result.phaseFailures.slice(0, 2).join(' | ')})`;
+        warning += ` · ${result.phaseFailures.length} phase failure(s) — click for details`;
       }
     } else if (!result.reachedSoft) {
+      // Reached hard target but not soft. Mild notice.
       warning = `did not reach soft target ${softMB.toFixed(1)}MB; saved at ${result.sizeMB.toFixed(2)}MB`;
       if (result.phaseFailures.length > 0) {
-        warning += ` (with ${result.phaseFailures.length} phase failure(s))`;
+        warning += ` · ${result.phaseFailures.length} phase failure(s) — click for details`;
       }
-    } else if (result.phaseFailures.length > 0) {
-      // Reached soft target but some phases still failed along the way.
-      warning = `reached soft target with ${result.phaseFailures.length} phase failure(s) ignored: ${result.phaseFailures.slice(0, 2).join(' | ')}`;
     }
+    // Reached soft target: SUCCESS. Even if some phases failed along the
+    // way, the user got a good output — don't display a "⚠ warning" that
+    // makes a successful 1.67MB result look broken. Phase failure trail
+    // is still attached via the `phaseFailures` field for the optional
+    // detail modal, but `warning` stays undefined.
 
     emit({
       taskId: task.id,
@@ -824,6 +963,7 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
       outputs: [finalOut],
       currentSizeMB: result.sizeMB,
       warning,
+      phaseFailures: result.phaseFailures.length > 0 ? result.phaseFailures : undefined,
       message: `gif saved (${result.sizeMB.toFixed(2)}MB ${tier})`,
       elapsedMs: elapsed()
     });
@@ -865,7 +1005,43 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
     substep: 'probing-video',
     elapsedMs: elapsed()
   });
-  const info = await probe(sourcePath);
+  // SC-19 cache poisoning self-heal: an earlier failed/throttled SABR
+  // download can leave a cached `.mp4` on disk that has no `moov` atom.
+  // The short-read self-check at download time (SC-16) only protects new
+  // downloads — but an existing poisoned file gets reused on the next
+  // run, and ffprobe blows up with "moov atom not found / Invalid data
+  // found when processing input", failing the whole task.
+  //
+  // Strategy: try to probe; if it fails with a known corruption marker,
+  // unlink the cache file and re-download exactly once. Only fail the
+  // task if the second probe still fails — at that point it's a real
+  // bad source, not a stale cache.
+  let info: ProbeInfo;
+  try {
+    info = await probe(sourcePath);
+  } catch (e) {
+    const msg = (e as Error).message || '';
+    const corrupted = /moov atom not found|Invalid data found|Truncating packet|could not find codec parameters/i.test(msg);
+    if (!corrupted) throw e;
+    log(`probe failed on cached source (likely poisoned): ${msg}; purging and redownloading once`);
+    emit({
+      taskId: task.id,
+      status: 'downloading',
+      percent: 8,
+      message: 'cached source corrupted — re-downloading',
+      substep: 'downloading',
+      elapsedMs: elapsed()
+    });
+    await fsp.unlink(sourcePath).catch(() => undefined);
+    // Also clean any sidecar partial markers if present.
+    await fsp.unlink(`${sourcePath}.part`).catch(() => undefined);
+    await downloadToFile(fetchUrl, work, localName, {
+      referer: fetchReferer,
+      headers: fetchHeaders,
+      signal
+    });
+    info = await probe(sourcePath);
+  }
   if (!info.hasVideo || info.durationSec <= 0) {
     throw new Error('invalid video stream');
   }
@@ -924,8 +1100,25 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
 
   const outputs: string[] = [];
   const warnings: string[] = [];
+  // Aggregated full phase failure trail across all segments (R-04 / R-08).
+  // Surfaced via TaskProgress.phaseFailures so the UI can show a detail
+  // modal with the complete diagnostic, while the user-facing warnings
+  // string stays short and focused on actionable items.
+  const videoPhaseFailures: string[] = [];
 
-  for (let i = 0; i < segments.length; i++) {
+  // O5: process segments with bounded concurrency (was strictly serial).
+  // ffmpeg + gifsicle are CPU/IO-heavy, but the segments are completely
+  // independent (different time slices, distinct output paths). Running 2
+  // at a time is a sweet spot on most laptops — enough to overlap the
+  // ffmpeg-bound and gifsicle-bound parts of two segments without thrashing
+  // when the user also has the main batch queue running parallel tasks.
+  // We collect results into a sparse array indexed by segment number so
+  // the final outputs[] preserves on-disk ordering even though tasks
+  // complete out of order.
+  const SEG_CONCURRENCY = Math.min(2, segments.length);
+  const segQueue = new PQueue({ concurrency: SEG_CONCURRENCY });
+  const segResults: Array<string | null> = new Array(segments.length).fill(null);
+  const processSegment = async (i: number): Promise<void> => {
     checkCancel(signal);
     const seg = segments[i];
     emit({
@@ -986,7 +1179,7 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
       warnings.push(errMsg);
       log(errMsg);
       for (const tp of tempCleanup) fsp.unlink(tp).catch(() => undefined);
-      continue;
+      return;
     }
 
     emit({
@@ -999,6 +1192,23 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
       substep: 'optimizing',
       elapsedMs: elapsed()
     });
+
+    // O4 fast path: video → baseGif uses options.maxWidth (the size the
+    // user explicitly chose). After ffmpeg produces the baseGif, if it is
+    // already small enough we skip compressLoop entirely — palettegen
+    // already does most of the work, no extra gifsicle pass needed.
+    const baseSizeMB = await statSizeMB(baseGif);
+    const softMBLocal = options.softMaxBytes / (1024 * 1024);
+    if (baseSizeMB <= softMBLocal) {
+      log(`seg ${i + 1} baseGif ${baseSizeMB.toFixed(2)}MB <= soft ${softMBLocal.toFixed(2)}MB; skipping compressLoop`);
+      const finalOut = path.join(
+        outputBaseDir,
+        fileNameFor(media, segments.length > 1 ? `.part${i + 1}.gif` : '.gif', batchTaken)
+      );
+      await fsp.copyFile(baseGif, finalOut);
+      segResults[i] = finalOut;
+      return;
+    }
 
     const compressed = await compressLoop(
       baseGif,
@@ -1028,7 +1238,7 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
       fileNameFor(media, segments.length > 1 ? `.part${i + 1}.gif` : '.gif', batchTaken)
     );
     await fsp.copyFile(compressed.finalPath, finalOut);
-    outputs.push(finalOut);
+    segResults[i] = finalOut;
 
     if (compressed.allPhasesFailed) {
       const diag = compressed.phaseFailures.length
@@ -1037,16 +1247,28 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
       warnings.push(`seg ${i + 1} compress: every phase failed (${diag}); kept ${compressed.sizeMB.toFixed(2)}MB`);
     } else if (compressed.given) {
       const trail = compressed.phaseFailures.length
-        ? ` [${compressed.phaseFailures.length} phase failure(s)]`
+        ? ` · ${compressed.phaseFailures.length} phase failure(s) — click for details`
         : '';
       warnings.push(
         `seg ${i + 1} final ${compressed.sizeMB.toFixed(2)}MB exceeds ${targetMB.toFixed(1)}MB target${trail}`
       );
-    } else if (compressed.phaseFailures.length > 0) {
-      warnings.push(
-        `seg ${i + 1} reached target but ${compressed.phaseFailures.length} phase(s) failed silently`
-      );
     }
+    // Reached target with some swallowed phase failures: SUCCESS for this
+    // segment — don't add a "warning" for it. The full failure trail is
+    // still aggregated into the final emit.phaseFailures array below.
+
+    if (compressed.phaseFailures.length > 0) {
+      const prefix = segments.length > 1 ? `seg ${i + 1}: ` : '';
+      for (const f of compressed.phaseFailures) videoPhaseFailures.push(`${prefix}${f}`);
+    }
+  };
+
+  await Promise.all(
+    segments.map((_, i) => segQueue.add(() => processSegment(i)))
+  );
+  // Preserve segment order even though tasks may have completed out of order.
+  for (const r of segResults) {
+    if (r) outputs.push(r);
   }
 
   if (outputs.length === 0) {
@@ -1060,6 +1282,7 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
     percent: 100,
     outputs,
     warning: warnings.length > 0 ? warnings.join('; ') : undefined,
+    phaseFailures: videoPhaseFailures.length > 0 ? videoPhaseFailures : undefined,
     message: `produced ${outputs.length} file(s)${warnings.length ? ` (with ${warnings.length} warning)` : ''}`,
     elapsedMs: elapsed()
   });

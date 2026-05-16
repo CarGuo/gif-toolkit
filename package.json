@@ -17,7 +17,7 @@
     "package:win": "npm run build && electron-builder --win",
     "lint": "eslint \"src/**/*.{ts,tsx}\" --max-warnings 0",
     "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
-    "postinstall": "npm rebuild sharp ffmpeg-static ffprobe-static gifsicle ytdlp-nodejs",
+    "postinstall": "npm rebuild sharp ffmpeg-static ffprobe-static @343dev/gifsicle ytdlp-nodejs",
     "lockfile:lint": "lockfile-lint --path package-lock.json --type npm --validate-https --allowed-hosts npm --validate-integrity --validate-package-names"
   },
   "engines": {
@@ -25,11 +25,11 @@
     "npm": ">=11.10.0"
   },
   "dependencies": {
+    "@343dev/gifsicle": "^1.1.0",
     "axios": "^1.7.7",
     "cheerio": "1.0.0-rc.12",
     "ffmpeg-static": "^5.2.0",
     "ffprobe-static": "^3.1.0",
-    "gifsicle": "^4.0.1",
     "p-queue": "^6.6.2",
     "sharp": "^0.33.5",
     "ytdlp-nodejs": "^3.4.4"
@@ -69,7 +69,7 @@
     "asarUnpack": [
       "node_modules/ffmpeg-static/**",
       "node_modules/ffprobe-static/**",
-      "node_modules/gifsicle/**",
+      "node_modules/@343dev/gifsicle/**",
       "node_modules/@img/**",
       "node_modules/sharp/**",
       "node_modules/@ffprobe-installer/**",

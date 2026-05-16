@@ -2,13 +2,19 @@ import { spawn, ChildProcess } from 'child_process';
 import path from 'path';
 import { promises as fsp } from 'fs';
 import sharp from 'sharp';
-import { getFfmpegPath, getFfprobePath, getGifsiclePath } from './binaries';
+import { getFfmpegPath, getFfprobePath, getGifsiclePath, gifsicleSupportsLossy } from './binaries';
 
 export interface ProbeInfo {
   durationSec: number;
   width: number;
   height: number;
   hasVideo: boolean;
+  /** Frame rate parsed from `r_frame_rate` (e.g. "30000/1001" → 29.97).
+   *  Falls back to `avg_frame_rate`. 0 when unknown. */
+  frameRate: number;
+  /** Best-effort frame count. Prefers `nb_frames` (animated GIF / mkv with
+   *  index), falls back to `durationSec * frameRate`. 0 when unknown. */
+  nbFrames: number;
 }
 
 interface RunOpts {
@@ -152,6 +158,9 @@ interface FfprobeStream {
   width?: number;
   height?: number;
   duration?: string;
+  r_frame_rate?: string;
+  avg_frame_rate?: string;
+  nb_frames?: string;
 }
 interface FfprobeFormat {
   duration?: string;
@@ -159,6 +168,14 @@ interface FfprobeFormat {
 interface FfprobeOutput {
   streams: FfprobeStream[];
   format: FfprobeFormat;
+}
+
+/** Parse an ffprobe rational string like "30000/1001" into a Number. */
+function parseRational(s: string | undefined): number {
+  if (!s) return 0;
+  const [a, b] = s.split('/').map((n) => Number(n));
+  if (!Number.isFinite(a) || !Number.isFinite(b) || b === 0) return 0;
+  return a / b;
 }
 
 export async function probe(file: string): Promise<ProbeInfo> {
@@ -174,11 +191,20 @@ export async function probe(file: string): Promise<ProbeInfo> {
   ]);
   const v = data.streams.find((s) => s.codec_type === 'video');
   const dur = Number(v?.duration ?? data.format?.duration ?? 0) || 0;
+  // Prefer r_frame_rate (real / container) over avg_frame_rate (which is
+  // often a noisy estimate for VFR sources). Fall back to avg if r is 0/0.
+  const fps = parseRational(v?.r_frame_rate) || parseRational(v?.avg_frame_rate);
+  const nbFromTag = Number(v?.nb_frames ?? 0);
+  const nbFrames = Number.isFinite(nbFromTag) && nbFromTag > 0
+    ? nbFromTag
+    : (dur > 0 && fps > 0 ? Math.round(dur * fps) : 0);
   return {
     durationSec: dur,
     width: v?.width ?? 0,
     height: v?.height ?? 0,
-    hasVideo: !!v
+    hasVideo: !!v,
+    frameRate: fps,
+    nbFrames
   };
 }
 
@@ -401,19 +427,17 @@ export async function gifsicleOptimize(
   const gifsicle = getGifsiclePath();
   const safeLossy = Number.isFinite(lossy) ? Math.max(0, Math.floor(lossy)) : 0;
   const safeColors = Number.isFinite(colors) ? Math.max(2, Math.min(256, Math.floor(colors))) : 256;
-  await run(
-    gifsicle,
-    [
-      '-O3',
-      `--lossy=${safeLossy}`,
-      '--colors',
-      String(safeColors),
-      input,
-      '-o',
-      output
-    ],
-    { signal }
-  );
+  const args = ['-O3'];
+  // Skip --lossy if the resolved binary doesn't understand it (some older
+  // imagemin/gifsicle-bin builds < 1.92 reject it with
+  // "gifsicle: unrecognized option '--lossy=N'" and the entire optimize
+  // step fails — degrading silently to no-lossy is far better than
+  // taking the whole compress phase down with us).
+  if (safeLossy > 0 && gifsicleSupportsLossy()) {
+    args.push(`--lossy=${safeLossy}`);
+  }
+  args.push('--colors', String(safeColors), input, '-o', output);
+  await run(gifsicle, args, { signal });
 }
 
 /** Resize an animated GIF (or any image) keeping aspect ratio.

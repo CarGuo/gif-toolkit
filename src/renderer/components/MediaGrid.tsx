@@ -125,7 +125,7 @@ const Thumb: React.FC<{ media: SniffedMedia }> = ({ media }) => {
       {state.status === 'error' && (
         <>
           <div className="thumb-skeleton dim" />
-          <div className="thumb-error-corner" aria-label="缩略图生成失败">
+          <div className="thumb-error-center" aria-label="缩略图生成失败">
             <span>!</span>
           </div>
         </>

@@ -107,6 +107,11 @@ export interface TaskProgress {
   bytesDownloaded?: number;
   /** Total bytes (when known). */
   bytesTotal?: number;
+  /** Optional full diagnostic list of phase failures swallowed during
+   *  compression (R-04 / R-08). The UI can show these in a click-to-open
+   *  modal so users see the complete trail rather than the first 2 only.
+   *  Empty / undefined means no swallowed failures. */
+  phaseFailures?: string[];
 }
 
 export interface ProcessTask {

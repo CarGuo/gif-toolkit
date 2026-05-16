@@ -236,25 +236,28 @@ input[type="text"]:focus { border-color: var(--accent); }
   font-size: 16px;
 }
 /* Thumbnail error is an INDEPENDENT failure (just the preview image),
- * NOT the resolve / convert pipeline. Render a small bottom-right badge
- * instead of a full-card red overlay so users don't think the whole
- * card has failed. Hover reveals a tooltip clarifying the scope. */
-.thumb-error-corner {
+ * NOT the resolve / convert pipeline. Place the badge in the geometric
+ * CENTER of the thumb area to avoid overlap with the bottom chips
+ * ("解析中…", "▶ 处理此项", "✓ 已解析") that sit on the same canvas.
+ * Slightly larger than a corner badge so it remains a clearly readable
+ * indicator without going back to the misleading full-card red overlay. */
+.thumb-error-center {
   position: absolute;
-  right: 6px;
-  bottom: 6px;
-  width: 18px;
-  height: 18px;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 28px;
+  height: 28px;
   border-radius: 50%;
-  background: rgba(239, 91, 110, 0.85);
+  background: rgba(239, 91, 110, 0.9);
   color: #fff;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-weight: 700;
-  font-size: 12px;
+  font-weight: 800;
+  font-size: 16px;
   line-height: 1;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
   pointer-events: none;
   z-index: 2;
 }
