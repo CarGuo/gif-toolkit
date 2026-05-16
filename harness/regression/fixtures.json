@@ -1,0 +1,113 @@
+{
+  "fixtures": [
+    {
+      "id": "SC-01-blogger",
+      "kind": "sniff",
+      "input": "synthetic-html: 4 imgs of blogger.googleusercontent.com with size hints (=s320 / =s640 / =s1280) for resource A and 1 img for resource B",
+      "expected": {
+        "snifferCount": 2,
+        "itemsContaining": ["A", "B"]
+      },
+      "notes": "Tests dedupKey collapses size-hint variants without using a host whitelist."
+    },
+    {
+      "id": "SC-02-long-strip",
+      "kind": "compress",
+      "input": "synthetic-mp4: 4000x300, 2s, color=red",
+      "options": {
+        "maxSide": 800,
+        "minSide": 240
+      },
+      "expected": {
+        "outputTier": "skipped",
+        "errorClass": "AspectRatioConstraintError"
+      },
+      "notes": "Tests early fail on impossible aspect ratio constraints."
+    },
+    {
+      "id": "SC-03a-soft-fit",
+      "kind": "compress",
+      "input": "any 720p 5s mp4 producing ~1.5MB raw GIF",
+      "options": {
+        "softMaxBytes": 2097152,
+        "maxBytes": 4194304,
+        "maxSide": 800,
+        "minSide": 240
+      },
+      "expected": {
+        "outputMaxBytes": 2097152,
+        "outputTier": "best"
+      }
+    },
+    {
+      "id": "SC-03c-hard-only",
+      "kind": "compress",
+      "input": "any 1080p 12s mp4 producing ~8MB raw GIF",
+      "options": {
+        "softMaxBytes": 2097152,
+        "maxBytes": 4194304,
+        "maxSide": 800,
+        "minSide": 240
+      },
+      "expected": {
+        "outputMaxBytes": 4194304,
+        "outputTier": "fallback"
+      }
+    },
+    {
+      "id": "SC-04-vimeo-iframe",
+      "kind": "sniff",
+      "input": "synthetic-html: <iframe src=\"https://player.vimeo.com/video/1162698597?h=bb3311a71a\"></iframe>",
+      "expected": {
+        "snifferCount": 1,
+        "itemsContaining": ["player.vimeo.com/video/1162698597"],
+        "requiresExternalDownload": true,
+        "embedHost": "vimeo.com"
+      },
+      "notes": "Embed must be detected, marked, and NOT processed."
+    },
+    {
+      "id": "SC-04-youtube-iframe",
+      "kind": "sniff",
+      "input": "synthetic-html: <iframe src=\"https://www.youtube.com/embed/dQw4w9WgXcQ\"></iframe>",
+      "expected": {
+        "snifferCount": 1,
+        "embedHost": "youtube.com",
+        "requiresExternalDownload": true
+      }
+    },
+    {
+      "id": "SC-04-non-player-iframe-must-be-ignored",
+      "kind": "sniff",
+      "input": "synthetic-html: <iframe src=\"https://disqus.com/embed/comments/?base=default\"></iframe>",
+      "expected": {
+        "snifferCount": 0
+      },
+      "notes": "Must not classify random iframes as embed videos."
+    },
+    {
+      "id": "SC-05-progress-emits",
+      "kind": "flow",
+      "input": "any video task lasting >3s",
+      "expected": {
+        "minProgressEmits": 5,
+        "requiredFields": ["substep", "detail", "elapsedMs", "stepIndex", "totalSteps"]
+      }
+    },
+    {
+      "id": "SC-06-concurrency-clamp",
+      "kind": "flow",
+      "input": "options.concurrency in {0, 1, 3, 5, 8, 999}",
+      "expected": {
+        "afterClamp": {
+          "0": 1,
+          "1": 1,
+          "3": 3,
+          "5": 5,
+          "8": 8,
+          "999": 8
+        }
+      }
+    }
+  ]
+}

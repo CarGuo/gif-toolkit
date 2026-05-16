@@ -1,0 +1,525 @@
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ProcessOptions, SniffedMedia, PreviewResult } from '../../shared/types';
+import { CropBox } from './CropBox';
+import { Timeline } from './Timeline';
+
+type Tab = 'crop' | 'frames';
+
+interface Props {
+  media: SniffedMedia;
+  options: ProcessOptions;
+  onChangeOptions: (n: ProcessOptions) => void;
+  onRequestPreview: () => void;
+  previewing: boolean;
+  preview: PreviewResult | null;
+  onClose: () => void;
+  onProcessOne?: (media: SniffedMedia) => Promise<void> | void;
+  processOneDisabled?: boolean;
+  processOneLabel?: string;
+}
+
+function fmtBytes(n?: number): string {
+  if (!n || n <= 0) return '';
+  const mb = n / (1024 * 1024);
+  if (mb >= 1) return `${mb.toFixed(2)} MB`;
+  return `${(n / 1024).toFixed(0)} KB`;
+}
+
+function fileName(u: string): string {
+  try {
+    const p = new URL(u).pathname;
+    return p.split('/').pop() || u;
+  } catch {
+    return u;
+  }
+}
+
+export const PreviewModal: React.FC<Props> = ({
+  media,
+  options,
+  onChangeOptions,
+  onRequestPreview,
+  previewing,
+  preview,
+  onClose,
+  onProcessOne,
+  processOneDisabled,
+  processOneLabel
+}) => {
+  const [tab, setTab] = useState<Tab>('crop');
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [targetEl, setTargetEl] = useState<HTMLElement | null>(null);
+  const [duration, setDuration] = useState(0);
+  const [naturalSize, setNaturalSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
+  const [currentTime, setCurrentTime] = useState(0);
+  const [mediaError, setMediaError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const isGif = media.kind === 'gif';
+  const isImage = media.kind === 'image';
+  const isVideo = !isGif && !isImage;
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  useEffect(() => {
+    setCurrentTime(0);
+    setDuration(0);
+    setNaturalSize({ w: 0, h: 0 });
+    setMediaError(null);
+    setTargetEl(null);
+    setCopied(false);
+    setTab('crop');
+    onChangeOptions({ ...options, cropRect: undefined, startSec: undefined, endSec: undefined });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [media.id]);
+
+  useEffect(() => {
+    if ((isGif || isImage) && tab === 'frames') setTab('crop');
+  }, [isGif, isImage, tab]);
+
+  const onMaskClick = useCallback((e: React.MouseEvent) => {
+    if (e.target === e.currentTarget) onClose();
+  }, [onClose]);
+
+  const copyUrl = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(media.url);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setCopied(false);
+    }
+  }, [media.url]);
+
+  const onCancelCrop = useCallback(() => {
+    onChangeOptions({ ...options, cropRect: undefined });
+  }, [options, onChangeOptions]);
+
+  const onResetTimeline = useCallback(() => {
+    if (isVideo && duration > 0) {
+      onChangeOptions({
+        ...options,
+        startSec: 0,
+        endSec: Math.min(options.maxSegmentSec, duration)
+      });
+    } else {
+      onChangeOptions({ ...options, startSec: undefined, endSec: undefined });
+    }
+  }, [options, onChangeOptions, isVideo, duration]);
+
+  const onClickProcessOne = useCallback(() => {
+    if (!onProcessOne || processOneDisabled) return;
+    void onProcessOne(media);
+  }, [onProcessOne, processOneDisabled, media]);
+
+  const showFrames = tab === 'frames' && isVideo;
+
+  const sizeText = naturalSize.w > 0 ? `${naturalSize.w}×${naturalSize.h}` : (
+    media.width && media.height ? `${media.width}×${media.height}` : '-'
+  );
+
+  return (
+    <div className="modal-mask" onClick={onMaskClick}>
+      <div className="modal" role="dialog" aria-modal="true">
+        <div className="modal-header">
+          <span className={`badge ${media.kind}`}>{media.kind}</span>
+          <span className="modal-title-text" title={media.url}>{fileName(media.url)}</span>
+          <span className="modal-header-spacer" />
+          <span className="modal-esc-hint">Esc 关闭</span>
+          <button className="modal-close" onClick={onClose} aria-label="关闭">×</button>
+        </div>
+
+        <div className="modal-tabs">
+          <button
+            className={`modal-tab ${tab === 'crop' ? 'active' : ''}`}
+            onClick={() => setTab('crop')}
+          >
+            ① 预览 / 裁剪
+          </button>
+          <button
+            className={`modal-tab ${tab === 'frames' ? 'active' : ''}`}
+            onClick={() => !isImage && !isGif && setTab('frames')}
+            disabled={isImage || isGif}
+            title={isImage || isGif ? '抽帧仅支持视频' : ''}
+          >
+            ② 抽帧 / 速度
+          </button>
+        </div>
+
+        <div className="modal-body">
+          <div className="modal-stage">
+            <div className="modal-player">
+              {isGif || isImage ? (
+                <img
+                  ref={(el) => { setTargetEl(el); }}
+                  src={media.url}
+                  alt="preview"
+                  onLoad={(e) => {
+                    const t = e.currentTarget;
+                    setNaturalSize({ w: t.naturalWidth, h: t.naturalHeight });
+                  }}
+                  onError={() => setMediaError('图像加载失败(可能因为 CORS 或链接失效),不影响后台抓取')}
+                />
+              ) : (
+                <video
+                  ref={(el) => { videoRef.current = el; setTargetEl(el); }}
+                  src={media.url}
+                  controls
+                  preload="metadata"
+                  onLoadedMetadata={(e) => {
+                    const t = e.currentTarget;
+                    setDuration(t.duration);
+                    setNaturalSize({ w: t.videoWidth, h: t.videoHeight });
+                    if (options.endSec === undefined) {
+                      onChangeOptions({
+                        ...options,
+                        startSec: 0,
+                        endSec: Math.min(options.maxSegmentSec, t.duration)
+                      });
+                    }
+                  }}
+                  onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
+                  onError={() => setMediaError('视频加载失败(可能因为 CORS 或链接失效),不影响后台抓取')}
+                />
+              )}
+              {tab === 'crop' && naturalSize.w > 0 ? (
+                <div className="crop-overlay">
+                  <CropBox
+                    naturalSize={naturalSize}
+                    targetEl={targetEl}
+                    value={options.cropRect}
+                    onChange={(rect) => onChangeOptions({ ...options, cropRect: rect })}
+                  />
+                </div>
+              ) : null}
+            </div>
+          </div>
+
+          <aside className="modal-side">
+            {tab === 'crop' ? (
+              <CropPane
+                media={media}
+                options={options}
+                onChangeOptions={onChangeOptions}
+                duration={duration}
+                naturalSize={naturalSize}
+                currentTime={currentTime}
+                videoRef={videoRef}
+                isVideo={isVideo}
+                sizeText={sizeText}
+                onCopyUrl={copyUrl}
+                copied={copied}
+              />
+            ) : (
+              <FramesPane
+                media={media}
+                options={options}
+                onChangeOptions={onChangeOptions}
+                onRequestPreview={onRequestPreview}
+                previewing={previewing}
+                preview={preview}
+                disabled={!isVideo}
+                sizeText={sizeText}
+                onCopyUrl={copyUrl}
+                copied={copied}
+              />
+            )}
+
+            {(isImage || isGif) && tab === 'frames' ? (
+              <div className="notice danger" style={{ marginTop: 10 }}>抽帧仅支持视频</div>
+            ) : null}
+            {mediaError ? (
+              <div className="notice danger" style={{ marginTop: 10 }}>{mediaError}</div>
+            ) : null}
+            {!showFrames && preview && preview.error ? (
+              <div className="notice danger" style={{ marginTop: 10 }}>预览失败: {preview.error}</div>
+            ) : null}
+          </aside>
+        </div>
+
+        <div className="modal-footer">
+          <div className="modal-footer-left">
+            <button onClick={copyUrl} title={media.url}>
+              {copied ? '已复制' : '复制 URL'}
+            </button>
+            <button onClick={onCancelCrop} disabled={!options.cropRect}>取消裁剪</button>
+            <button onClick={onResetTimeline} disabled={!isVideo}>重置时间轴</button>
+          </div>
+          <div className="modal-footer-right">
+            <button onClick={onClose}>关闭</button>
+            {onProcessOne ? (
+              <button
+                className="primary"
+                onClick={onClickProcessOne}
+                disabled={!!processOneDisabled}
+                title={
+                  media.requiresExternalDownload
+                    ? `视频由 ${media.embedHost || '第三方'} 嵌入(如 Vimeo / YouTube),无法直接抓取视频流。请到原页面获取 .mp4 直链后再回来嗅探。`
+                    : processOneDisabled
+                      ? '该项正在处理中…'
+                      : '仅处理本项'
+                }
+              >
+                {media.requiresExternalDownload
+                  ? `${media.embedHost || '第三方'} 嵌入 · 无法直抓`
+                  : processOneLabel || '▶ 单独处理本项'}
+              </button>
+            ) : null}
+          </div>
+        </div>
+
+        <div className="modal-meta-info" aria-hidden style={{ display: 'none' }}>
+          {fmtBytes(media.sizeBytes)}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+interface CropPaneProps {
+  media: SniffedMedia;
+  options: ProcessOptions;
+  onChangeOptions: (n: ProcessOptions) => void;
+  duration: number;
+  naturalSize: { w: number; h: number };
+  currentTime: number;
+  videoRef: React.MutableRefObject<HTMLVideoElement | null>;
+  isVideo: boolean;
+  sizeText: string;
+  onCopyUrl: () => void;
+  copied: boolean;
+}
+
+const CropPane: React.FC<CropPaneProps> = ({
+  media,
+  options,
+  onChangeOptions,
+  duration,
+  naturalSize,
+  currentTime,
+  videoRef,
+  isVideo,
+  sizeText,
+  onCopyUrl,
+  copied
+}) => {
+  return (
+    <div className="modal-pane">
+      <h3 className="modal-pane-title">媒体信息</h3>
+      <InfoList
+        media={media}
+        sizeText={sizeText}
+        duration={duration}
+        cropRect={options.cropRect}
+        onCopyUrl={onCopyUrl}
+        copied={copied}
+      />
+
+      <h3 className="modal-pane-title" style={{ marginTop: 16 }}>裁剪</h3>
+      <div className="info-block">
+        {options.cropRect ? (
+          <div>
+            <b>区域:</b> {Math.round(options.cropRect.w)}×{Math.round(options.cropRect.h)} @
+            ({Math.round(options.cropRect.x)}, {Math.round(options.cropRect.y)})
+          </div>
+        ) : (
+          <div className="muted">未裁剪 — 在画面上拖出选区</div>
+        )}
+      </div>
+
+      {isVideo && duration > 0 ? (
+        <>
+          <h3 className="modal-pane-title" style={{ marginTop: 16 }}>时间轴</h3>
+          <Timeline
+            duration={duration}
+            start={options.startSec ?? 0}
+            end={options.endSec ?? duration}
+            maxSegmentSec={options.maxSegmentSec}
+            currentTime={currentTime}
+            onChange={(start, end) => onChangeOptions({ ...options, startSec: start, endSec: end })}
+            onSeek={(t) => {
+              if (videoRef.current) videoRef.current.currentTime = t;
+            }}
+          />
+        </>
+      ) : null}
+
+      <div aria-hidden style={{ display: 'none' }}>{naturalSize.w}</div>
+    </div>
+  );
+};
+
+interface FramesPaneProps {
+  media: SniffedMedia;
+  options: ProcessOptions;
+  onChangeOptions: (n: ProcessOptions) => void;
+  onRequestPreview: () => void;
+  previewing: boolean;
+  preview: PreviewResult | null;
+  disabled: boolean;
+  sizeText: string;
+  onCopyUrl: () => void;
+  copied: boolean;
+}
+
+const FramesPane: React.FC<FramesPaneProps> = ({
+  media,
+  options,
+  onChangeOptions,
+  onRequestPreview,
+  previewing,
+  preview,
+  disabled,
+  sizeText,
+  onCopyUrl,
+  copied
+}) => {
+  const set = useCallback(
+    <K extends keyof ProcessOptions>(k: K, v: ProcessOptions[K]) =>
+      onChangeOptions({ ...options, [k]: v }),
+    [options, onChangeOptions]
+  );
+
+  return (
+    <div className="modal-pane">
+      <h3 className="modal-pane-title">媒体信息</h3>
+      <InfoList
+        media={media}
+        sizeText={sizeText}
+        duration={0}
+        cropRect={options.cropRect}
+        onCopyUrl={onCopyUrl}
+        copied={copied}
+      />
+
+      <h3 className="modal-pane-title" style={{ marginTop: 16 }}>本媒体参数</h3>
+      <div className="modal-options">
+        <NumLabel label="FPS" value={options.fps} min={1} max={60} step={1}
+          onCommit={(n) => set('fps', Math.round(n))} disabled={disabled} />
+        <NumLabel label="速度 (x)" value={options.speed} min={0.25} max={8} step={0.25}
+          onCommit={(n) => set('speed', n)} disabled={disabled} />
+        <NumLabel label="分段时长 (s)" value={options.maxSegmentSec} min={1} max={120} step={1}
+          onCommit={(n) => set('maxSegmentSec', Math.round(n))} disabled={disabled} />
+        <NumLabel label="最小尺寸 (px)" value={options.minSize} min={64} max={4096} step={10}
+          onCommit={(n) => set('minSize', Math.round(n))} disabled={disabled} />
+        <NumLabel label="最大宽度 (px)" value={options.maxWidth}
+          min={Math.max(64, options.minSize)} max={4096} step={1}
+          onCommit={(n) => set('maxWidth', Math.max(options.minSize, Math.round(n)))}
+          disabled={disabled} />
+      </div>
+
+      <div style={{ marginTop: 12 }}>
+        <button
+          className="primary"
+          onClick={onRequestPreview}
+          disabled={previewing || disabled}
+          title={disabled ? '抽帧仅支持视频' : ''}
+        >
+          {previewing ? '生成预览中…' : '抽取关键帧'}
+        </button>
+      </div>
+
+      {preview && preview.error ? (
+        <div className="notice danger" style={{ marginTop: 10 }}>预览失败: {preview.error}</div>
+      ) : null}
+
+      {preview && preview.frames.length > 0 ? (
+        <div className="frames">
+          {preview.frames.map((f) => (
+            <div className="frame" key={f.index}>
+              <img src={f.dataUrl} alt={`f${f.index}`} />
+              {f.timeSec.toFixed(2)}s
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
+interface InfoListProps {
+  media: SniffedMedia;
+  sizeText: string;
+  duration: number;
+  cropRect?: ProcessOptions['cropRect'];
+  onCopyUrl: () => void;
+  copied: boolean;
+}
+
+const InfoList: React.FC<InfoListProps> = ({ media, sizeText, duration, cropRect, onCopyUrl, copied }) => {
+  const dur = duration > 0 ? `${duration.toFixed(1)}s`
+    : (media.durationSec ? `${media.durationSec.toFixed(1)}s` : '-');
+  return (
+    <div className="info-block">
+      <div className="info-row"><span>类型</span><b><span className={`badge ${media.kind}`}>{media.kind}</span></b></div>
+      <div className="info-row"><span>原始尺寸</span><b>{sizeText}</b></div>
+      <div className="info-row"><span>时长</span><b>{dur}</b></div>
+      <div className="info-row"><span>MIME</span><b>{media.mime || '-'}</b></div>
+      <div className="info-row"><span>文件大小</span><b>{fmtBytes(media.sizeBytes) || '-'}</b></div>
+      {cropRect ? (
+        <div className="info-row">
+          <span>裁剪</span>
+          <b>{Math.round(cropRect.w)}×{Math.round(cropRect.h)} @ ({Math.round(cropRect.x)}, {Math.round(cropRect.y)})</b>
+        </div>
+      ) : null}
+      <div className="info-row info-url">
+        <span>URL</span>
+        <span className="url-cell" title={media.url}>{media.url}</span>
+      </div>
+      <div style={{ marginTop: 6 }}>
+        <button onClick={onCopyUrl}>{copied ? '已复制' : '复制 URL'}</button>
+      </div>
+    </div>
+  );
+};
+
+interface NumLabelProps {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  onCommit: (n: number) => void;
+  disabled?: boolean;
+}
+
+const NumLabel: React.FC<NumLabelProps> = ({ label, value, min, max, step, onCommit, disabled }) => {
+  const [text, setText] = useState(String(value));
+  useEffect(() => { setText(String(value)); }, [value]);
+  const commit = () => {
+    const n = Number(text);
+    if (!Number.isFinite(n)) {
+      setText(String(value));
+      return;
+    }
+    let v = n;
+    if (typeof min === 'number') v = Math.max(min, v);
+    if (typeof max === 'number') v = Math.min(max, v);
+    onCommit(v);
+    setText(String(v));
+  };
+  const id = useMemo(() => `num-${label}-${Math.random().toString(36).slice(2, 8)}`, [label]);
+  return (
+    <label htmlFor={id}>
+      {label}
+      <input
+        id={id}
+        type="number"
+        min={min}
+        max={max}
+        step={step}
+        value={text}
+        disabled={disabled}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+      />
+    </label>
+  );
+};

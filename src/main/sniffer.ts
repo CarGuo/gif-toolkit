@@ -1,0 +1,618 @@
+import axios, { isAxiosError } from 'axios';
+import * as cheerio from 'cheerio';
+import crypto from 'crypto';
+import PQueue from 'p-queue';
+import { URL } from 'url';
+import type { SniffResult, SniffedMedia, MediaKind, SniffProgress } from '../shared/types';
+import { log } from './logger';
+import { isPrivateHost } from './helpers';
+
+const UA =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
+
+const VIDEO_EXT = ['.mp4', '.webm', '.m4v', '.mov', '.mkv'];
+const GIF_EXT = ['.gif'];
+const IMG_EXT = ['.png', '.jpg', '.jpeg', '.webp'];
+
+const MAX_HTML_BYTES = 5 * 1024 * 1024;
+const MAX_ITEMS = 200;
+
+function id(input: string): string {
+  return crypto.createHash('sha256').update(input).digest('hex').slice(0, 16);
+}
+
+function abs(base: string, link: string): string | null {
+  if (!link) return null;
+  try {
+    const u = new URL(link, base);
+    if (!/^https?:$/.test(u.protocol)) return null;
+    return u.toString();
+  } catch {
+    return null;
+  }
+}
+
+function classifyByExt(url: string): MediaKind | null {
+  const lower = url.split('?')[0].toLowerCase();
+  if (VIDEO_EXT.some((e) => lower.endsWith(e))) return 'video';
+  if (GIF_EXT.some((e) => lower.endsWith(e))) return 'gif';
+  if (IMG_EXT.some((e) => lower.endsWith(e))) return 'image';
+  return null;
+}
+
+/**
+ * Match well-known video-embed iframe sources by host (and optionally a path
+ * sanity check). Returns a normalised provider host, or null if not a player.
+ *
+ * We only flag iframes whose URL clearly identifies the player endpoint
+ * (e.g. `player.vimeo.com/video/<id>`, `youtube.com/embed/<id>`); a random
+ * `<iframe src="https://example.com/foo">` is not enough.
+ */
+function matchEmbedProvider(host: string, fullUrl: string): string | null {
+  const lowerUrl = fullUrl.toLowerCase();
+  // host suffix → required path fragment (use an empty string for "any path")
+  const RULES: Array<{ hostSuffix: string; needsPath?: string; provider: string }> = [
+    { hostSuffix: 'player.vimeo.com', needsPath: '/video/', provider: 'vimeo.com' },
+    { hostSuffix: 'vimeo.com', needsPath: '/video/', provider: 'vimeo.com' },
+    { hostSuffix: 'youtube.com', needsPath: '/embed/', provider: 'youtube.com' },
+    { hostSuffix: 'youtube-nocookie.com', needsPath: '/embed/', provider: 'youtube.com' },
+    { hostSuffix: 'youtu.be', provider: 'youtube.com' },
+    { hostSuffix: 'player.bilibili.com', provider: 'bilibili.com' },
+    { hostSuffix: 'bilibili.com', needsPath: '/player', provider: 'bilibili.com' },
+    { hostSuffix: 'dailymotion.com', needsPath: '/embed/', provider: 'dailymotion.com' },
+    { hostSuffix: 'fast.wistia.net', provider: 'wistia.com' },
+    { hostSuffix: 'wistia.com', needsPath: '/embed/', provider: 'wistia.com' },
+    { hostSuffix: 'players.brightcove.net', provider: 'brightcove.com' },
+    { hostSuffix: 'streamable.com', needsPath: '/o/', provider: 'streamable.com' },
+    { hostSuffix: 'streamable.com', needsPath: '/e/', provider: 'streamable.com' },
+    { hostSuffix: 'embed.ted.com', provider: 'ted.com' },
+    { hostSuffix: 'video.twimg.com', provider: 'twitter.com' }
+  ];
+  for (const r of RULES) {
+    if (host === r.hostSuffix || host.endsWith('.' + r.hostSuffix)) {
+      if (!r.needsPath) return r.provider;
+      if (lowerUrl.includes(r.needsPath)) return r.provider;
+    }
+  }
+  return null;
+}
+
+/**
+ * Build a dedup key that treats two URLs as equal when they differ only in
+ * "presentation transforms" (size / crop / quality / format hints) of the
+ * same underlying asset.
+ *
+ * Design goal: be CDN-agnostic. We do NOT hard-code host whitelists. Instead
+ * we recognise *structural* patterns that virtually all CDNs and CMSes use
+ * to express transforms:
+ *
+ *   1) Whole path segment is a transform expression
+ *      - Blogger / Photos:        `s1600`, `s16000`, `w640-h640`, `h480-w800`
+ *      - Cloudinary / similar:    `c_fill,w_300,h_300`, `q_auto`, `f_auto`,
+ *                                 `w_800`, `h_600`
+ *      - Semantic size buckets:   `thumb`, `thumbnail`, `thumbs`,
+ *                                 `max`, `resize`, `fit`, `fit-in`,
+ *                                 `crop`, `scale`
+ *      - A pure-number segment immediately after a sizing keyword
+ *        (e.g. Medium `/max/800/foo.png` → drop both `max` and `800`).
+ *
+ *   2) Segment-tail transform suffix
+ *      - googleusercontent style: `…CCC=s2048`, `…=w1024-h768`
+ *      - Twitter pbs style:       `…ABCDEFG.jpg:large`, `:orig`, `:small`
+ *
+ *   3) Filename-embedded size hints
+ *      - WordPress / generic:     `foo-1024x768.jpg`, `foo_1024x768.jpg`
+ *      - Shopify:                 `shoe_300x.jpg`, `shoe_300x300.jpg`
+ *      - Wikipedia thumb:         `800px-Foo.jpg` → strip the prefix and
+ *        also collapse the `/thumb/.../` directory pair.
+ *      - Generic numeric suffix:  `foo@2x.png`, `foo-large.jpg`
+ *
+ *   4) Extension family normalisation: `.jpeg` ≡ `.jpg`.
+ *
+ *   5) Query string is dropped entirely (signed tokens, cache busters,
+ *      transform query keys like imgix `?w=300`, Squarespace `?format=2500w`,
+ *      Twitter `?name=large` all collapse here).
+ *
+ * Edge cases (accepted, by user request):
+ *   - A real path like `/users/s1234/avatar.png` will lose `s1234` even
+ *     though here it is a user-id bucket, not a size. False merge.
+ *   - A real CMS path like `/issue/s12/cover.jpg` likewise. False merge.
+ *   These are inherent ambiguities of the URL string alone and are
+ *   accepted as a trade-off for a single, structural, host-independent
+ *   rule set.
+ */
+
+// Whole-segment patterns
+const SEG_BLOGGER_RX = /^(?:s\d{2,5}|w\d{2,5}(?:-h\d{2,5})?|h\d{2,5}(?:-w\d{2,5})?)$/i;
+const SEG_CLOUDINARY_RX = /^(?:[a-z]_[\w.-]+(?:,[a-z]_[\w.-]+)*)$/i;
+const CLOUDINARY_KEYS = /(?:^|,)(?:w|h|c|q|f|x|y|r|e|g|dpr|ar|fl|so|du|eo|l|t|b|co|bo|o|a|z|pg)_/i;
+const SEG_SEMANTIC_RX = /^(?:thumb|thumbs|thumbnail|thumbnails|max|resize|fit|fit-in|crop|scale|small|medium|large|original|orig)$/i;
+const SEG_NUMERIC_RX = /^\d{2,5}$/;
+
+// Segment-tail transform suffixes
+const TAIL_GOOG_RX = /=(?:s\d{2,5}|w\d{2,5}(?:-h\d{2,5})?|h\d{2,5})(?:-[a-z0-9]+)?$/i;
+const TAIL_COLON_RX = /:(?:large|orig|original|small|medium|thumb|thumbnail)$/i;
+
+// Filename transforms
+const FN_WIKI_PX_RX = /^\d{2,5}px-/i;
+const FN_NXN_RX = /[-_]\d{2,5}x\d{0,5}(?=\.[a-z0-9]+$)/i;
+const FN_AT_X_RX = /@\d(?:\.\d)?x(?=\.[a-z0-9]+$)/i;
+const FN_SEMANTIC_RX = /[-_](?:thumb|thumbnail|small|medium|large|orig|original)(?=\.[a-z0-9]+$)/i;
+
+const EXT_FAMILY: Record<string, string> = { '.jpeg': '.jpg' };
+
+function normaliseFilename(name: string): string {
+  let n = name;
+  // Wikipedia thumb: `800px-Foo.jpg` → `Foo.jpg`
+  n = n.replace(FN_WIKI_PX_RX, '');
+  // `foo-1024x768.jpg` / `foo_300x.jpg` / `foo-300x300.jpg`
+  n = n.replace(FN_NXN_RX, '');
+  // `foo@2x.png`
+  n = n.replace(FN_AT_X_RX, '');
+  // `foo-large.jpg` / `foo_thumb.png`
+  n = n.replace(FN_SEMANTIC_RX, '');
+  // jpeg → jpg
+  const dot = n.lastIndexOf('.');
+  if (dot >= 0) {
+    const ext = n.slice(dot).toLowerCase();
+    if (EXT_FAMILY[ext]) n = n.slice(0, dot) + EXT_FAMILY[ext];
+  }
+  return n;
+}
+
+function stripSegmentTail(seg: string): string {
+  let s = seg;
+  s = s.replace(TAIL_GOOG_RX, '');
+  s = s.replace(TAIL_COLON_RX, '');
+  return s;
+}
+
+function isTransformSegment(seg: string): boolean {
+  if (!seg) return false;
+  if (SEG_BLOGGER_RX.test(seg)) return true;
+  if (SEG_CLOUDINARY_RX.test(seg) && CLOUDINARY_KEYS.test(',' + seg)) return true;
+  if (SEG_SEMANTIC_RX.test(seg)) return true;
+  return false;
+}
+
+function dedupKey(url: string): string {
+  try {
+    const u = new URL(url);
+    const rawSegs = u.pathname.split('/');
+    const segs: string[] = [];
+    let prevWasSizingKeyword = false;
+    for (let i = 0; i < rawSegs.length; i += 1) {
+      let seg = rawSegs[i];
+      if (i === rawSegs.length - 1 && seg) {
+        seg = stripSegmentTail(seg);
+        seg = normaliseFilename(seg);
+      } else {
+        seg = stripSegmentTail(seg);
+      }
+      if (!seg) {
+        prevWasSizingKeyword = false;
+        continue;
+      }
+      // Drop pure-number segment that follows a sizing keyword (Medium `/max/800/`)
+      if (prevWasSizingKeyword && SEG_NUMERIC_RX.test(seg)) {
+        prevWasSizingKeyword = false;
+        continue;
+      }
+      if (isTransformSegment(seg)) {
+        prevWasSizingKeyword = SEG_SEMANTIC_RX.test(seg);
+        continue;
+      }
+      prevWasSizingKeyword = false;
+      segs.push(seg);
+    }
+    // Collapse trailing duplicated leaf (Wikipedia thumb pattern: `/a/ab/Foo.jpg/Foo.jpg`
+    // — after dropping the `thumb` directory, the original filename appears twice).
+    if (segs.length >= 2 && segs[segs.length - 1] === segs[segs.length - 2]) {
+      segs.pop();
+    }
+    return `${u.host.toLowerCase()}/${segs.join('/')}`;
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * Score a candidate variant. Higher = preferred when two URLs collide on
+ * dedupKey. We prefer (in order):
+ *   - URLs that already carry HEAD-probed metadata (size / mime / poster)
+ *   - URLs whose path segments express a larger size hint
+ *   - URLs that are NOT obvious thumbnails / small variants
+ */
+function variantScore(x: SniffedMedia): number {
+  let s = 0;
+  if (x.sizeBytes && x.sizeBytes > 0) s += 4;
+  if (x.mime) s += 1;
+  if (x.poster) s += 1;
+  try {
+    const u = new URL(x.url);
+    let maxDim = 0;
+    let demote = 0;
+    for (const seg of u.pathname.split('/')) {
+      if (!seg) continue;
+      // Blogger / Photos size segment
+      const m1 = /^(?:s|w|h)(\d{2,5})(?:-(?:w|h)(\d{2,5}))?$/i.exec(seg);
+      if (m1) {
+        const a = Number(m1[1]) || 0;
+        const b = Number(m1[2]) || 0;
+        maxDim = Math.max(maxDim, a, b);
+      }
+      // Cloudinary `w_800`
+      const m2 = /(?:^|,)(?:w|h)_(\d{2,5})/i.exec(seg);
+      if (m2) maxDim = Math.max(maxDim, Number(m2[1]) || 0);
+      // Trailing `=s2048` etc on segment tail
+      const m3 = /=(?:s|w|h)(\d{2,5})/i.exec(seg);
+      if (m3) maxDim = Math.max(maxDim, Number(m3[1]) || 0);
+      // `:large`/`:orig` are "big" hints
+      if (/:(?:large|orig|original)$/i.test(seg)) maxDim = Math.max(maxDim, 1600);
+      if (/:(?:small|thumb|thumbnail)$/i.test(seg)) demote += 2;
+      // semantic size words
+      if (/^(?:thumb|thumbs|thumbnail|thumbnails|small)$/i.test(seg)) demote += 2;
+      if (/^(?:large|original|orig)$/i.test(seg)) maxDim = Math.max(maxDim, 1600);
+      // filename `-1024x768`
+      const m4 = /[-_](\d{2,5})x(\d{0,5})(?=\.[a-z0-9]+$)/i.exec(seg);
+      if (m4) maxDim = Math.max(maxDim, Number(m4[1]) || 0, Number(m4[2]) || 0);
+      // filename `800px-Foo.jpg`
+      const m5 = /^(\d{2,5})px-/i.exec(seg);
+      if (m5) maxDim = Math.max(maxDim, Number(m5[1]) || 0);
+    }
+    if (maxDim > 0) s += Math.min(5, Math.floor(maxDim / 400));
+    s -= Math.min(4, demote);
+  } catch {
+    // ignore
+  }
+  return s;
+}
+
+function pushUnique(map: Map<string, SniffedMedia>, m: SniffedMedia): void {
+  if (map.size >= MAX_ITEMS) return;
+  const key = dedupKey(m.url);
+  const existing = map.get(key);
+  if (!existing) {
+    map.set(key, m);
+    return;
+  }
+  if (variantScore(m) > variantScore(existing)) {
+    // Keep the original id so renderer references stay stable across repeated sniffs.
+    map.set(key, { ...m, id: existing.id });
+  }
+}
+
+function isCancelLikeError(e: unknown): boolean {
+  if (!e) return false;
+  if (isAxiosError(e)) {
+    if (e.code === 'ERR_CANCELED' || e.code === 'ECONNABORTED') return true;
+    const msg = (e.message || '').toLowerCase();
+    if (msg.includes('canceled') || msg.includes('cancelled') || msg.includes('aborted')) return true;
+  }
+  if (e instanceof Error) {
+    if (e.name === 'CanceledError' || e.name === 'AbortError' || e.name === 'CancelledError') return true;
+    const msg = (e.message || '').toLowerCase();
+    if (msg === 'canceled' || msg === 'cancelled' || msg === 'aborted') return true;
+  }
+  return false;
+}
+
+/**
+ * Stream-fetch HTML with a hard byte cap. Aborts mid-flight when the cap is hit.
+ */
+async function fetchHtmlStreamed(
+  pageUrl: string,
+  maxBytes: number,
+  emit: (p: SniffProgress) => void
+): Promise<string> {
+  const controller = new AbortController();
+  emit({ stage: 'fetching', percent: 5, message: '请求文章 HTML…' });
+  const res = await axios.get<NodeJS.ReadableStream>(pageUrl, {
+    headers: { 'User-Agent': UA, Accept: 'text/html,application/xhtml+xml' },
+    responseType: 'stream',
+    timeout: 20000,
+    maxRedirects: 5,
+    validateStatus: (s) => s >= 200 && s < 400,
+    signal: controller.signal as AbortSignal
+  });
+
+  // Pre-check final URL host (post-redirect)
+  const finalUrl =
+    (res.request && (res.request as { res?: { responseUrl?: string } }).res?.responseUrl) ||
+    pageUrl;
+  try {
+    const u = new URL(finalUrl);
+    if (isPrivateHost(u.hostname)) {
+      controller.abort();
+      throw new Error('redirect target is private/loopback and is not allowed');
+    }
+  } catch (e) {
+    if ((e as Error).message?.includes('private/loopback')) throw e;
+    // ignore URL parse failures – keep going
+  }
+
+  const total = Number(res.headers['content-length']) || 0;
+  if (total && total > maxBytes) {
+    controller.abort();
+    throw new Error(`HTML too large: ${total} > ${maxBytes}`);
+  }
+
+  return new Promise<string>((resolve, reject) => {
+    const stream = res.data as NodeJS.ReadableStream;
+    let received = 0;
+    const chunks: Buffer[] = [];
+    let settled = false;
+
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      try { controller.abort(); } catch { /* ignore */ }
+      try { (stream as NodeJS.ReadableStream & { destroy?: (e?: Error) => void }).destroy?.(err); } catch { /* ignore */ }
+      reject(err);
+    };
+    const succeed = () => {
+      if (settled) return;
+      settled = true;
+      const buf = Buffer.concat(chunks, received);
+      resolve(buf.toString('utf8'));
+    };
+
+    stream.on('data', (chunk: Buffer) => {
+      received += chunk.length;
+      if (received > maxBytes) {
+        fail(new Error(`HTML stream exceeded ${maxBytes} bytes`));
+        return;
+      }
+      chunks.push(chunk);
+      emit({
+        stage: 'fetching',
+        percent: total > 0 ? 5 + Math.round((received / total) * 25) : 15,
+        message: total > 0
+          ? `下载 HTML ${(received / 1024).toFixed(0)} / ${(total / 1024).toFixed(0)} KB`
+          : `下载 HTML ${(received / 1024).toFixed(0)} KB`
+      });
+    });
+    stream.on('error', (e: Error) => fail(e));
+    stream.on('end', () => succeed());
+    stream.on('close', () => succeed());
+  });
+}
+
+export async function sniffPage(
+  pageUrl: string,
+  onProgress?: (p: SniffProgress) => void
+): Promise<SniffResult> {
+  log(`sniff start: ${pageUrl}`);
+  const emit = (p: SniffProgress) => {
+    try { onProgress?.(p); } catch { /* swallow */ }
+  };
+  // Validate page URL
+  const parsed = new URL(pageUrl);
+  if (!/^https?:$/.test(parsed.protocol)) {
+    throw new Error('Only http(s) URLs are supported');
+  }
+
+  const warnings: string[] = [];
+  const map = new Map<string, SniffedMedia>();
+
+  emit({ stage: 'fetching', percent: 2, message: '请求文章 HTML…' });
+  const html = await fetchHtmlStreamed(pageUrl, MAX_HTML_BYTES, emit);
+  emit({ stage: 'parsing', percent: 32, message: '解析页面 DOM…' });
+  const $ = cheerio.load(html);
+  const title = $('title').first().text().trim() || undefined;
+
+  // 1) <video> + <source>
+  $('video').each((_, el) => {
+    const $el = $(el);
+    const poster = abs(pageUrl, $el.attr('poster') || '') || undefined;
+    const directSrc = $el.attr('src');
+    if (directSrc) {
+      const u = abs(pageUrl, directSrc);
+      if (u) {
+        pushUnique(map, {
+          id: id(u),
+          url: u,
+          kind: 'video',
+          source: 'video-tag',
+          poster,
+          pageUrl
+        });
+      }
+    }
+    $el.find('source').each((__, s) => {
+      const sSrc = $(s).attr('src');
+      const type = $(s).attr('type');
+      if (!sSrc) return;
+      const u = abs(pageUrl, sSrc);
+      if (!u) return;
+      pushUnique(map, {
+        id: id(u),
+        url: u,
+        kind: 'video',
+        mime: type,
+        source: 'source-tag',
+        poster,
+        pageUrl
+      });
+    });
+  });
+
+  // 2) <img> with .gif
+  $('img').each((_, el) => {
+    const src = $(el).attr('src') || $(el).attr('data-src') || $(el).attr('data-original');
+    if (!src) return;
+    const u = abs(pageUrl, src);
+    if (!u) return;
+    const kind = classifyByExt(u);
+    if (kind === 'gif') {
+      pushUnique(map, { id: id(u), url: u, kind: 'gif', source: 'img-tag', pageUrl });
+    }
+  });
+
+  // 3) og:video / twitter:player:stream
+  const ogVideo = $('meta[property="og:video"]').attr('content') || $('meta[property="og:video:url"]').attr('content');
+  if (ogVideo) {
+    const u = abs(pageUrl, ogVideo);
+    if (u) {
+      pushUnique(map, { id: id(u), url: u, kind: 'video', source: 'og-meta', pageUrl });
+    }
+  }
+  const tw = $('meta[name="twitter:player:stream"]').attr('content');
+  if (tw) {
+    const u = abs(pageUrl, tw);
+    if (u) pushUnique(map, { id: id(u), url: u, kind: 'video', source: 'og-meta', pageUrl });
+  }
+
+  // 4) <a href="*.gif|*.mp4">
+  $('a[href]').each((_, el) => {
+    const href = $(el).attr('href');
+    if (!href) return;
+    const u = abs(pageUrl, href);
+    if (!u) return;
+    const kind = classifyByExt(u);
+    if (kind === 'video' || kind === 'gif') {
+      pushUnique(map, { id: id(u), url: u, kind, source: 'link', pageUrl });
+    }
+  });
+
+  // 5) JSON-LD VideoObject
+  $('script[type="application/ld+json"]').each((_, el) => {
+    try {
+      const raw = $(el).contents().text();
+      const parsed: unknown = JSON.parse(raw);
+      const items: unknown[] = Array.isArray(parsed) ? parsed : [parsed];
+      for (const it of items) {
+        if (it && typeof it === 'object') {
+          const obj = it as Record<string, unknown>;
+          const cu = (obj.contentUrl as string) || (obj.url as string);
+          const t = obj['@type'];
+          if (cu && (t === 'VideoObject' || (Array.isArray(t) && t.includes('VideoObject')))) {
+            const u = abs(pageUrl, cu);
+            if (u) pushUnique(map, { id: id(u), url: u, kind: 'video', source: 'json-ld', pageUrl });
+          }
+        }
+      }
+    } catch {
+      // ignore parse errors
+    }
+  });
+
+  // 6) <iframe> embeds for known video players (Vimeo, YouTube, Bilibili, ...).
+  //    The actual stream is served via MSE/HLS/DASH and cannot be retrieved
+  //    via a single HTTP GET. We list the embed URL so the user can see what
+  //    was on the page and jump to the original to grab a direct .mp4 link.
+  $('iframe').each((_, el) => {
+    const $el = $(el);
+    const rawSrc = $el.attr('src') || $el.attr('data-src') || $el.attr('data-lazy-src') || '';
+    if (!rawSrc) return;
+    const u = abs(pageUrl, rawSrc);
+    if (!u) return;
+    let host: string;
+    try {
+      host = new URL(u).hostname.toLowerCase();
+    } catch {
+      return;
+    }
+    const provider = matchEmbedProvider(host, u);
+    if (!provider) return;
+    pushUnique(map, {
+      id: id(u),
+      url: u,
+      kind: 'video',
+      source: 'iframe-embed',
+      pageUrl,
+      requiresExternalDownload: true,
+      embedHost: provider
+    });
+  });
+
+  // 7) Regex fallback for raw URLs in <script> blocks
+  const rxFiles = /(https?:\/\/[^\s"'<>()]+\.(?:mp4|webm|gif))(\?[^\s"'<>()]*)?/gi;
+  const seen = new Set<string>();
+  let match: RegExpExecArray | null;
+  while ((match = rxFiles.exec(html)) !== null) {
+    const raw = match[0];
+    const key = dedupKey(raw);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const kind = classifyByExt(raw) ?? 'video';
+    pushUnique(map, { id: id(raw), url: raw, kind, source: 'pattern', pageUrl });
+  }
+
+  if (map.size === 0) {
+    warnings.push('No media elements found on this page.');
+  }
+
+  // probe HEAD for sizes (best-effort, parallel limit small)
+  const list = Array.from(map.values());
+  emit({
+    stage: 'probing',
+    percent: 55,
+    message: `已发现 ${list.length} 项,正在探测大小…`,
+    found: list.length,
+    probed: 0,
+    total: list.length
+  });
+  const headQueue = new PQueue({ concurrency: 6 });
+  let probed = 0;
+  await Promise.all(
+    list.map((item) =>
+      headQueue.add(async () => {
+        try {
+          // Pre-check the source URL host before HEAD
+          try {
+            const u = new URL(item.url);
+            if (isPrivateHost(u.hostname)) return;
+          } catch {
+            return;
+          }
+          const head = await axios.head(item.url, {
+            headers: { 'User-Agent': UA, Referer: pageUrl },
+            timeout: 8000,
+            maxRedirects: 5,
+            validateStatus: (s) => s >= 200 && s < 400
+          });
+          // Re-check the post-redirect final URL
+          const finalUrl =
+            (head.request && (head.request as { res?: { responseUrl?: string } }).res?.responseUrl) ||
+            item.url;
+          try {
+            const fu = new URL(finalUrl);
+            if (isPrivateHost(fu.hostname)) return;
+          } catch {
+            return;
+          }
+          const len = Number(head.headers['content-length']);
+          if (!Number.isNaN(len) && len > 0) item.sizeBytes = len;
+          const mime = String(head.headers['content-type'] || '').split(';')[0];
+          if (mime) item.mime = mime;
+        } catch (e) {
+          // If user/network cancelled the probing phase, propagate the cancel
+          if (isCancelLikeError(e)) return;
+          // some servers reject HEAD; not fatal
+        } finally {
+          probed += 1;
+          emit({
+            stage: 'probing',
+            percent: 55 + Math.round((probed / Math.max(1, list.length)) * 40),
+            message: `已探测 ${probed} / ${list.length}`,
+            found: list.length,
+            probed,
+            total: list.length
+          });
+        }
+      })
+    )
+  );
+
+  emit({
+    stage: 'done',
+    percent: 100,
+    message: `完成,共 ${list.length} 项`,
+    found: list.length,
+    probed: list.length,
+    total: list.length
+  });
+  log(`sniff done: ${list.length} item(s)`);
+  return { pageUrl, title, items: list, warnings };
+}
