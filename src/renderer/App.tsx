@@ -293,7 +293,7 @@ const App: React.FC = () => {
     giftk.cancelAll().catch(() => { /* ignore */ });
   }, [sniffing]);
 
-  const onProcessOne = useCallback(async (media: SniffedMedia) => {
+  const onProcessOne = useCallback(async (media: SniffedMedia, override?: { forceAllowSmallSide?: boolean }) => {
     if (!giftk) return;
     if (media.kind === 'image') {
       setLogs((prev) => [...prev, `[single] 已跳过(image 不支持处理): ${media.url}`].slice(-300));
@@ -308,6 +308,13 @@ const App: React.FC = () => {
     // long videos don't accidentally explode into N segment tasks. The user
     // can still expand to all segments by ticking checkboxes in the modal.
     const optBase: ProcessOptions = { ...options, outDir: dir };
+    // R-26 — when the caller asks for the spec-bypass override (clicked the
+    // failed task's "强制允许" button), inject the flag into THIS dispatch
+    // only. The component-level `options` state is untouched so the next
+    // batch re-uses the user's normal minSize.
+    if (override?.forceAllowSmallSide) {
+      optBase.forceAllowSmallSide = true;
+    }
     const dur = media.resolved?.durationSec ?? media.durationSec ?? 0;
     const tooLong = media.kind === 'video' && dur > options.maxSegmentSec;
     const userPickedRange =
@@ -633,7 +640,12 @@ const App: React.FC = () => {
         aria-orientation="horizontal"
       />
       <div className="bottom">
-        <TaskTable items={items} progress={progress} onRetry={onProcessOne} />
+        <TaskTable
+          items={items}
+          progress={progress}
+          onRetry={(m) => onProcessOne(m)}
+          onForceAllow={(m) => onProcessOne(m, { forceAllowSmallSide: true })}
+        />
         <LogBox lines={logs} />
       </div>
 
@@ -646,7 +658,7 @@ const App: React.FC = () => {
           previewing={previewing}
           preview={preview}
           onClose={closeModal}
-          onProcessOne={onProcessOne}
+          onProcessOne={(m) => onProcessOne(m)}
           processOneDisabled={isProcessingOne(activeMedia.id) || activeMedia.kind === 'image' || (!!activeMedia.requiresExternalDownload && !activeMedia.resolved)}
         />
       ) : null}

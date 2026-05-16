@@ -11,6 +11,15 @@ interface Props {
    * (e.g. tests, screenshots) where retry is meaningless.
    */
   onRetry?: (media: SniffedMedia) => void | Promise<void>;
+  /**
+   * R-26 — when supplied, failed tasks whose `errorCode` flags a SPEC
+   * violation (currently only `ASPECT_RATIO_OUT_OF_RANGE`) render a
+   * "强制允许" button instead of "重试". Re-enqueues the same media with
+   * `forceAllowSmallSide=true` for THIS task only. Distinct from onRetry
+   * because the action is semantically different — runtime failures want a
+   * blind retry, spec failures want an explicit override.
+   */
+  onForceAllow?: (media: SniffedMedia) => void | Promise<void>;
 }
 
 function fileName(u: string): string {
@@ -105,7 +114,7 @@ const WarningDetailModal: React.FC<{ s: DetailModalState; onClose: () => void }>
   );
 };
 
-export const TaskTable: React.FC<Props> = ({ items, progress, onRetry }) => {
+export const TaskTable: React.FC<Props> = ({ items, progress, onRetry, onForceAllow }) => {
   const [detail, setDetail] = useState<DetailModalState | null>(null);
   // Track which task IDs are currently mid-retry so we can disable the button
   // until a fresh progress event arrives. Without this, double-clicks would
@@ -180,45 +189,102 @@ export const TaskTable: React.FC<Props> = ({ items, progress, onRetry }) => {
             <div className={`size`}>{p.currentSizeMB ? `${p.currentSizeMB.toFixed(2)} MB` : ''}</div>
             <div className={`status ${cls}`}>
               <span>{p.status}</span>
-              {onRetry && (p.status === 'failed' || p.status === 'cancelled') ? (
-                <button
-                  type="button"
-                  className="retry-btn"
-                  disabled={retrying.has(m.id)}
-                  onClick={async (e) => {
-                    e.stopPropagation();
-                    if (retrying.has(m.id)) return;
-                    setRetrying((prev) => {
-                      const n = new Set(prev);
-                      n.add(m.id);
-                      return n;
-                    });
-                    try {
-                      await onRetry(m);
-                    } finally {
-                      // Clear the local "retrying" flag shortly after kicking
-                      // off; the next progress event will replace the row
-                      // status anyway, but a short window prevents accidental
-                      // double-fires while the IPC promise resolves.
-                      window.setTimeout(() => {
+              {(() => {
+                if (p.status !== 'failed' && p.status !== 'cancelled') return null;
+                // R-26 — spec failures get a single "强制允许" button.
+                // Runtime / network / transcode failures keep the original
+                // "重试" button. We never show both at once: a spec
+                // violation re-tried verbatim would just fail the same way.
+                const isSpecFailure = p.errorCode === 'ASPECT_RATIO_OUT_OF_RANGE';
+                // Critical: when the failure is a SPEC failure but the host
+                // forgot to wire onForceAllow, render nothing rather than
+                // falling back to the "重试" button. Re-running with the
+                // exact same options would fail identically and re-create
+                // the original UX bug R-26 was meant to fix.
+                if (isSpecFailure && !onForceAllow) return null;
+                if (isSpecFailure && onForceAllow) {
+                  const meta = p.errorMeta;
+                  const tip = meta && meta.origW && meta.origH
+                    ? `规格不符:${meta.origW}×${meta.origH} 在 longest≤${meta.maxSide ?? '?'} 时短边只剩 ${meta.shortSideAtMax ?? '?'}px(< minSize ${meta.minSide ?? '?'}px)。点击「强制允许」会绕过该限制重跑这一项。`
+                    : '该任务因尺寸规格不符被拒。点击「强制允许」会忽略 minSize 限制重跑这一项,不影响其他任务的默认设置。';
+                  return (
+                    <button
+                      type="button"
+                      className="retry-btn force-allow-btn"
+                      disabled={retrying.has(m.id)}
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        if (retrying.has(m.id)) return;
                         setRetrying((prev) => {
                           const n = new Set(prev);
-                          n.delete(m.id);
+                          n.add(m.id);
                           return n;
                         });
-                      }, 1500);
-                    }
-                  }}
-                  title="重新处理这个任务"
-                  style={{
-                    marginLeft: 8, fontSize: 11, padding: '2px 8px',
-                    cursor: retrying.has(m.id) ? 'wait' : 'pointer',
-                    opacity: retrying.has(m.id) ? 0.5 : 1
-                  }}
-                >
-                  {retrying.has(m.id) ? '重试中…' : '重试'}
-                </button>
-              ) : null}
+                        try {
+                          await onForceAllow(m);
+                        } finally {
+                          window.setTimeout(() => {
+                            setRetrying((prev) => {
+                              const n = new Set(prev);
+                              n.delete(m.id);
+                              return n;
+                            });
+                          }, 1500);
+                        }
+                      }}
+                      title={tip}
+                      aria-label="强制允许"
+                      style={{
+                        marginLeft: 8, fontSize: 11, padding: '2px 8px',
+                        cursor: retrying.has(m.id) ? 'wait' : 'pointer',
+                        opacity: retrying.has(m.id) ? 0.5 : 1
+                      }}
+                    >
+                      {retrying.has(m.id) ? '处理中…' : '强制允许'}
+                    </button>
+                  );
+                }
+                if (!onRetry) return null;
+                return (
+                  <button
+                    type="button"
+                    className="retry-btn"
+                    disabled={retrying.has(m.id)}
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      if (retrying.has(m.id)) return;
+                      setRetrying((prev) => {
+                        const n = new Set(prev);
+                        n.add(m.id);
+                        return n;
+                      });
+                      try {
+                        await onRetry(m);
+                      } finally {
+                        // Clear the local "retrying" flag shortly after kicking
+                        // off; the next progress event will replace the row
+                        // status anyway, but a short window prevents accidental
+                        // double-fires while the IPC promise resolves.
+                        window.setTimeout(() => {
+                          setRetrying((prev) => {
+                            const n = new Set(prev);
+                            n.delete(m.id);
+                            return n;
+                          });
+                        }, 1500);
+                      }
+                    }}
+                    title="重新处理这个任务"
+                    style={{
+                      marginLeft: 8, fontSize: 11, padding: '2px 8px',
+                      cursor: retrying.has(m.id) ? 'wait' : 'pointer',
+                      opacity: retrying.has(m.id) ? 0.5 : 1
+                    }}
+                  >
+                    {retrying.has(m.id) ? '重试中…' : '重试'}
+                  </button>
+                );
+              })()}
             </div>
           </div>
         );

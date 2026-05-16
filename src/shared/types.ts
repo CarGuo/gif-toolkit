@@ -78,6 +78,17 @@ export interface ProcessOptions {
    * outputs and confusing the user.
    */
   selectedSegments?: number[];
+  /**
+   * R-26 escape hatch — when true, processor.ts skips the
+   * AspectRatioConstraintError guard and lets the longest-side cap apply
+   * even if the resulting short side falls below `minSize`. Intended to
+   * be set on a *per-retry* basis after the user clicks "强制允许" on a
+   * failed task; should never be sticky across the global form. Renderer
+   * side helpers (App.onForceAllowOne) re-dispatch a single task with
+   * this flag flipped, then the original DEFAULT_OPTIONS continue to
+   * govern subsequent batches.
+   */
+  forceAllowSmallSide?: boolean;
 }
 
 export type TaskStatus =
@@ -102,6 +113,21 @@ export interface TaskProgress {
   currentSizeMB?: number;
   outputs?: string[]; // local file paths
   error?: string;
+  /** Stable, machine-readable failure category. Lets the UI tell apart
+   *  "spec rejected by config" (e.g. ASPECT_RATIO_OUT_OF_RANGE — actionable
+   *  via 强制允许) from runtime/network/transcode failures (actionable via
+   *  retry). Absent when status !== 'failed'. See R-26. */
+  errorCode?: 'ASPECT_RATIO_OUT_OF_RANGE';
+  /** Optional structured payload paired with `errorCode` for renderer to
+   *  format human-readable hints without re-parsing the error string.
+   *  Currently only carries the geometry that violated the spec. */
+  errorMeta?: {
+    origW?: number;
+    origH?: number;
+    minSide?: number;
+    maxSide?: number;
+    shortSideAtMax?: number;
+  };
   warning?: string; // soft over-limit notice
   /** Fine-grained substep label, e.g. "downloading", "probing", "estimating",
    *  "binary-search", "resizing", "optimizing", "encoding-segment". */

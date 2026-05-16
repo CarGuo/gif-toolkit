@@ -49,6 +49,58 @@ type ThumbState =
   | { status: 'ok'; dataUrl: string }
   | { status: 'error'; error: string };
 
+/**
+ * R-26 #1 — While yt-dlp resolves an embed there is no real progress
+ * channel back to the renderer (the resolver awaits the binary then
+ * returns one shot). Instead of leaving the chip on a static "解析中…"
+ * label that makes users think the app froze, we walk a deterministic
+ * sequence of stage labels every ~1.5s so the user gets a *signal*
+ * that work is happening — same trick as the sniff-progress label
+ * pump. Once the resolve actually completes (or errors), the chip is
+ * unmounted by the parent so this hook is moot.
+ */
+const RESOLVE_STAGE_LABELS = [
+  '联系视频站点…',
+  '提取视频信息…',
+  '匹配最佳格式…',
+  '准备直链…'
+] as const;
+
+function useResolveStageLabel(active: boolean): string {
+  const [idx, setIdx] = useState(0);
+  useEffect(() => {
+    if (!active) {
+      setIdx(0);
+      return;
+    }
+    setIdx(0);
+    // Bias towards advancing — most yt-dlp resolves finish in 1-3s, so
+    // a 1500ms tick gets the user past the first 2 stages before they
+    // get bored. We cap at the last stage so a 10s+ resolve doesn't
+    // wrap back to "联系视频站点…" and look like it restarted.
+    const id = window.setInterval(() => {
+      setIdx((cur) => Math.min(cur + 1, RESOLVE_STAGE_LABELS.length - 1));
+    }, 1500);
+    return () => window.clearInterval(id);
+  }, [active]);
+  return RESOLVE_STAGE_LABELS[idx];
+}
+
+const ResolvingChip: React.FC<{ host?: string }> = ({ host }) => {
+  const stage = useResolveStageLabel(true);
+  return (
+    <span
+      className="card-embed-tag resolving"
+      title={`正在解析 ${host || '第三方'} 直链 — ${stage}`}
+      role="status"
+      aria-live="polite"
+    >
+      <span className="card-embed-spinner" aria-hidden="true" />
+      <span className="card-embed-stage">{stage}</span>
+    </span>
+  );
+};
+
 const Thumb: React.FC<{ media: SniffedMedia }> = ({ media }) => {
   const [state, setState] = useState<ThumbState>({ status: 'idle' });
   const ref = useRef<HTMLDivElement | null>(null);
@@ -218,12 +270,7 @@ export const MediaGrid: React.FC<Props> = ({ items, selected, onToggle, onOpen, 
                   {busy ? '处理中…' : isResolved ? '▶ 处理(已解析)' : '▶ 处理此项'}
                 </button>
               ) : isEmbed && !isResolved && resolving ? (
-                <span
-                  className="card-embed-tag resolving"
-                  title={`正在解析 ${m.embedHost || '第三方'} 直链…`}
-                >
-                  ⏳ 解析中…
-                </span>
+                <ResolvingChip host={m.embedHost} />
               ) : isEmbed && !isResolved && resolveError ? (
                 <button
                   type="button"

@@ -229,6 +229,14 @@ function sanitizeOptions(o: unknown): ProcessOptions {
     };
   }
 
+  // R-26: per-task escape hatch for the aspect-ratio-too-elongated guard.
+  // ONLY accepted when the renderer explicitly asserts the boolean — any
+  // other shape (truthy strings, numbers, objects) is dropped to prevent
+  // accidental enablement via stale/forged IPC payloads.
+  if (obj.forceAllowSmallSide === true) {
+    result.forceAllowSmallSide = true;
+  }
+
   if (typeof obj.outDir === 'string' && obj.outDir) {
     result.outDir = assertOutputDir(obj.outDir);
   }

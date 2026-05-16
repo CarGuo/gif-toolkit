@@ -139,3 +139,90 @@ describe('TaskTable empty state', () => {
     expect(screen.getByText(/任务列表/)).toBeTruthy();
   });
 });
+
+/**
+ * R-26 — spec failures (errorCode === 'ASPECT_RATIO_OUT_OF_RANGE') must
+ * render a "强制允许" button instead of "重试". Re-trying a spec
+ * violation verbatim is meaningless; the user wants an *override*
+ * button. Runtime / network / transcode failures still get the original
+ * "重试" button.
+ */
+describe('TaskTable R-26 force-allow vs retry split', () => {
+  it('renders 强制允许 (and NOT 重试) when errorCode is ASPECT_RATIO_OUT_OF_RANGE', () => {
+    const m = mkMedia('a');
+    const progress = {
+      a: mkProgress('a', 'failed', {
+        error: 'aspect ratio out of range: 1080x646',
+        errorCode: 'ASPECT_RATIO_OUT_OF_RANGE',
+        errorMeta: { origW: 1080, origH: 646, minSide: 450, maxSide: 800, shortSideAtMax: 299 }
+      })
+    };
+    render(
+      <TaskTable
+        items={[m]}
+        progress={progress}
+        onRetry={vi.fn()}
+        onForceAllow={vi.fn()}
+      />
+    );
+    expect(screen.getByRole('button', { name: /强制允许/ })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /^重试$/ })).toBeNull();
+  });
+
+  it('renders 重试 (and NOT 强制允许) for runtime failures', () => {
+    const m = mkMedia('a');
+    const progress = {
+      a: mkProgress('a', 'failed', { error: 'ffmpeg exit 1: network timeout' })
+    };
+    render(
+      <TaskTable
+        items={[m]}
+        progress={progress}
+        onRetry={vi.fn()}
+        onForceAllow={vi.fn()}
+      />
+    );
+    expect(screen.getByRole('button', { name: /^重试$/ })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /强制允许/ })).toBeNull();
+  });
+
+  it('calls onForceAllow with the media when the button is clicked', () => {
+    const m = mkMedia('a');
+    const onForceAllow = vi.fn();
+    const onRetry = vi.fn();
+    render(
+      <TaskTable
+        items={[m]}
+        progress={{
+          a: mkProgress('a', 'failed', { errorCode: 'ASPECT_RATIO_OUT_OF_RANGE' })
+        }}
+        onRetry={onRetry}
+        onForceAllow={onForceAllow}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /强制允许/ }));
+    expect(onForceAllow).toHaveBeenCalledTimes(1);
+    expect(onForceAllow).toHaveBeenCalledWith(m);
+    // Critical: a spec failure must not also trigger onRetry — we want a
+    // single deliberate action, never a double-fire.
+    expect(onRetry).not.toHaveBeenCalled();
+  });
+
+  it('falls back to nothing when errorCode is set but onForceAllow is missing', () => {
+    // Defensive: if a host renders TaskTable without wiring onForceAllow,
+    // we must NOT silently render the "重试" button as a fallback —
+    // that would re-create the original UX bug R-26 set out to fix.
+    const m = mkMedia('a');
+    render(
+      <TaskTable
+        items={[m]}
+        progress={{
+          a: mkProgress('a', 'failed', { errorCode: 'ASPECT_RATIO_OUT_OF_RANGE' })
+        }}
+        onRetry={vi.fn()}
+      />
+    );
+    expect(screen.queryByRole('button', { name: /强制允许/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^重试$/ })).toBeNull();
+  });
+});

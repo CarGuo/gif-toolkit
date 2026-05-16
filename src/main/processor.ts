@@ -290,7 +290,7 @@ async function compressLoop(
 
   if (longestSide > 0 && shortestSide > 0 && longestSide > maxSide) {
     const shortAtMax = shortSideAfterCap(longestSide, shortestSide, maxSide);
-    if (shortAtMax > 0 && shortAtMax < minSide) {
+    if (shortAtMax > 0 && shortAtMax < minSide && !options.forceAllowSmallSide) {
       throw new AspectRatioConstraintError({
         origW,
         origH,
@@ -298,6 +298,18 @@ async function compressLoop(
         minSide,
         shortSideAtMax: shortAtMax
       });
+    }
+    // R-26 — when forceAllowSmallSide is set, the user has explicitly
+    // accepted that the short side will dip below `minSize` for THIS
+    // task only. Record it as a phase note so the diagnostic trail
+    // makes the override visible after the fact.
+    if (shortAtMax > 0 && shortAtMax < minSide && options.forceAllowSmallSide) {
+      recordPhaseFailure(
+        'aspect-ratio-bypass',
+        new Error(
+          `R-26 forceAllowSmallSide=true: capping ${origW}x${origH} to ${maxSide}px will yield short side ${shortAtMax}px (< minSize ${minSide}px) — proceeding anyway.`
+        )
+      );
     }
   }
 
@@ -1166,7 +1178,7 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
     const shortest = Math.min(srcW, srcH);
     if (longest > maxSide) {
       const shortAtMax = shortSideAfterCap(longest, shortest, maxSide);
-      if (shortAtMax > 0 && shortAtMax < minSide) {
+      if (shortAtMax > 0 && shortAtMax < minSide && !options.forceAllowSmallSide) {
         throw new AspectRatioConstraintError({
           origW: srcW,
           origH: srcH,
@@ -1174,6 +1186,15 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
           minSide,
           shortSideAtMax: shortAtMax
         });
+      }
+      // R-26 — see compressGif for symmetric override path. We don't have a
+      // recordPhaseFailure() in this scope (videoToGif callers consume the
+      // warnings array), so emit a lightweight log line instead so the
+      // override remains traceable in the renderer-side log feed.
+      if (shortAtMax > 0 && shortAtMax < minSide && options.forceAllowSmallSide) {
+        log(
+          `R-26 forceAllowSmallSide=true: capping ${srcW}x${srcH} to ${maxSide}px will yield short side ${shortAtMax}px (< minSize ${minSide}px) — proceeding.`
+        );
       }
     }
     const effectiveSide = Math.min(maxSide, longest);
@@ -1428,6 +1449,28 @@ export async function startBatch(
               }
               const msg = (err as Error).message || String(err);
               log(`task ${task.id} failed: ${msg}`);
+              // R-26 — surface the spec-violation errorCode so the renderer
+              // can render "强制允许" instead of the generic "重试" button
+              // for AspectRatioConstraintError. Runtime/network/transcode
+              // failures still fall through to the bare error string and
+              // the original retry button.
+              if (err instanceof AspectRatioConstraintError) {
+                emit({
+                  taskId: task.id,
+                  status: 'failed',
+                  percent: 100,
+                  error: msg,
+                  errorCode: 'ASPECT_RATIO_OUT_OF_RANGE',
+                  errorMeta: {
+                    origW: err.origW,
+                    origH: err.origH,
+                    minSide: err.minSide,
+                    maxSide: err.maxSide,
+                    shortSideAtMax: err.shortSideAtMax
+                  }
+                });
+                return;
+              }
               emit({ taskId: task.id, status: 'failed', percent: 100, error: msg });
             }
           })
