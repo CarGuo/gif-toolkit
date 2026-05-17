@@ -547,6 +547,12 @@ export interface UploadJob {
   /** Optional override filename (without path) on the remote side. If
    *  unset we use the basename of filePath. */
   remoteName?: string;
+  /** R-54 — Optional id of the processing HistoryRecord this output
+   *  was produced by. The main process echoes it back on every
+   *  UploadProgress event so the renderer can patch the record's
+   *  `uploadsByOutputPath` map without bookkeeping its own
+   *  jobId → recordId table. */
+  recordId?: string;
 }
 
 export type UploadStatus = 'pending' | 'uploading' | 'done' | 'failed' | 'cancelled';
@@ -576,6 +582,19 @@ export interface UploadProgress {
   attempt?: number;
   /** R-46 — Total attempts allowed for this job (1 + maxRetries). */
   maxAttempts?: number;
+  /** R-54 — sha256 hex digest of the file's bytes. Computed by the
+   *  main process before uploading so dedup short-circuits and the
+   *  history can persist it for future short-circuits. */
+  fileHash?: string;
+  /** R-54 — `true` when the `done` event was synthesised from a
+   *  hash cache hit (no network round-trip happened). */
+  reused?: boolean;
+  /** R-54 — When the renderer started the job from a processing
+   *  HistoryRecord row, this is that record's id. Echoed back on
+   *  every progress event so the renderer can patch
+   *  `HistoryRecord.uploadsByOutputPath` without keeping its own
+   *  jobId→recordId map. */
+  recordId?: string;
 }
 
 export interface UploadStartPayload {
@@ -635,6 +654,22 @@ export interface UploadHistoryItem {
   markdown?: string;
   error?: string;
   bytesTotal?: number;
+  /**
+   * R-54 — sha256 hex digest of the bytes that were (or were
+   * intended to be) uploaded. Populated for `done` rows so that
+   * subsequent upload requests for the same bytes can short-circuit
+   * via {@link findUploadByHash}. Older entries (pre-R-54) lack
+   * this field and simply do not participate in dedup; this is fine
+   * because the dedup hit-rate is monotone — the cache only grows.
+   */
+  fileHash?: string;
+  /**
+   * R-54 — Set to `true` when this row was synthesised from a hash
+   * cache hit instead of an actual network round-trip. The panel
+   * surfaces this with a 「♻️ 复用」 badge so the user understands
+   * why "the upload finished in 3ms".
+   */
+  reused?: boolean;
 }
 
 export interface UploadHistoryRecord {

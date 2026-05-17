@@ -4,10 +4,22 @@
  * Focuses on the folding logic (applyProgressToRecord). Hook
  * lifecycle (localStorage persistence) is exercised indirectly via
  * useHistory.test which already has the same shape.
+ *
+ * R-54 — Extends coverage to the new pure helpers added with the
+ * upload-gating / paged history / hash dedup change set:
+ *   - isUploadConfigured
+ *   - findUploadByHash
+ *   - paginateHistory
+ *   - applyProgressToRecord folding new fileHash + reused fields
  */
 import { describe, it, expect } from 'vitest';
-import { applyProgressToRecord } from '../../src/renderer/components/useUploadHistory';
-import type { UploadHistoryRecord } from '../../src/shared/types';
+import {
+  applyProgressToRecord,
+  isUploadConfigured,
+  findUploadByHash,
+  paginateHistory
+} from '../../src/renderer/components/useUploadHistory';
+import type { UploadConfigs, UploadHistoryRecord } from '../../src/shared/types';
 
 function makeRecord(): UploadHistoryRecord {
   return {
@@ -70,5 +82,136 @@ describe('applyProgressToRecord', () => {
     });
     expect(after.items[0].status).toBe('failed');
     expect(after.items[0].error).toBe('boom');
+  });
+
+  it('R-54: folds fileHash and reused flag from progress into the row', () => {
+    const before = makeRecord();
+    const after = applyProgressToRecord(before, {
+      jobId: 'j1',
+      status: 'done',
+      percent: 100,
+      url: 'https://x',
+      markdown: '![a](https://x)',
+      fileHash: 'abc123',
+      reused: true
+    });
+    expect(after.items[0].fileHash).toBe('abc123');
+    expect(after.items[0].reused).toBe(true);
+  });
+
+  it('R-54: keeps a previously-set fileHash sticky against a later emit without one', () => {
+    const before: UploadHistoryRecord = {
+      ...makeRecord(),
+      items: [{
+        jobId: 'j1', fileName: 'a.gif', filePath: '/o/a.gif',
+        status: 'uploading', fileHash: 'sha-old', reused: false
+      }]
+    };
+    const after = applyProgressToRecord(before, {
+      jobId: 'j1', status: 'done', percent: 100, url: 'https://x'
+    });
+    expect(after.items[0].status).toBe('done');
+    expect(after.items[0].fileHash).toBe('sha-old');
+  });
+});
+
+describe('R-54 isUploadConfigured', () => {
+  it('returns false when configs are null / undefined', () => {
+    expect(isUploadConfigured(null)).toBe(false);
+    expect(isUploadConfigured(undefined)).toBe(false);
+  });
+
+  it('rejects customWeb without a valid http(s) url', () => {
+    const c: UploadConfigs = { active: 'customWeb', customWeb: { url: '', headers: {}, fieldName: 'file' } as never };
+    expect(isUploadConfigured(c)).toBe(false);
+  });
+
+  it('accepts customWeb with an https url', () => {
+    const c: UploadConfigs = {
+      active: 'customWeb',
+      customWeb: { url: 'https://up.example.com/api', headers: {}, fieldName: 'file' } as never
+    };
+    expect(isUploadConfigured(c)).toBe(true);
+  });
+
+  it('rejects github without token / repo', () => {
+    const cNoToken: UploadConfigs = { active: 'github', github: { token: '', repo: 'u/r', branch: 'main' } as never };
+    const cNoRepo: UploadConfigs = { active: 'github', github: { token: 't', repo: '', branch: 'main' } as never };
+    expect(isUploadConfigured(cNoToken)).toBe(false);
+    expect(isUploadConfigured(cNoRepo)).toBe(false);
+  });
+
+  it('accepts a fully-filled github config', () => {
+    const c: UploadConfigs = {
+      active: 'github',
+      github: { token: 't', repo: 'u/r', branch: 'main' } as never
+    };
+    expect(isUploadConfigured(c)).toBe(true);
+  });
+
+  it('rejects qiniu missing any of accessKey/secretKey/bucket/domain', () => {
+    const base = { accessKey: 'a', secretKey: 'b', bucket: 'c', domain: 'https://d' };
+    for (const k of ['accessKey', 'secretKey', 'bucket', 'domain'] as const) {
+      const broken = { ...base, [k]: '' };
+      expect(isUploadConfigured({ active: 'qiniu', qiniu: broken } as UploadConfigs)).toBe(false);
+    }
+    expect(isUploadConfigured({ active: 'qiniu', qiniu: base } as UploadConfigs)).toBe(true);
+  });
+});
+
+describe('R-54 findUploadByHash', () => {
+  function recOf(items: UploadHistoryRecord['items'], backend: UploadHistoryRecord['backend'] = 'customWeb'): UploadHistoryRecord {
+    return { id: `r-${Math.random()}`, createdAt: Date.now(), backend, items };
+  }
+
+  it('returns null on empty hash', () => {
+    expect(findUploadByHash([], '', 'customWeb')).toBe(null);
+  });
+
+  it('finds the newest done row whose hash matches and backend matches', () => {
+    const history: UploadHistoryRecord[] = [
+      recOf([{ jobId: 'j1', fileName: 'a.gif', filePath: '/o/a.gif', status: 'done', url: 'https://new', fileHash: 'h1' }]),
+      recOf([{ jobId: 'j0', fileName: 'a.gif', filePath: '/o/a.gif', status: 'done', url: 'https://old', fileHash: 'h1' }])
+    ];
+    const got = findUploadByHash(history, 'h1', 'customWeb');
+    expect(got?.url).toBe('https://new');
+  });
+
+  it('skips rows whose backend differs from the requested backend', () => {
+    const history: UploadHistoryRecord[] = [
+      recOf([{ jobId: 'j1', fileName: 'a.gif', filePath: '/o/a.gif', status: 'done', url: 'https://gh', fileHash: 'h1' }], 'github')
+    ];
+    expect(findUploadByHash(history, 'h1', 'customWeb')).toBe(null);
+  });
+
+  it('skips rows that did not actually finish', () => {
+    const history: UploadHistoryRecord[] = [
+      recOf([{ jobId: 'j1', fileName: 'a.gif', filePath: '/o/a.gif', status: 'failed', error: 'x', fileHash: 'h1' }])
+    ];
+    expect(findUploadByHash(history, 'h1', 'customWeb')).toBe(null);
+  });
+});
+
+describe('R-54 paginateHistory', () => {
+  it('returns the right slice for an in-bounds page', () => {
+    const list = [1, 2, 3, 4, 5, 6, 7];
+    const { rows, pageCount, safePage } = paginateHistory(list, 2, 3);
+    expect(rows).toEqual([4, 5, 6]);
+    expect(pageCount).toBe(3);
+    expect(safePage).toBe(2);
+  });
+
+  it('clamps an out-of-range page to the last page', () => {
+    const list = [1, 2, 3, 4, 5];
+    const { rows, safePage } = paginateHistory(list, 99, 2);
+    expect(safePage).toBe(3);
+    expect(rows).toEqual([5]);
+  });
+
+  it('reports pageCount=1 for an empty list and safePage=1', () => {
+    const { rows, pageCount, safePage } = paginateHistory([], 1, 20);
+    expect(rows).toEqual([]);
+    expect(pageCount).toBe(1);
+    expect(safePage).toBe(1);
   });
 });

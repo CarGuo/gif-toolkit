@@ -24,6 +24,7 @@
 import { BrowserWindow, app, ipcMain } from 'electron';
 import axios from 'axios';
 import { promises as fsp } from 'fs';
+import { createHash } from 'crypto';
 import path from 'path';
 import { log } from '../logger';
 import { dispatchUpload } from './backends';
@@ -60,6 +61,89 @@ const pendingQueues: Set<UploadJob[]> = new Set();
 
 function configPath(): string {
   return path.join(app.getPath('userData'), CONFIG_FILE);
+}
+
+/* ----------------------- R-54: hash dedup cache --------------------------- */
+
+/**
+ * R-54 — File-hash → previous remote URL cache.
+ *
+ * Why a separate file (not the upload-history JSON the renderer
+ * keeps in localStorage)? Two reasons:
+ *
+ *  1. Authority. The cache is consulted from the *main* process
+ *     before the renderer's history can answer back, so we can't
+ *     wait on an IPC round-trip. Keeping it on disk in main means
+ *     the cold-start path is `readFile + JSON.parse` — sub-ms for
+ *     the typical < 1MB cache file.
+ *  2. Separation of concerns. localStorage history is a UI feature
+ *     ("show me what I've uploaded recently"). The hash cache is a
+ *     correctness/perf feature ("if we've seen these bytes, return
+ *     the same URL"). They evolve independently — clearing upload
+ *     history shouldn't blow the dedup cache.
+ *
+ * Schema (`<userData>/upload-hash-cache.json`):
+ *   {
+ *     [sha256_hex]: {
+ *       url: string,
+ *       backend: UploadBackend,
+ *       fileName: string,
+ *       uploadedAt: number  // epoch ms
+ *     }
+ *   }
+ *
+ * TTL: 30 days. URLs from object-storage signed-URL backends could
+ * theoretically expire shorter than that, but for the backends we
+ * support today (customWeb / github / qiniu / aliyunOss / tencentCos)
+ * a public read URL is stable for the lifetime of the underlying
+ * object. We still cap at 30 days as a compromise so a deleted /
+ * rotated remote object eventually drops out of the cache.
+ */
+const HASH_CACHE_FILE = 'upload-hash-cache.json';
+const HASH_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+interface HashCacheEntry {
+  url: string;
+  backend: UploadBackend;
+  fileName: string;
+  uploadedAt: number;
+}
+type HashCache = Record<string, HashCacheEntry>;
+let cachedHashCache: HashCache | null = null;
+
+function hashCachePath(): string {
+  return path.join(app.getPath('userData'), HASH_CACHE_FILE);
+}
+
+async function readHashCache(): Promise<HashCache> {
+  if (cachedHashCache) return cachedHashCache;
+  try {
+    const raw = await fsp.readFile(hashCachePath(), 'utf8');
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      cachedHashCache = parsed as HashCache;
+      return cachedHashCache;
+    }
+  } catch {
+    // missing / corrupt — fall through to fresh cache
+  }
+  cachedHashCache = {};
+  return cachedHashCache;
+}
+
+async function writeHashCache(c: HashCache): Promise<void> {
+  cachedHashCache = c;
+  try {
+    await fsp.mkdir(path.dirname(hashCachePath()), { recursive: true });
+    await fsp.writeFile(hashCachePath(), JSON.stringify(c, null, 2), { mode: 0o600 });
+  } catch (e) {
+    // Cache is best-effort — log but never fail the upload.
+    log(`[upload] hash-cache write failed (non-fatal): ${(e as Error).message || String(e)}`);
+  }
+}
+
+function sha256Hex(buf: Buffer): string {
+  return createHash('sha256').update(buf).digest('hex');
 }
 
 async function readConfigs(): Promise<UploadConfigs> {
@@ -339,6 +423,11 @@ async function runOneJob(
   const ctrl = new AbortController();
   inflight.set(job.id, ctrl);
   const fileName = job.remoteName || path.basename(job.filePath);
+  // R-54 — `recordId` is the renderer-supplied id of the processing
+  // HistoryRecord this output came from. We echo it on every emit so
+  // the renderer can patch HistoryRecord.uploadsByOutputPath without
+  // keeping its own jobId → recordId map.
+  const recordId = job.recordId;
   let bytes: Buffer;
   try {
     bytes = await fsp.readFile(job.filePath);
@@ -346,13 +435,56 @@ async function runOneJob(
     emit({
       jobId: job.id, backend,
       status: 'failed', percent: 0,
-      error: `read failed: ${(e as Error).message || String(e)}`
+      error: `read failed: ${(e as Error).message || String(e)}`,
+      recordId
     });
     inflight.delete(job.id);
     return;
   }
   const total = bytes.length;
   const maxAttempts = maxRetries + 1;
+
+  // R-54 — Hash-dedup short-circuit. Compute sha256 of the bytes we
+  // are about to upload; if the cache has a matching entry for this
+  // backend that is still within TTL, emit a synthetic `done` event
+  // with the cached URL and SKIP the entire retry loop. The renderer
+  // surfaces this row as 「♻️ 复用」 and the upload-history record
+  // carries the same `fileHash` for future short-circuits.
+  //
+  // We hash even when the cache is empty so subsequent uploads of
+  // the same bytes can be deduped — the cost is one in-memory pass
+  // over a buffer we already have in RAM (sub-ms for a 5MB GIF).
+  const fileHash = sha256Hex(bytes);
+  try {
+    const cache = await readHashCache();
+    const hit = cache[fileHash];
+    if (
+      hit &&
+      hit.backend === backend &&
+      typeof hit.url === 'string' &&
+      hit.url.length > 0 &&
+      Date.now() - (hit.uploadedAt || 0) < HASH_CACHE_TTL_MS
+    ) {
+      const md = buildMarkdown(fileName, hit.url, altTemplate);
+      emit({
+        jobId: job.id, backend,
+        status: 'done', percent: 100,
+        url: hit.url, markdown: md,
+        bytesTotal: total, bytesUploaded: total,
+        message: '♻️ hash 命中,复用历史地址',
+        attempt: 1, maxAttempts: 1,
+        fileHash, reused: true,
+        recordId
+      });
+      log(`[upload] hash-cache HIT job=${job.id} sha=${fileHash.slice(0, 8)}… url=${hit.url}`);
+      inflight.delete(job.id);
+      return;
+    }
+  } catch (e) {
+    // Cache lookup failure is non-fatal: just go uploaded as normal.
+    log(`[upload] hash-cache lookup failed (non-fatal): ${(e as Error).message || String(e)}`);
+  }
+
   let lastErr: unknown;
   try {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -360,7 +492,8 @@ async function runOneJob(
       emit({
         jobId: job.id, backend, status: 'uploading', percent: 0,
         bytesTotal: total, bytesUploaded: 0,
-        message: fileName, attempt, maxAttempts
+        message: fileName, attempt, maxAttempts,
+        fileHash, recordId
       });
       try {
         const { url } = await dispatchUpload({
@@ -372,7 +505,8 @@ async function runOneJob(
               jobId: job.id, backend,
               status: 'uploading', percent: pct,
               bytesTotal: all, bytesUploaded: sent,
-              message: fileName, attempt, maxAttempts
+              message: fileName, attempt, maxAttempts,
+              fileHash, recordId
             });
           }
         });
@@ -381,9 +515,25 @@ async function runOneJob(
           jobId: job.id, backend, status: 'done', percent: 100,
           url, markdown: md,
           bytesTotal: total, bytesUploaded: total,
-          attempt, maxAttempts
+          attempt, maxAttempts,
+          fileHash, recordId
         });
-        log(`[upload] ok job=${job.id} attempt=${attempt} url=${url}`);
+        // R-54 — Persist the successful upload into the dedup cache.
+        // We swallow write failures (best-effort): a missing cache
+        // entry just means the next identical upload will repeat.
+        try {
+          const cache = await readHashCache();
+          cache[fileHash] = {
+            url,
+            backend,
+            fileName,
+            uploadedAt: Date.now()
+          };
+          await writeHashCache(cache);
+        } catch {
+          // already logged inside writeHashCache
+        }
+        log(`[upload] ok job=${job.id} attempt=${attempt} url=${url} sha=${fileHash.slice(0, 8)}…`);
         return;
       } catch (e) {
         lastErr = e;
@@ -401,7 +551,8 @@ async function runOneJob(
       jobId: job.id, backend,
       status: aborted ? 'cancelled' : 'failed',
       percent: 0,
-      error: aborted ? 'cancelled by user' : ((lastErr as Error)?.message || String(lastErr) || 'failed')
+      error: aborted ? 'cancelled by user' : ((lastErr as Error)?.message || String(lastErr) || 'failed'),
+      fileHash, recordId
     });
     log(`[upload] ${aborted ? 'cancelled' : 'failed'} job=${job.id}: ${(lastErr as Error)?.message || String(lastErr) || 'failed'}`);
   } finally {

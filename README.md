@@ -85,6 +85,15 @@ Phase D  兜底              finalSide=longSideFloor,目标 maxBytes(默认 4MB)
 - 失败的 task 一键 `重试` 或 `强制允许小尺寸`,**不需要从头再嗅一遍**
 - 底栏可拖拽调高/调低,持久化用户偏好
 
+### 8. 上传到图床 + 嗅探历史关联(R-45 / R-46 / R-54)
+- 五种图床后端:**自定义 Web** / **GitHub Contents API** / **七牛 Kodo** / **阿里云 OSS** / **腾讯云 COS**,token / secret 全部 `••••••` 脱敏 + masked-merge,**永远不进日志**
+- 「⚡ 上传所有产物」按钮 **R-54 严控**:
+  - 必须每个嗅探产物都跑到 `done` 才允许批量上传(label 实时显示 `(已完成/总)`,disabled 时鼠标悬停给中文 tooltip)
+  - **未配置任何可用图床时点击会弹设置引导**:`isUploadConfigured(uploadConfigs)` 校验 active 后端的全部必填字段([useUploadHistory.ts#L208-L224](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/useUploadHistory.ts#L208-L224))
+- **文件 hash 去重**(R-54):主进程 `runOneJob` 上传前先 `sha256(bytes)` 查 `<userData>/upload-hash-cache.json`,30 天 TTL 内同 backend 的同 hash 命中则**复用上次远程 URL,不发请求**(emit `done` w/ `reused=true`),复用项在 UI 上有 `♻️ 复用` 徽章([uploader/index.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/uploader/index.ts))
+- **上传历史全保存 + 翻页**(R-54):`giftk.uploadHistory.v1` 取消 30 条 LRU 上限改全量持久化,`UploadHistoryPanel` 加分页 nav(默认 20/页 + 跳转输入)([UploadHistoryPanel.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/UploadHistoryPanel.tsx))
+- **嗅探历史 ↔ 上传记录联动**(R-54):每次上传透传 `recordId`,完成态时 `mergeUploadIntoRecord` 把 `{ url, markdown, status, backend, fileHash, reused, uploadedAt }` 折回到嗅探 `HistoryRecord.uploadsByOutputPath`,在 `HistoryDetailModal` 里多了 「📤 上传记录」 区块,可以「复制 url」「复制 md」「重传」「一键上传未传产物」([HistoryDetailModal.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/HistoryDetailModal.tsx))
+
 ---
 
 ## 🚀 快速开始

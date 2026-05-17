@@ -62,6 +62,7 @@ import { TaskTable } from './TaskTable';
 import { LogBox } from './LogBox';
 import { PreviewModal } from './PreviewModal';
 import type { HistoryRecord } from './useHistory';
+import { backendLabel } from './useUploadHistory';
 
 const giftk = (typeof window !== 'undefined' ? window.giftk : undefined);
 
@@ -100,6 +101,22 @@ export interface HistoryDetailModalProps {
    *  modal session) cannot bleed into this TaskTable. Optional for
    *  back-compat; unfiltered fallback is the previous behaviour. */
   taskRecordMap?: Map<string, string>;
+  /**
+   * R-54 — Upload one output file (or a list of them) from this
+   * record. Optional so older callers compile; when omitted the
+   * upload section is read-only (just displays past results). The
+   * App-side wrapper pipes `recordId = rec.id` through to
+   * `dispatchUpload` so the upload-progress handler can patch
+   * `rec.uploadsByOutputPath` when each upload settles.
+   */
+  onUploadFromRecord?: (
+    rec: HistoryRecord,
+    plan: Array<{ media: SniffedMedia; filePath: string }>
+  ) => void;
+  /** R-54 — `true` when the upload IPC is wired AND the active
+   *  backend has all required fields. Surfacing it as a prop avoids
+   *  the modal having to reach into App.tsx state to check. */
+  isUploadConfigured?: boolean;
 }
 
 export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
@@ -112,7 +129,9 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
   onOpenOutputDir,
   onClose,
   logs,
-  taskRecordMap
+  taskRecordMap,
+  onUploadFromRecord,
+  isUploadConfigured = false
 }) => {
   // Modal-local state. We seed `options` from the snapshot at first
   // open so the user sees the same parameters they used when they
@@ -407,6 +426,11 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
               onRetry={(m) => onProcessOneFromRecord(rec, m)}
               onForceAllow={(m) => onProcessOneFromRecord(rec, m)}
             />
+            <UploadsSection
+              rec={rec}
+              onUpload={onUploadFromRecord}
+              uploadConfigured={isUploadConfigured}
+            />
             <LogBox lines={recordLogs} />
           </div>
         </div>
@@ -458,3 +482,198 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
 // inline preview / cancel-by-record could call into the bridge
 // without re-importing.
 void giftk;
+
+/* ------------------------- R-54: UploadsSection -------------------------- */
+
+/**
+ * R-54 — Show every produced output file's upload state inside the
+ * sniff-history detail modal. Per the user's product feedback, the
+ * 嗅探 history *MUST* surface upload outcomes so users can answer
+ * "where did this gif go?" without bouncing to the upload-history
+ * tab. Three presentational concerns:
+ *
+ *   1. List every output file across all tasks of `rec`. We walk
+ *      `rec.outputsByTaskId` (insertion-stable Object) and flatten.
+ *   2. For each file, look up `rec.uploadsByOutputPath?.[path]` and
+ *      render either ☁ url+md+复用 badge (done) or ✖ error (failed)
+ *      or a 「📤 上传」 button (no record yet).
+ *   3. Bulk action: 「⚡ 一键上传未传产物」 — collects every output
+ *      that's not yet in `done` state and dispatches them in a single
+ *      batch. Disabled when nothing's pending OR no upload backend
+ *      configured.
+ *
+ * Pure-presentational: receives an `onUpload` callback the parent
+ * piped down, so the modal stays decoupled from the dispatchUpload
+ * implementation in App.tsx.
+ */
+const UploadsSection: React.FC<{
+  rec: HistoryRecord;
+  onUpload?: (rec: HistoryRecord, plan: Array<{ media: SniffedMedia; filePath: string }>) => void;
+  uploadConfigured: boolean;
+}> = ({ rec, onUpload, uploadConfigured }) => {
+  // Flatten outputs keeping a stable order: by task id then by
+  // emit-order array index. We index back into rec.items to attach a
+  // SniffedMedia handle for the upload dispatch.
+  const flat = useMemo(() => {
+    const rows: Array<{ media: SniffedMedia; filePath: string }> = [];
+    for (const m of rec.items) {
+      const outs = rec.outputsByTaskId[m.id];
+      if (!outs || outs.length === 0) continue;
+      for (const p of outs) {
+        rows.push({ media: m, filePath: p });
+      }
+    }
+    return rows;
+  }, [rec]);
+
+  const pendingPlan = useMemo(() => {
+    const ups = rec.uploadsByOutputPath || {};
+    return flat.filter((r) => {
+      const u = ups[r.filePath];
+      return !u || u.status !== 'done';
+    });
+  }, [flat, rec.uploadsByOutputPath]);
+
+  if (flat.length === 0) {
+    return null;
+  }
+
+  const onUploadAllPending = (): void => {
+    if (!onUpload) return;
+    if (pendingPlan.length === 0) return;
+    onUpload(rec, pendingPlan);
+  };
+
+  const ups = rec.uploadsByOutputPath || {};
+  const allUploadDone = pendingPlan.length === 0;
+  const bulkTitle = !onUpload
+    ? '当前会话不支持上传'
+    : !uploadConfigured
+      ? '当前图床尚未配置完整,先去「📤 上传设置」里配置'
+      : allUploadDone
+        ? '本记录的所有产物都已上传'
+        : `把本记录里 ${pendingPlan.length} 个未上传的产物全部派发到当前默认图床`;
+
+  return (
+    <div
+      style={{
+        marginTop: 8,
+        padding: 8,
+        border: '1px solid rgba(255,255,255,0.08)',
+        borderRadius: 6,
+        background: 'rgba(255,255,255,0.02)'
+      }}
+      role="region"
+      aria-label="上传记录"
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+        <strong style={{ fontSize: 12 }}>📤 上传记录</strong>
+        <span style={{ fontSize: 11, color: 'var(--muted)' }}>
+          {flat.length} 个产物 · {flat.length - pendingPlan.length} 已上传 / {pendingPlan.length} 未传
+        </span>
+        <span style={{ flex: 1 }} />
+        <button
+          onClick={onUploadAllPending}
+          disabled={!onUpload || !uploadConfigured || allUploadDone}
+          aria-disabled={!onUpload || !uploadConfigured || allUploadDone}
+          title={bulkTitle}
+        >
+          ⚡ 一键上传未传产物
+        </button>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {flat.map((row) => {
+          const u = ups[row.filePath];
+          const fileName = row.filePath.split(/[\\/]/).pop() || row.filePath;
+          const onCopyUrl = (): void => {
+            if (u?.url) void navigator.clipboard.writeText(u.url);
+          };
+          const onCopyMd = (): void => {
+            if (u?.markdown) void navigator.clipboard.writeText(u.markdown);
+          };
+          const onUploadOne = (): void => {
+            if (!onUpload) return;
+            onUpload(rec, [row]);
+          };
+          return (
+            <div
+              key={row.filePath}
+              style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}
+            >
+              <span style={{ width: 14 }}>
+                {u?.status === 'done' ? '☁' : u?.status === 'failed' ? '✖' : u?.status === 'cancelled' ? '⊘' : '·'}
+              </span>
+              <span
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap'
+                }}
+                title={row.filePath}
+              >
+                {fileName}
+              </span>
+              {u && u.status === 'done' && u.url ? (
+                <>
+                  <span
+                    title={`已上传到 ${backendLabel(u.backend)} · ${new Date(u.uploadedAt).toLocaleString()}`}
+                    style={{ fontSize: 10, color: 'var(--muted)' }}
+                  >
+                    {backendLabel(u.backend)}
+                  </span>
+                  {u.reused ? (
+                    <span
+                      title={`hash 命中,复用了上次的远程地址${u.fileHash ? ` (sha ${u.fileHash.slice(0, 8)}…)` : ''}`}
+                      style={{
+                        fontSize: 10,
+                        color: '#7bd47b',
+                        padding: '1px 5px',
+                        background: 'rgba(123,212,123,0.12)',
+                        borderRadius: 4
+                      }}
+                    >
+                      ♻️ 复用
+                    </span>
+                  ) : null}
+                  <button onClick={onCopyUrl} style={{ fontSize: 10, padding: '2px 6px' }} title="复制 URL">
+                    复制 url
+                  </button>
+                  {u.markdown ? (
+                    <button onClick={onCopyMd} style={{ fontSize: 10, padding: '2px 6px' }} title="复制 markdown">
+                      复制 md
+                    </button>
+                  ) : null}
+                </>
+              ) : u && u.status !== 'done' ? (
+                <>
+                  <span style={{ fontSize: 11, color: '#ef5b6e' }} title={u.status}>
+                    上传 {u.status}
+                  </span>
+                  <button
+                    onClick={onUploadOne}
+                    disabled={!onUpload || !uploadConfigured}
+                    style={{ fontSize: 10, padding: '2px 6px' }}
+                    title={!uploadConfigured ? '先去「📤 上传设置」里配置可用图床' : '重新上传该产物'}
+                  >
+                    📤 重传
+                  </button>
+                </>
+              ) : (
+                <button
+                  onClick={onUploadOne}
+                  disabled={!onUpload || !uploadConfigured}
+                  style={{ fontSize: 10, padding: '2px 6px' }}
+                  title={!uploadConfigured ? '先去「📤 上传设置」里配置可用图床' : '把该产物上传到当前默认图床'}
+                >
+                  📤 上传
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};

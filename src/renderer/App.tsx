@@ -27,12 +27,14 @@ import {
   useHistory,
   makeHistoryRecord,
   mergeProgressIntoRecord,
-  type HistoryRecord
+  mergeUploadIntoRecord,
+  type HistoryRecord,
+  type UploadRefForHistory
 } from './components/useHistory';
 import { useSniffHistory } from './components/useSniffHistory';
 import { SniffHistoryPicker } from './components/SniffHistoryPicker';
 import { ManualOptimizeModal, type ManualOptimizeRequest } from './components/ManualOptimizeModal';
-import { useUploadHistory } from './components/useUploadHistory';
+import { useUploadHistory, isUploadConfigured } from './components/useUploadHistory';
 import { UploadSettingsModal } from './components/UploadSettingsModal';
 import { UploadHistoryPanel } from './components/UploadHistoryPanel';
 import { UploadResultModal } from './components/UploadResultModal';
@@ -234,6 +236,15 @@ const App: React.FC = () => {
   const [uploadResult, setUploadResult] = useState<string | null>(null); // recordId
   const uploadJobToRecordRef = useRef<Map<string, string>>(new Map());
   const uploadInflightRef = useRef<Map<string, number>>(new Map()); // recordId → remaining-non-terminal count
+  // R-54 — jobId → { sniff history recordId (if any), output filePath }.
+  // Populated when 「⚡ 上传所有产物」 / 「📤」 dispatches an upload from
+  // a row that originated in a HistoryRecord, so onUploadProgress can
+  // patch HistoryRecord.uploadsByOutputPath in place. The `sniffRecId`
+  // is intentionally optional — uploads from non-history flows (e.g.
+  // toolbox manual optimize) skip the patch.
+  const uploadJobToTargetRef = useRef<
+    Map<string, { sniffRecId?: string; filePath: string }>
+  >(new Map());
 
   // R-29 (P1-H): if the currently-open history detail modal's record
   // is removed (HistoryPanel "删除" / "清空") while the modal is up,
@@ -310,9 +321,38 @@ const App: React.FC = () => {
           const recId = uploadJobToRecordRef.current.get(p.jobId);
           if (!recId) return;
           applyUploadProgress(recId, p);
+          // R-54 — fold the upload result into the *processing*
+          // HistoryRecord so 嗅探历史 详情面板 can show 「☁ 已上传 /
+          // 复制 url / 复制 markdown」 next to each output. We only
+          // patch on terminal events to keep localStorage write
+          // pressure low — transient `uploading` percent changes
+          // are persisted only in the upload-history record.
+          const TERMINAL_FOR_SNIFF: Array<UploadProgress['status']> = ['done', 'failed', 'cancelled'];
+          if (TERMINAL_FOR_SNIFF.includes(p.status)) {
+            // Prefer the recordId echoed back from main (carried by
+            // UploadJob.recordId → UploadProgress.recordId). Fall
+            // back to the renderer's own jobId → target map for
+            // pre-R-54 backends or odd reconnect cases.
+            const target = uploadJobToTargetRef.current.get(p.jobId);
+            const sniffRecId = p.recordId || target?.sniffRecId;
+            const filePath = target?.filePath;
+            if (sniffRecId && filePath && p.backend) {
+              const ref: UploadRefForHistory = {
+                url: p.url || '',
+                markdown: p.markdown,
+                status: p.status,
+                uploadedAt: Date.now(),
+                backend: p.backend,
+                fileHash: p.fileHash,
+                reused: p.reused
+              };
+              patchHistory(sniffRecId, (rec) => mergeUploadIntoRecord(rec, filePath, ref));
+            }
+          }
           const TERMINAL: Array<UploadProgress['status']> = ['done', 'failed', 'cancelled'];
           if (TERMINAL.includes(p.status)) {
             uploadJobToRecordRef.current.delete(p.jobId);
+            uploadJobToTargetRef.current.delete(p.jobId);
             const remaining = (uploadInflightRef.current.get(recId) ?? 0) - 1;
             if (remaining <= 0) {
               uploadInflightRef.current.delete(recId);
@@ -1080,20 +1120,40 @@ const App: React.FC = () => {
   // Creates ONE upload-history record for the whole batch so the
   // central result modal surfaces consolidated markdown when all jobs
   // settle.
+  //
+  // R-54 — Adds two safeguards on top of R-45:
+  //   1. Hard-fail if the active backend is not fully configured. The
+  //      previous check was `!uploadConfigs` only (would pass with
+  //      configs={active:'github', github:{}}); we now use the
+  //      `isUploadConfigured` predicate which knows each backend's
+  //      required fields. Failure opens 「📤 上传设置」 directly.
+  //   2. Pipe `sniffRecId` (the originating processing HistoryRecord
+  //      id) down through UploadJob.recordId so the upload-progress
+  //      handler can patch HistoryRecord.uploadsByOutputPath when
+  //      each upload settles. Defaults to activeHistoryIdRef when
+  //      the caller doesn't pass one explicitly.
   const dispatchUpload = useCallback(async (
-    plan: Array<{ media: SniffedMedia; filePath: string }>
+    plan: Array<{ media: SniffedMedia; filePath: string }>,
+    opts?: { sniffRecId?: string | null }
   ): Promise<void> => {
     if (!giftk || typeof giftk.uploadStart !== 'function') return;
     if (plan.length === 0) {
       setLogs((prev) => [...prev, `[upload] 没有可上传的产物(需要 done 状态且至少有一个输出)`].slice(-300));
       return;
     }
-    if (!uploadConfigs) {
-      setLogs((prev) => [...prev, `[upload] 上传后端未配置,先打开「📤 上传设置」`].slice(-300));
+    if (!isUploadConfigured(uploadConfigs)) {
+      // R-54 — Conservative configured-check: "configs object exists"
+      // is no longer sufficient. We open the settings modal so the
+      // user can fill in the missing fields immediately.
+      setLogs((prev) => [
+        ...prev,
+        `[upload] 当前图床尚未配置完整,先去「📤 上传设置」里填好对应后端再来`
+      ].slice(-300));
       setUploadSettingsOpen(true);
       return;
     }
-    const backend = uploadConfigs.active;
+    const sniffRecId = opts?.sniffRecId ?? activeHistoryIdRef.current ?? undefined;
+    const backend = uploadConfigs!.active;
     const items: UploadHistoryItem[] = plan.map((entry) => ({
       jobId: '', // filled in after uploadStart resolves
       backend,
@@ -1108,7 +1168,9 @@ const App: React.FC = () => {
         jobs: plan.map((entry, i) => ({
           id: `${recId}-${i}`,
           filePath: entry.filePath,
-          remoteName: entry.filePath.split(/[\\/]/).pop() || undefined
+          remoteName: entry.filePath.split(/[\\/]/).pop() || undefined,
+          // R-54 — echoed back on every UploadProgress emit.
+          recordId: sniffRecId
         }))
       };
       const r = await giftk.uploadStart(payload);
@@ -1118,6 +1180,13 @@ const App: React.FC = () => {
       uploadInflightRef.current.set(recId, r.jobIds.length);
       r.jobIds.forEach((jobId, i) => {
         uploadJobToRecordRef.current.set(jobId, recId);
+        // R-54 — record the sniff target alongside the upload-history
+        // record id, so the upload-progress handler can patch the
+        // *processing* HistoryRecord (嗅探历史) on terminal events.
+        uploadJobToTargetRef.current.set(jobId, {
+          sniffRecId,
+          filePath: plan[i].filePath
+        });
         // Patch the placeholder jobId-less item so the history row can
         // be located by jobId on subsequent applyProgress calls.
         applyUploadProgress(recId, {
@@ -1167,6 +1236,44 @@ const App: React.FC = () => {
     }
     await dispatchUpload(plan);
   }, [items, progress, dispatchUpload]);
+
+  // R-54 — Computed reasons for / against enabling 「⚡ 上传所有产物」.
+  //   - hasUploadable: at least one row has done && outputs[0]
+  //   - allDone: every processable row has reached `done` (the user
+  //     explicitly asked for "所有产物都搞定了才能点击") — we treat
+  //     pending / running / failed / cancelled as「未搞定」。
+  //   - configured: the active backend has all required fields.
+  // Derived this way so the title attribute can spell out *which*
+  // condition is failing instead of just disabling silently.
+  const uploadAllStats = (() => {
+    if (items.length === 0) {
+      return { allDone: false, hasUploadable: false, configured: isUploadConfigured(uploadConfigs), total: 0, doneCount: 0 };
+    }
+    let doneCount = 0;
+    let hasUploadable = false;
+    for (const m of items) {
+      const p = progress[m.id];
+      if (p && p.status === 'done') {
+        doneCount += 1;
+        if (p.outputs && p.outputs.length > 0) hasUploadable = true;
+      }
+    }
+    return {
+      allDone: doneCount === items.length,
+      hasUploadable,
+      configured: isUploadConfigured(uploadConfigs),
+      total: items.length,
+      doneCount
+    };
+  })();
+  const uploadAllReady = uploadAllStats.allDone && uploadAllStats.hasUploadable;
+  const uploadAllTitle = (() => {
+    if (items.length === 0) return '当前没有可上传的产物';
+    if (!uploadAllStats.configured) return '当前图床尚未配置完整,先去「📤 上传设置」里配置一个可用图床';
+    if (!uploadAllStats.allDone) return `还有任务未完成 (${uploadAllStats.doneCount}/${uploadAllStats.total}),所有产物都搞定了才能点击`;
+    if (!uploadAllStats.hasUploadable) return '所有任务都完成,但没有可上传的输出文件';
+    return '把所有已完成任务的产物上传到当前默认图床(可在「📤 上传设置」中切换)';
+  })();
 
   const onSaveUploadSettings = useCallback(async (next: UploadConfigs): Promise<void> => {
     if (!giftk || typeof giftk.uploadSetSettings !== 'function') return;
@@ -1981,16 +2088,20 @@ const App: React.FC = () => {
               >
                 📋 日志{logs.length > 0 ? ` (${logs.length})` : ''}{logsVisible ? ' ▾' : ' ▸'}
               </button>
-              {/* R-45 — 「⚡ 上传所有产物」+「📤 上传设置」按钮。
-                  上传所有产物按钮:把所有 done 行的第一个输出全部派发
-                  到当前默认图床后端,主进程串行执行,完成时弹结果面板。 */}
+              {/* R-45 / R-54 — 「⚡ 上传所有产物」+「📤 上传设置」按钮。
+                  R-54 严控 disabled:仅当所有任务都 done 且至少有一个
+                  可上传输出时才可点。未配置图床时按钮仍允许点击,
+                  click handler 会弹「📤 上传设置」并在日志里写明。
+                  这样用户得到的是即时引导,而不是无声禁用。 */}
               <button
                 className="ghost"
                 onClick={() => void onUploadAll()}
-                title="把所有已完成任务的产物上传到当前默认图床(可在「📤 上传设置」中切换)"
+                title={uploadAllTitle}
+                disabled={!uploadAllReady}
+                aria-disabled={!uploadAllReady}
                 style={{ marginLeft: 8 }}
               >
-                ⚡ 上传所有产物
+                ⚡ 上传所有产物{items.length > 0 ? ` (${uploadAllStats.doneCount}/${uploadAllStats.total})` : ''}
               </button>
               <button
                 className="ghost"
@@ -2108,6 +2219,11 @@ const App: React.FC = () => {
           // R-29 (P0-C): forward the live task→record binding so the
           // modal can filter same-id collisions out of its TaskTable.
           taskRecordMap={taskRecordMapRef.current}
+          // R-54 — let the modal dispatch uploads pinned to its own
+          // record so the upload outcomes are folded back into
+          // rec.uploadsByOutputPath.
+          onUploadFromRecord={(rec, plan) => void dispatchUpload(plan, { sniffRecId: rec.id })}
+          isUploadConfigured={isUploadConfigured(uploadConfigs)}
         />
       ) : null}
 

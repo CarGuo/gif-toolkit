@@ -29,12 +29,40 @@ import type {
   ProcessOptions,
   SniffedMedia,
   TaskProgress,
-  TaskStatus
+  TaskStatus,
+  UploadBackend,
+  UploadStatus
 } from '../../shared/types';
 import { DEFAULT_OPTIONS } from '../../shared/types';
 
 export const HISTORY_STORAGE_KEY = 'giftk.history.v1';
 export const HISTORY_MAX_ENTRIES = 30;
+
+/**
+ * R-54 — One upload's outcome, indexed inside HistoryRecord by the
+ * absolute output file path. Lets the 嗅探历史 detail panel show
+ * 「☁ 已上传 / 复制 url / 复制 markdown」 next to each produced file
+ * without requiring a cross-store join into UploadHistoryRecord.
+ *
+ * Why duplicate the upload-history info here instead of joining?
+ *  - The two histories evolve at different cadences (the upload
+ *    history can be cleared independently).
+ *  - The 嗅探 detail panel pre-existed and the user explicitly asked
+ *    for in-place rendering, not for a "see upload history tab" link.
+ *  - Storing the URL by *output path* makes it correct under file
+ *    moves (we keep the absolute path on disk verbatim).
+ */
+export interface UploadRefForHistory {
+  url: string;
+  markdown?: string;
+  status: UploadStatus;
+  uploadedAt: number;
+  backend: UploadBackend;
+  /** sha256 of the uploaded bytes — surfaced for UI debug only. */
+  fileHash?: string;
+  /** True if the URL was reused via hash-cache hit. */
+  reused?: boolean;
+}
 
 /**
  * One record per *sniff* session. A sniff that is followed by zero or
@@ -64,6 +92,14 @@ export interface HistoryRecord {
   outputsByTaskId: Record<string, string[]>;
   /** Per-task most-recent status (done / failed / cancelled / etc.). */
   taskStatus: Record<string, TaskStatus>;
+  /**
+   * R-54 — Per-output-file upload result. Keyed by the absolute path
+   * on disk (same string the renderer stores in `outputsByTaskId`).
+   * `undefined` (or missing key) means「该产物尚未上传 / 上传失败已
+   * 删除记录」。Pre-R-54 records simply lack the field; readAll
+   * tolerates that by defaulting to `{}`.
+   */
+  uploadsByOutputPath?: Record<string, UploadRefForHistory>;
 }
 
 function genId(): string {
@@ -105,7 +141,11 @@ function readAll(): HistoryRecord[] {
         taskStatus:
           r.taskStatus && typeof r.taskStatus === 'object'
             ? (r.taskStatus as Record<string, TaskStatus>)
-            : {}
+            : {},
+        uploadsByOutputPath:
+          r.uploadsByOutputPath && typeof r.uploadsByOutputPath === 'object'
+            ? (r.uploadsByOutputPath as Record<string, UploadRefForHistory>)
+            : undefined
       });
     }
     return out;
@@ -339,5 +379,52 @@ export function makeHistoryRecord(args: {
     outputDir: args.outputDir,
     outputsByTaskId: {},
     taskStatus: {}
+  };
+}
+
+/**
+ * R-54 — Pure helper: fold a single upload's `done` / `failed` /
+ * `cancelled` outcome into a HistoryRecord at the given output file
+ * path. Only persists `done` (with a url) and terminal `failed` /
+ * `cancelled` rows — transient `uploading` / `pending` events are
+ * skipped to avoid thrashing localStorage on every byte progress.
+ *
+ * Idempotent: calling twice with the same final state is a no-op.
+ * Terminal-wins: a `done` record is never downgraded to `failed` by
+ * a later retry that only succeeded once (we keep whichever has a
+ * url).
+ */
+export function mergeUploadIntoRecord(
+  rec: HistoryRecord,
+  outputPath: string,
+  ref: UploadRefForHistory
+): HistoryRecord {
+  if (!outputPath) return rec;
+  const TERMINAL_FOR_UPLOAD: UploadStatus[] = ['done', 'failed', 'cancelled'];
+  if (!TERMINAL_FOR_UPLOAD.includes(ref.status)) return rec;
+  const prev = rec.uploadsByOutputPath?.[outputPath];
+  // Terminal-wins: a previously successful upload should not be
+  // overwritten by a later failed retry (rare race, but possible if
+  // the user manually re-uploads after a transient failure cleaned
+  // the row).
+  if (prev && prev.status === 'done' && ref.status !== 'done') return rec;
+  // Idempotent: same final state — return same reference so React
+  // skips the re-render.
+  if (
+    prev &&
+    prev.status === ref.status &&
+    prev.url === ref.url &&
+    prev.markdown === ref.markdown &&
+    prev.fileHash === ref.fileHash &&
+    prev.reused === ref.reused
+  ) {
+    return rec;
+  }
+  return {
+    ...rec,
+    uploadsByOutputPath: {
+      ...(rec.uploadsByOutputPath || {}),
+      [outputPath]: ref
+    }
   };
 }

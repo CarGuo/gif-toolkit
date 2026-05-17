@@ -16,6 +16,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type {
   UploadBackend,
+  UploadConfigs,
   UploadHistoryItem,
   UploadHistoryRecord,
   UploadProgress,
@@ -23,7 +24,15 @@ import type {
 } from '../../shared/types';
 
 export const UPLOAD_HISTORY_STORAGE_KEY = 'giftk.uploadHistory.v1';
-export const UPLOAD_HISTORY_MAX_ENTRIES = 30;
+// R-54 — Per the user's product feedback we now保存 ALL upload history
+// (no LRU cap) and let the panel paginate. The previous 30-entry hard
+// cap silently lost long-tail records when a user batch-uploaded ~30
+// files and then forgot the link two months later. This constant is
+// retained as a soft "page size" advisory only — readAll/writeAll do
+// NOT enforce it, the panel uses it as the default page size instead.
+export const UPLOAD_HISTORY_PAGE_SIZE = 20;
+/** @deprecated R-54 — use {@link UPLOAD_HISTORY_PAGE_SIZE} for paging. */
+export const UPLOAD_HISTORY_MAX_ENTRIES = Number.POSITIVE_INFINITY;
 
 function genId(): string {
   const r = Math.floor(Math.random() * 0xffffffff).toString(16).padStart(8, '0');
@@ -99,7 +108,14 @@ export function applyProgressToRecord(
   const sameUrl = (prev.url || '') === (p.url || '');
   const sameError = (prev.error || '') === (p.error || '');
   const sameMd = (prev.markdown || '') === (p.markdown || '');
-  if (sameStatus && sameUrl && sameError && sameMd) {
+  // R-54 — fileHash + reused are sticky once set so a later
+  // `uploading` emit that omits them doesn't blank out a `done`
+  // record's hash.
+  const nextHash = prev.fileHash || p.fileHash;
+  const nextReused = prev.reused ?? p.reused;
+  const sameHash = (prev.fileHash || '') === (nextHash || '');
+  const sameReused = (prev.reused ?? false) === (nextReused ?? false);
+  if (sameStatus && sameUrl && sameError && sameMd && sameHash && sameReused) {
     return rec;
   }
   const next: UploadHistoryItem = {
@@ -107,7 +123,9 @@ export function applyProgressToRecord(
     status: nextStatus,
     url: p.url || prev.url,
     markdown: p.markdown || prev.markdown,
-    error: p.error || prev.error
+    error: p.error || prev.error,
+    fileHash: nextHash,
+    reused: nextReused
   };
   const items = rec.items.slice();
   items[idx] = next;
@@ -125,13 +143,13 @@ export function useUploadHistory(): UseUploadHistoryApi {
   const start = useCallback((args: { backend: UploadBackend; items: UploadHistoryItem[] }): string => {
     const id = genId();
     setHistory((prev) => {
-      const next: UploadHistoryRecord[] = [
+      // R-54 — keep ALL upload history. Past 30-cap LRU lost long-tail
+      // links the user wanted weeks/months later. Paging in the panel
+      // makes the unbounded list usable.
+      return [
         { id, createdAt: Date.now(), backend: args.backend, items: args.items },
         ...prev
       ];
-      return next.length > UPLOAD_HISTORY_MAX_ENTRIES
-        ? next.slice(0, UPLOAD_HISTORY_MAX_ENTRIES)
-        : next;
     });
     return id;
   }, []);
@@ -169,4 +187,96 @@ export function backendLabel(b: UploadBackend): string {
     case 'tencentCos': return '腾讯云 COS';
     default: return b;
   }
+}
+
+/**
+ * R-54 — Pure helper:does the given UploadConfigs object describe a
+ * fully usable backend?Returns `false` when the active backend has
+ * not been filled in (e.g. user opened the app for the first time
+ * and has not visited 「📤 上传设置」 yet).
+ *
+ * The check is intentionally conservative: we only verify the bare
+ * minimum fields the corresponding `dispatchUpload` backend needs to
+ * sign / route the request. Full validation (token still valid,
+ * bucket exists, …) is the job of「📤 上传设置」-> 测试连接 and is
+ * not duplicated here.
+ *
+ * Returning `false` is what makes the upload buttons (「⚡ 上传所有
+ * 产物」 / per-row 📤) light up as disabled with a tooltip telling
+ * the user to open the settings modal first.
+ */
+export function isUploadConfigured(c: UploadConfigs | null | undefined): boolean {
+  if (!c) return false;
+  switch (c.active) {
+    case 'customWeb':
+      return !!(c.customWeb && typeof c.customWeb.url === 'string' && /^https?:\/\//i.test(c.customWeb.url));
+    case 'github':
+      return !!(c.github && c.github.token && c.github.repo);
+    case 'qiniu':
+      return !!(c.qiniu && c.qiniu.accessKey && c.qiniu.secretKey && c.qiniu.bucket && c.qiniu.domain);
+    case 'aliyunOss':
+      return !!(c.aliyunOss && c.aliyunOss.accessKeyId && c.aliyunOss.accessKeySecret && c.aliyunOss.bucket && c.aliyunOss.region);
+    case 'tencentCos':
+      return !!(c.tencentCos && c.tencentCos.secretId && c.tencentCos.secretKey && c.tencentCos.bucket && c.tencentCos.region);
+    default:
+      return false;
+  }
+}
+
+/**
+ * R-54 — Hash dedup lookup. Walk the entire upload history newest →
+ * oldest and return the first item whose sha256 fileHash matches AND
+ * whose previous upload finished successfully (status === 'done',
+ * url present). The caller can then decide to skip the actual
+ * upload and reuse the previous remote URL — saves bandwidth + time
+ * and (for backends that bill per request) money.
+ *
+ * IMPORTANT: we deliberately do not narrow by backend or filename.
+ * The same bytes uploaded to 七牛 6 months ago should still短-circuit
+ * a 上传 request to GitHub today, because the *remote URL is still
+ * valid* — we hand it back as-is. If the user wants the file fresh
+ * on a *different* backend they can re-pick the backend in 上传
+ * 设置 and the dedup will only fire when there's already a record
+ * matching that backend, OR they can simply delete the prior history
+ * row and the next upload will run normally.
+ *
+ * Note: ignored if the prior record's backend is different — the URL
+ * may still be live, but pretending the upload happened on the
+ * "active" backend would corrupt the new record's analytics. We
+ * therefore filter by backend first; users wanting cross-backend
+ * dedup can pick the matching backend in settings to surface it.
+ */
+export function findUploadByHash(
+  history: UploadHistoryRecord[],
+  hash: string,
+  backend: UploadBackend
+): { url: string; markdown?: string; backend: UploadBackend; fileName: string; recordId: string; jobId: string } | null {
+  if (!hash) return null;
+  for (const rec of history) {
+    if (rec.backend !== backend) continue;
+    for (const it of rec.items) {
+      if (it.status !== 'done' || !it.url) continue;
+      if (it.fileHash === hash) {
+        return {
+          url: it.url,
+          markdown: it.markdown,
+          backend: rec.backend,
+          fileName: it.fileName,
+          recordId: rec.id,
+          jobId: it.jobId
+        };
+      }
+    }
+  }
+  return null;
+}
+
+/** R-54 — Stable pagination slicer used by the panel. Exported so it
+ *  can be unit-tested without spinning up React. */
+export function paginateHistory<T>(list: T[], page: number, pageSize: number): { rows: T[]; pageCount: number; safePage: number } {
+  const total = list.length;
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  const safePage = Math.max(1, Math.min(page, pageCount));
+  const start = (safePage - 1) * pageSize;
+  return { rows: list.slice(start, start + pageSize), pageCount, safePage };
 }
