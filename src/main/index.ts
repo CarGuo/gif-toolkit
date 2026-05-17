@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, session } from 'electron';
 import path from 'path';
-import { promises as fsp, statSync } from 'fs';
+import { promises as fsp, statSync, existsSync } from 'fs';
 import crypto from 'crypto';
 import { sniffPage } from './sniffer';
 import { openWebviewSniff } from './webviewSniff';
@@ -465,6 +465,26 @@ function sanitizeToolboxJob(j: unknown): ToolboxJob {
 /* ----------------------- Window / CSP ----------------------- */
 
 async function createWindow(): Promise<void> {
+  // R-50.2 — Resolve the bundled app icon. In dev we read it from the
+  // repo's build/ folder; in a packaged app electron-builder copies the
+  // same file to `process.resourcesPath`. Fall back silently if absent —
+  // BrowserWindow happily ignores `icon: undefined`.
+  const iconPath = (() => {
+    const candidates = [
+      path.join(__dirname, '..', '..', 'build', 'icon.ico'),
+      path.join(process.resourcesPath || '', 'build', 'icon.ico'),
+      path.join(process.resourcesPath || '', 'icon.ico')
+    ];
+    for (const p of candidates) {
+      try {
+        if (p && existsSync(p)) return p;
+      } catch {
+        /* ignore */
+      }
+    }
+    return undefined;
+  })();
+
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 820,
@@ -472,6 +492,7 @@ async function createWindow(): Promise<void> {
     minHeight: 640,
     backgroundColor: '#0e0f12',
     title: 'Gif Toolkit',
+    icon: iconPath,
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
       contextIsolation: true,
