@@ -31,7 +31,11 @@ import {
   webviewDedupKey,
   WEBVIEW_MAX_ITEMS as MAX_ITEMS,
   WEBVIEW_TOOLBAR_HEIGHT as TOOLBAR_HEIGHT,
-  innerViewBounds
+  innerViewBounds,
+  buildSpoofedSecChUa,
+  isCloudflareInfraHost,
+  isHighProtectionHost,
+  FINGERPRINT_PATCH_SCRIPT
 } from './webviewSniffUtils';
 import { log } from './logger';
 
@@ -83,6 +87,58 @@ function attachNetworkRecorder(out: Map<string, CapturedResource>, partition: st
   return () => {
     // onCompleted has no native unsubscribe; passing null clears the filter.
     ses.webRequest.onCompleted(null);
+  };
+}
+
+/**
+ * R-49 — Rewrite the `Sec-Ch-Ua*` request headers Chromium emits by
+ * default (which advertise "Electron" as one of the brand strings) to
+ * impersonate stable Chrome 124. This is the **server-side** half of the
+ * fingerprint patch; the client-side half (`navigator.userAgentData`) is
+ * applied via `executeJavaScript` per dom-ready.
+ *
+ * Why per-session and not via `app.commandLine`? Electron supports a
+ * `--user-agent-product` switch, but it does not let us control the
+ * brand list emitted in `Sec-Ch-Ua-Full-Version-List`. The only reliable
+ * way is to mutate `requestHeaders` in `onBeforeSendHeaders`. Returns a
+ * detach handle so we tear it down in lock-step with the recorder.
+ */
+function attachHeaderSpoofer(partition: string): () => void {
+  const ses = session.fromPartition(partition);
+  // Picking platform once per process is fine: the value changes only
+  // across OS, and our app is per-OS-bundled.
+  const platform =
+    process.platform === 'darwin' ? '"macOS"'
+      : process.platform === 'win32' ? '"Windows"'
+        : '"Linux"';
+  const spoofed = buildSpoofedSecChUa(platform);
+  const handler = (
+    details: Electron.OnBeforeSendHeadersListenerDetails,
+    callback: (response: Electron.BeforeSendResponse) => void
+  ): void => {
+    // Only mess with HTTPS web traffic; Cloudflare's own domains never
+    // need our spoof (their internal pings either ignore Sec-Ch-Ua or
+    // would be confused by inconsistent values across origins).
+    const headers = { ...details.requestHeaders };
+    let host: string | null = null;
+    try { host = new URL(details.url).host; } catch { /* ignore */ }
+    if (!isCloudflareInfraHost(host)) {
+      // Find existing Sec-Ch-Ua* keys (case-insensitive) and delete them
+      // so our lower-cased spoof entries don't end up duplicated under
+      // mixed-case sibling keys.
+      for (const k of Object.keys(headers)) {
+        if (k.toLowerCase().startsWith('sec-ch-ua')) delete headers[k];
+      }
+      Object.assign(headers, spoofed);
+    }
+    callback({ requestHeaders: headers });
+  };
+  ses.webRequest.onBeforeSendHeaders(
+    { urls: ['http://*/*', 'https://*/*'] },
+    handler
+  );
+  return () => {
+    ses.webRequest.onBeforeSendHeaders(null);
   };
 }
 
@@ -166,6 +222,23 @@ function buildChromeHtml(): string {
   #addr:focus { border-color:var(--accent); }
   #status { flex:0 0 auto; font-size:11px; color:var(--muted); max-width:240px; overflow:hidden;
     text-overflow:ellipsis; white-space:nowrap; }
+  /* R-49 — Yellow warning banner shown when the inner view loads a host
+     known to apply max-strength bot protection (Cloudflare Turnstile,
+     OpenAI, Patreon, X/Twitter, …). The banner is inert: it only nudges
+     the user to click the existing 「🧭 系统浏览器」 button, which is
+     the actual escape hatch. */
+  #banner { display:none; align-items:center; gap:8px; padding:8px 12px;
+    background:rgba(255,193,7,0.14); color:#ffd86b;
+    border-bottom:1px solid rgba(255,193,7,0.35); font-size:12px;
+    line-height:1.5; }
+  #banner.show { display:flex; }
+  #banner .b-icon { flex:0 0 auto; font-size:14px; }
+  #banner .b-text { flex:1; min-width:0; }
+  #banner .b-cta { flex:0 0 auto; height:24px; padding:0 10px;
+    background:rgba(255,193,7,0.2); color:#ffd86b;
+    border:1px solid rgba(255,193,7,0.5); border-radius:12px;
+    font:inherit; font-size:11px; cursor:pointer; }
+  #banner .b-cta:hover { background:rgba(255,193,7,0.3); }
   /* R-48 progress bar — 4px tall, two layers:
      1. .indet — indeterminate sliding gradient (visible whenever
         isLoading is true, so the user sees motion immediately even
@@ -203,6 +276,11 @@ function buildChromeHtml(): string {
     <div class="det"></div>
   </div>
 </div>
+<div id="banner" role="status" aria-live="polite">
+  <span class="b-icon" aria-hidden="true">⚠</span>
+  <span class="b-text">此站点使用了高强度机器人检测,内嵌浏览器很可能被拦截。建议改用系统浏览器登录后再回到这里嗅探最终媒体地址。</span>
+  <button class="b-cta" id="b-banner-open" type="button">🧭 在系统浏览器打开</button>
+</div>
 <script>
   // The page CSP we ship is permissive on inline-script for this single
   // chrome page; the outer window only ever loads this exact HTML, so
@@ -213,6 +291,7 @@ function buildChromeHtml(): string {
   $('b-forward').addEventListener('click', () => send({ kind: 'forward' }));
   $('b-reload').addEventListener('click', () => send({ kind: 'reload' }));
   $('b-external').addEventListener('click', () => send({ kind: 'open-external' }));
+  $('b-banner-open').addEventListener('click', () => send({ kind: 'open-external' }));
   $('b-finish').addEventListener('click', () => send({ kind: 'finish' }));
   $('b-cancel').addEventListener('click', () => send({ kind: 'cancel' }));
   $('addr').addEventListener('keydown', (e) => {
@@ -236,6 +315,11 @@ function buildChromeHtml(): string {
     $('progress').classList.toggle('loading', !!s.isLoading);
     const p = s.isLoading ? Math.max(8, Math.min(95, s.progress || 30)) : 100;
     det.style.width = p + '%';
+    // R-49 — banner reflects the latest highProtection verdict from
+    // the main process. The flag may flip mid-session if the user
+    // navigates away from a flagged host, so we always re-evaluate
+    // (no sticky state).
+    $('banner').classList.toggle('show', !!s.highProtection);
   });
 </script>
 </body></html>`;
@@ -256,7 +340,11 @@ export async function openWebviewSniff(
   parent?: BrowserWindow | null
 ): Promise<SniffResult> {
   const captured = new Map<string, CapturedResource>();
-  const detach = attachNetworkRecorder(captured, PARTITION);
+  const detachRecorder = attachNetworkRecorder(captured, PARTITION);
+  // R-49 — Run the request-header spoofer in the same partition so it
+  // covers every navigation and sub-resource. Detached together with
+  // the recorder in `finish()`.
+  const detachHeaders = attachHeaderSpoofer(PARTITION);
 
   // Outer window — hosts our chrome-shell HTML.
   const win = new BrowserWindow({
@@ -314,14 +402,23 @@ export async function openWebviewSniff(
       try {
         const wc = view.webContents;
         const nh = (wc as unknown as { navigationHistory?: { canGoBack(): boolean; canGoForward(): boolean } }).navigationHistory;
+        const currentUrl = wc.getURL() || pageUrl;
+        // R-49 — Compute the highProtection flag from the *current*
+        // navigation target so the banner appears as soon as a redirect
+        // hops into a flagged origin (e.g. user types `chatgpt.com`,
+        // gets bounced to `auth.openai.com`).
+        let host: string | null = null;
+        try { host = new URL(currentUrl).host; } catch { /* ignore */ }
+        const highProtection = isHighProtectionHost(host);
         const state = {
-          url: wc.getURL() || pageUrl,
+          url: currentUrl,
           title: wc.getTitle() || '',
           canGoBack: nh ? nh.canGoBack() : (wc as unknown as { canGoBack(): boolean }).canGoBack(),
           canGoForward: nh ? nh.canGoForward() : (wc as unknown as { canGoForward(): boolean }).canGoForward(),
           isLoading: extra?.isLoading ?? wc.isLoading(),
           progress: extra?.progress ?? (wc.isLoading() ? 50 : 100),
-          message: extra?.message
+          message: extra?.message,
+          highProtection
         };
         win.webContents.send('webview-sniff:chrome', state);
       } catch { /* ignore */ }
@@ -338,7 +435,17 @@ export async function openWebviewSniff(
       pushState({ isLoading: lastStageProgress < 100, progress: lastStageProgress, message });
     };
     view.webContents.on('did-start-loading', () => { lastStageProgress = 0; stage(15, '正在连接…'); });
-    view.webContents.on('dom-ready', () => stage(55, '正在解析…'));
+    view.webContents.on('dom-ready', () => {
+      stage(55, '正在解析…');
+      // R-49 — Apply the fingerprint patch as early as possible (right
+      // when the document object exists). We re-inject on every
+      // dom-ready event so SPA route changes that re-create the
+      // document — and any iframe that reaches dom-ready inside the
+      // main view — also get patched.
+      view.webContents.executeJavaScript(FINGERPRINT_PATCH_SCRIPT, true).catch(() => {
+        // Silently ignore — patch failure must not prevent rendering.
+      });
+    });
     view.webContents.on('did-frame-finish-load', (_e, isMainFrame) => {
       if (isMainFrame) stage(80, '资源加载中…');
     });
@@ -353,10 +460,25 @@ export async function openWebviewSniff(
       pushState({ message: `加载失败:${desc} (${code})`, isLoading: false, progress: 100 });
     });
 
-    // Tolerant TLS for sub-resources (third-party widgets often have
-    // mismatched certs that would otherwise dump red into stderr without
-    // affecting functionality). Main-frame errors still surface above.
-    view.webContents.on('certificate-error', (event, _url, _err, _cert, callback) => {
+    // R-49 — Tolerant TLS strategy:
+    //   - Cloudflare's own challenge endpoints (challenges.cloudflare.com,
+    //     cdn-cgi/*, *.cloudflareinsights.com) sometimes serve certs
+    //     pinned in ways Electron's net stack disagrees with. Rejecting
+    //     those silently *kills Turnstile rendering itself* — exactly
+    //     the opposite of what we want. We always accept their certs.
+    //   - For any other host, sub-resource cert errors are ignored
+    //     (matching real browsers' "show the page anyway, just don't
+    //     load the broken sub-resource") but we still fall through to
+    //     the main-frame-only `did-fail-load` log if the top-level
+    //     navigation cert is bad.
+    view.webContents.on('certificate-error', (event, url, _err, _cert, callback) => {
+      let host: string | null = null;
+      try { host = new URL(url).host; } catch { /* ignore */ }
+      if (isCloudflareInfraHost(host)) {
+        event.preventDefault();
+        callback(true);
+        return;
+      }
       event.preventDefault();
       callback(false);
     });
@@ -407,7 +529,8 @@ export async function openWebviewSniff(
         }
       }
 
-      detach();
+      detachRecorder();
+      detachHeaders();
       ipcMain.removeAllListeners('webview-sniff:chrome-cmd');
       try { if (!win.isDestroyed()) win.close(); } catch { /* ignore */ }
 
@@ -486,6 +609,8 @@ export async function openWebviewSniff(
       // bar shows what we are about to load (the inner view's getURL()
       // is still 'about:blank' at this instant).
       try {
+        let initialHost: string | null = null;
+        try { initialHost = new URL(targetUrl).host; } catch { /* ignore */ }
         win.webContents.send('webview-sniff:chrome', {
           url: targetUrl,
           title: '',
@@ -493,7 +618,12 @@ export async function openWebviewSniff(
           canGoForward: false,
           isLoading: true,
           progress: 10,
-          message: '正在打开…'
+          message: '正在打开…',
+          // R-49 — Surface the banner immediately for known
+          // high-protection hosts so the user sees the "use system
+          // browser" hint while the page is still loading (rather
+          // than only after Cloudflare's challenge has stalled them).
+          highProtection: isHighProtectionHost(initialHost)
         });
       } catch { /* ignore */ }
       // Now actually start the inner navigation.

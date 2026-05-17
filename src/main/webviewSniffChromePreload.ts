@@ -25,6 +25,11 @@ interface ChromeState {
   isLoading: boolean;
   progress: number;
   message?: string;
+  /** R-49 — When true, the toolbar should show the yellow "this site
+   *  is bot-walled, prefer system browser" banner. Set by the main
+   *  process whenever the current navigation host matches the
+   *  high-protection allowlist (OpenAI, Patreon, X/Twitter, …). */
+  highProtection?: boolean;
 }
 
 type ChromeCmd =

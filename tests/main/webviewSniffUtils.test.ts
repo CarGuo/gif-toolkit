@@ -14,7 +14,13 @@ import {
   webviewDedupKey,
   WEBVIEW_MAX_ITEMS,
   WEBVIEW_TOOLBAR_HEIGHT,
-  innerViewBounds
+  innerViewBounds,
+  buildSpoofedSecChUa,
+  isCloudflareInfraHost,
+  isHighProtectionHost,
+  FINGERPRINT_PATCH_SCRIPT,
+  SPOOF_CHROME_MAJOR,
+  SPOOF_CHROME_FULL
 } from '../../src/main/webviewSniffUtils';
 import type { SniffedMedia } from '../../src/shared/types';
 
@@ -159,5 +165,133 @@ describe('innerViewBounds (R-47 chrome-shell layout)', () => {
   it('clamps when content height is smaller than the toolbar', () => {
     const r = innerViewBounds(400, 20);
     expect(r.height).toBe(0);
+  });
+});
+
+describe('buildSpoofedSecChUa (R-49 anti-fingerprint headers)', () => {
+  it('emits the canonical Chrome 124 brand list with Chromium first', () => {
+    const h = buildSpoofedSecChUa('"macOS"');
+    // Brand-list ordering matters — Cloudflare's BFM probes brand[0] for
+    // a quick literal match on `"Chromium";`.
+    expect(h['sec-ch-ua']).toMatch(/^"Chromium";v="\d+", "Google Chrome";v="\d+", "Not-A.Brand";v="99"$/);
+    expect(h['sec-ch-ua']).toContain(`"Chromium";v="${SPOOF_CHROME_MAJOR}"`);
+    expect(h['sec-ch-ua']).toContain(`"Google Chrome";v="${SPOOF_CHROME_MAJOR}"`);
+    // No "Electron" leakage.
+    expect(h['sec-ch-ua'].toLowerCase()).not.toContain('electron');
+  });
+
+  it('includes a populated Sec-Ch-Ua-Full-Version-List with all three brands', () => {
+    const h = buildSpoofedSecChUa('"Windows"');
+    expect(h['sec-ch-ua-full-version-list']).toContain(`"Chromium";v="${SPOOF_CHROME_FULL}"`);
+    expect(h['sec-ch-ua-full-version-list']).toContain(`"Google Chrome";v="${SPOOF_CHROME_FULL}"`);
+    expect(h['sec-ch-ua-full-version-list']).toContain('"Not-A.Brand";v="99.0.0.0"');
+  });
+
+  it('always reports mobile=?0 (we are a desktop app on every platform)', () => {
+    expect(buildSpoofedSecChUa('"macOS"')['sec-ch-ua-mobile']).toBe('?0');
+    expect(buildSpoofedSecChUa('"Linux"')['sec-ch-ua-mobile']).toBe('?0');
+  });
+
+  it('passes the platform value through verbatim (caller pre-quotes per RFC8941)', () => {
+    expect(buildSpoofedSecChUa('"macOS"')['sec-ch-ua-platform']).toBe('"macOS"');
+    expect(buildSpoofedSecChUa('"Windows"')['sec-ch-ua-platform']).toBe('"Windows"');
+  });
+
+  it('uses lower-case keys (matches Electron normalised requestHeaders)', () => {
+    const h = buildSpoofedSecChUa('"macOS"');
+    for (const k of Object.keys(h)) {
+      expect(k).toBe(k.toLowerCase());
+    }
+  });
+});
+
+describe('isCloudflareInfraHost (R-49 cert-error allow-list)', () => {
+  it('matches challenges.cloudflare.com (Turnstile origin)', () => {
+    expect(isCloudflareInfraHost('challenges.cloudflare.com')).toBe(true);
+  });
+
+  it('matches the cloudflareinsights analytics host', () => {
+    expect(isCloudflareInfraHost('static.cloudflareinsights.com')).toBe(true);
+  });
+
+  it('matches arbitrary .cloudflare.com / .cloudflare.net subdomains', () => {
+    expect(isCloudflareInfraHost('cdn.cloudflare.com')).toBe(true);
+    expect(isCloudflareInfraHost('foo.bar.cloudflare.net')).toBe(true);
+  });
+
+  it('rejects non-CF hosts even if "cloudflare" appears mid-string', () => {
+    // Substring "cloudflare" inside a longer label must not match.
+    expect(isCloudflareInfraHost('not-cloudflare.example.com')).toBe(false);
+    expect(isCloudflareInfraHost('cloudflare.evil.com')).toBe(false);
+    expect(isCloudflareInfraHost('example.com')).toBe(false);
+  });
+
+  it('handles null / undefined / empty host without throwing', () => {
+    expect(isCloudflareInfraHost(null)).toBe(false);
+    expect(isCloudflareInfraHost(undefined)).toBe(false);
+    expect(isCloudflareInfraHost('')).toBe(false);
+  });
+});
+
+describe('isHighProtectionHost (R-49 banner trigger)', () => {
+  it('flags openai / chatgpt / patreon / x.com / twitter / notion / ezgif', () => {
+    expect(isHighProtectionHost('openai.com')).toBe(true);
+    expect(isHighProtectionHost('chat.openai.com')).toBe(true);
+    expect(isHighProtectionHost('chatgpt.com')).toBe(true);
+    expect(isHighProtectionHost('www.patreon.com')).toBe(true);
+    expect(isHighProtectionHost('x.com')).toBe(true);
+    expect(isHighProtectionHost('twitter.com')).toBe(true);
+    expect(isHighProtectionHost('www.notion.so')).toBe(true);
+    expect(isHighProtectionHost('foo.notion.site')).toBe(true);
+    expect(isHighProtectionHost('ezgif.com')).toBe(true);
+  });
+
+  it('does not match unrelated hosts', () => {
+    expect(isHighProtectionHost('example.com')).toBe(false);
+    expect(isHighProtectionHost('imgur.com')).toBe(false);
+    expect(isHighProtectionHost('giphy.com')).toBe(false);
+    // Substring containing "openai" must not false-match.
+    expect(isHighProtectionHost('not-openai.com')).toBe(false);
+  });
+
+  it('handles null / undefined / empty host without throwing', () => {
+    expect(isHighProtectionHost(null)).toBe(false);
+    expect(isHighProtectionHost(undefined)).toBe(false);
+    expect(isHighProtectionHost('')).toBe(false);
+  });
+});
+
+describe('FINGERPRINT_PATCH_SCRIPT (R-49 client-side spoof)', () => {
+  it('contains a non-trivial IIFE wrapper with a try/catch envelope', () => {
+    expect(FINGERPRINT_PATCH_SCRIPT.startsWith('(() => { try {')).toBe(true);
+    expect(FINGERPRINT_PATCH_SCRIPT).toContain('} catch (_)');
+  });
+
+  it('locks the brand list to "Chromium" + "Google Chrome" + "Not-A.Brand" (no Electron leak)', () => {
+    expect(FINGERPRINT_PATCH_SCRIPT).toContain('"Chromium"');
+    expect(FINGERPRINT_PATCH_SCRIPT).toContain('"Google Chrome"');
+    expect(FINGERPRINT_PATCH_SCRIPT).toContain('"Not-A.Brand"');
+    expect(FINGERPRINT_PATCH_SCRIPT.toLowerCase()).not.toContain('"electron"');
+  });
+
+  it('removes navigator.webdriver from the prototype chain', () => {
+    expect(FINGERPRINT_PATCH_SCRIPT).toContain('delete Object.getPrototypeOf(navigator).webdriver');
+    expect(FINGERPRINT_PATCH_SCRIPT).toContain("Object.defineProperty(navigator, 'webdriver'");
+  });
+
+  it('installs the chrome.runtime / chrome.csi / chrome.loadTimes stubs', () => {
+    expect(FINGERPRINT_PATCH_SCRIPT).toContain('window.chrome.runtime');
+    expect(FINGERPRINT_PATCH_SCRIPT).toContain('window.chrome.csi');
+    expect(FINGERPRINT_PATCH_SCRIPT).toContain('window.chrome.loadTimes');
+  });
+
+  it('overrides navigator.plugins so a quick length sniff returns 5', () => {
+    expect(FINGERPRINT_PATCH_SCRIPT).toContain("Object.defineProperty(navigator, 'plugins'");
+    expect(FINGERPRINT_PATCH_SCRIPT).toContain('length: 5');
+  });
+
+  it('embeds the configured Chrome major version literal', () => {
+    expect(FINGERPRINT_PATCH_SCRIPT).toContain(`const major = ${SPOOF_CHROME_MAJOR}`);
+    expect(FINGERPRINT_PATCH_SCRIPT).toContain(SPOOF_CHROME_FULL);
   });
 });

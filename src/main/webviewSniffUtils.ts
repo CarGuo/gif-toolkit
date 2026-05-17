@@ -43,6 +43,179 @@ export function innerViewBounds(contentWidth: number, contentHeight: number): { 
 }
 
 /**
+ * R-49 — Major Chrome version we impersonate end-to-end. Bumping this is
+ * a single edit: the UA string in `webviewSniff.ts`, the spoofed
+ * `Sec-Ch-Ua*` headers, and the injected `userAgentData.brands` all
+ * derive from this constant so they stay internally consistent (a
+ * mismatch is itself a fingerprintable signal — Cloudflare's Bot Fight
+ * Mode rejects clients whose UA major version disagrees with the major
+ * version reported in `Sec-Ch-Ua-Full-Version-List`).
+ */
+export const SPOOF_CHROME_MAJOR = 124;
+export const SPOOF_CHROME_FULL = '124.0.6367.119';
+
+/**
+ * R-49 — Build the trio of Sec-Ch-Ua* headers that real Chrome 124
+ * sends. The ordering of brand items inside `Sec-Ch-Ua` is deliberately
+ * ("Chromium" first, real brand second, "Not-A.Brand" GREASE entry
+ * third) — Cloudflare's reverse-engineered detector reads brand[0] for
+ * a quick literal match. Returns lower-case header keys to match
+ * Electron's normalised view of `requestHeaders`.
+ *
+ * @param platform Sec-Ch-Ua-Platform value, e.g. '"macOS"' or '"Windows"'.
+ *                 Always wrapped in literal quotes per RFC8941 sf-string.
+ */
+export function buildSpoofedSecChUa(platform: string): Record<string, string> {
+  const major = SPOOF_CHROME_MAJOR;
+  const full = SPOOF_CHROME_FULL;
+  const brands = `"Chromium";v="${major}", "Google Chrome";v="${major}", "Not-A.Brand";v="99"`;
+  const fullList =
+    `"Chromium";v="${full}", ` +
+    `"Google Chrome";v="${full}", ` +
+    `"Not-A.Brand";v="99.0.0.0"`;
+  return {
+    'sec-ch-ua': brands,
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': platform,
+    'sec-ch-ua-full-version-list': fullList,
+    'sec-ch-ua-full-version': `"${full}"`
+  };
+}
+
+/** Hosts whose names clearly belong to Cloudflare's challenge / edge
+ *  infrastructure. We never want to reject their certificates (that
+ *  would kill Turnstile's own challenge endpoints which run on
+ *  `challenges.cloudflare.com`) or rewrite their request headers
+ *  (CF-internal ping back-ends are not browsers and care about the raw
+ *  Electron headers — though in practice they ignore Sec-Ch-Ua, this is
+ *  defence in depth). */
+const CLOUDFLARE_HOST_RE = /(?:^|\.)cloudflare(?:-dns|insights)?\.com$|(?:^|\.)cloudflare\.net$/i;
+
+/**
+ * Returns true if the host is part of Cloudflare's own infrastructure
+ * (CDN, Turnstile challenge, analytics). Used by the certificate-error
+ * handler to never silently reject Cloudflare-issued certs and by the
+ * banner detector as one of several "this site is bot-walled" signals.
+ */
+export function isCloudflareInfraHost(host: string | null | undefined): boolean {
+  if (!host) return false;
+  return CLOUDFLARE_HOST_RE.test(host);
+}
+
+/** Hosts known to apply maximum-strength bot protection (Cloudflare
+ *  Turnstile + custom JS challenges). Even with full anti-fingerprint
+ *  patches we cannot reliably get past these in an Electron-embedded
+ *  webview, so the chrome shell surfaces a banner suggesting the user
+ *  switch to the system browser. The list is intentionally short and
+ *  conservative — false positives just nag the user. */
+const HIGH_PROTECTION_HOST_RE =
+  /(?:^|\.)(?:openai\.com|chatgpt\.com|chat\.openai\.com|patreon\.com|x\.com|twitter\.com|notion\.so|notion\.site|ezgif\.com)$/i;
+
+/**
+ * Whether the host is on the well-known "this will fingerprint you to
+ * death" list. The check is host-only; subdomains all share the same
+ * verdict because the bot policy is set at the apex.
+ */
+export function isHighProtectionHost(host: string | null | undefined): boolean {
+  if (!host) return false;
+  return HIGH_PROTECTION_HOST_RE.test(host);
+}
+
+/**
+ * R-49 — JavaScript snippet injected into every frame on `dom-ready`
+ * that papers over the most common Electron-vs-Chrome fingerprint
+ * differences:
+ *
+ *  1. `navigator.userAgentData.brands` — Electron 31 advertises
+ *     "Electron" as one of the brand strings; Cloudflare's BFM checks
+ *     a literal blacklist `[electron, cypress, playwright, headless]`.
+ *     We replace the property with a stub returning Chrome 124's
+ *     canonical brands array.
+ *  2. `navigator.webdriver` — defaults to `false` in Electron, which
+ *     is correct, but several stealth-test sites probe it via
+ *     `Object.getOwnPropertyDescriptor`. We delete the property
+ *     entirely (matching what an un-instrumented Chrome looks like).
+ *  3. `window.chrome.runtime` — real Chrome 124 has `chrome.runtime`,
+ *     `chrome.csi`, `chrome.loadTimes`. Electron has none of those.
+ *     We add minimal no-op stubs so feature-detection passes.
+ *  4. `navigator.plugins.length` — Chrome on macOS reports 5 (PDF
+ *     viewer + 4 internal plugins). Electron reports 0. We can't
+ *     synthesise real PluginArray entries safely, but we can fix the
+ *     length sniff that's the most common quick-and-dirty check.
+ *
+ * The script is wrapped in a try/catch + IIFE so any property descriptor
+ * mismatch on a future Electron version doesn't crash the page.
+ *
+ * Exported so the unit test can lock the literal contents (a typo in
+ * the brands array would silently break the spoof until a user reports
+ * it).
+ */
+export const FINGERPRINT_PATCH_SCRIPT = `(() => { try {
+  const major = ${SPOOF_CHROME_MAJOR};
+  const brands = [
+    { brand: "Chromium", version: String(major) },
+    { brand: "Google Chrome", version: String(major) },
+    { brand: "Not-A.Brand", version: "99" }
+  ];
+  const fullVersionList = [
+    { brand: "Chromium", version: "${SPOOF_CHROME_FULL}" },
+    { brand: "Google Chrome", version: "${SPOOF_CHROME_FULL}" },
+    { brand: "Not-A.Brand", version: "99.0.0.0" }
+  ];
+  // 1. userAgentData spoof.
+  if (navigator.userAgentData) {
+    try {
+      Object.defineProperty(navigator.userAgentData, 'brands', {
+        get: () => brands.slice(),
+        configurable: true
+      });
+      const orig = navigator.userAgentData.getHighEntropyValues
+        ? navigator.userAgentData.getHighEntropyValues.bind(navigator.userAgentData)
+        : null;
+      navigator.userAgentData.getHighEntropyValues = function (hints) {
+        return (orig ? orig(hints) : Promise.resolve({})).then((r) => {
+          const out = Object.assign({}, r);
+          out.brands = brands.slice();
+          out.fullVersionList = fullVersionList.slice();
+          out.uaFullVersion = "${SPOOF_CHROME_FULL}";
+          return out;
+        });
+      };
+    } catch (_) {}
+  }
+  // 2. webdriver.
+  try { delete Object.getPrototypeOf(navigator).webdriver; } catch (_) {}
+  try { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); } catch (_) {}
+  // 3. window.chrome runtime stub.
+  if (!window.chrome) { window.chrome = {}; }
+  if (!window.chrome.runtime) {
+    window.chrome.runtime = {
+      OnInstalledReason: { CHROME_UPDATE: 'chrome_update', INSTALL: 'install', UPDATE: 'update' },
+      PlatformOs: { MAC: 'mac', WIN: 'win', LINUX: 'linux' },
+      id: undefined
+    };
+  }
+  if (!window.chrome.csi) { window.chrome.csi = function () { return {}; }; }
+  if (!window.chrome.loadTimes) {
+    window.chrome.loadTimes = function () {
+      return { requestTime: performance.timeOrigin / 1000, startLoadTime: performance.timeOrigin / 1000,
+        commitLoadTime: 0, finishDocumentLoadTime: 0, finishLoadTime: 0, firstPaintTime: 0,
+        firstPaintAfterLoadTime: 0, navigationType: 'Other', wasFetchedViaSpdy: true,
+        wasNpnNegotiated: true, npnNegotiatedProtocol: 'h2', wasAlternateProtocolAvailable: false,
+        connectionInfo: 'h2' };
+    };
+  }
+  // 4. Plugin count sniff.
+  try {
+    Object.defineProperty(navigator, 'plugins', {
+      get: () => ({ length: 5, item: () => null, namedItem: () => null,
+        refresh: () => undefined, [Symbol.iterator]: function* () {} }),
+      configurable: true
+    });
+  } catch (_) {}
+} catch (_) { /* swallow — page rendering must continue regardless */ } })();`;
+
+/**
  * Translate a `Content-Type` response header into our 3-way `MediaKind`.
  *
  * We deliberately split GIF out before the generic image branch because
