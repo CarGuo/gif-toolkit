@@ -1743,47 +1743,24 @@ const App: React.FC = () => {
           <div className="section fixed left-bottom">
             <h2>3. 处理参数</h2>
             <OptionsForm value={options} onChange={setOptions} />
-            <div style={{ display: 'flex', gap: 8, marginTop: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-              {/* R-43 — primary button has two modes:
-                  - idle:    "▶ 开始批处理 (N)"      — disabled when N=0
-                  - running: "▶ 追加排队 (K)"       — disabled when K=0
-                  This collapses the prior "click twice = double batch"
-                  bug into a single, intent-aware control. */}
-              {isHomeBatchProcessing ? (
-                <button
-                  className="primary"
-                  onClick={onAppend}
-                  disabled={appendable.length === 0}
-                  title={
-                    appendable.length === 0
-                      ? '当前没有新选中的可处理项可追加;勾选更多卡片后会启用'
-                      : `把 ${appendable.length} 个新选中的任务追加到当前队列`
-                  }
-                >
-                  ▶ 追加排队 ({appendable.length})
-                </button>
-              ) : (
-                <button
-                  className="primary"
-                  onClick={onStart}
-                  disabled={processable.length === 0}
-                  title={processable.length === 0 ? '请先在右侧勾选 video / gif' : '开始批处理'}
-                >
-                  ▶ 开始批处理 ({processable.length}{selected.size !== processable.length ? ` / 共选 ${selected.size}` : ''})
-                </button>
-              )}
-              {/* R-43 — "取消" 按钮迁到 TaskTable 上方进度区(见
-                  下方 "处理进度" header)。这里只在嗅探阶段保留
-                  一个 cancel 入口,以免嗅探无法中止。 */}
-              {sniffing ? (
-                <button onClick={onCancel} title="取消嗅探">取消嗅探</button>
-              ) : null}
-              {lastBatchDir ? (
-                <span style={{ color: 'var(--muted)', fontSize: 11, marginLeft: 'auto' }}>
-                  已输出到子目录
-                </span>
-              ) : null}
-            </div>
+            {/* R-50 — 旧的内嵌「▶ 开始批处理 / ▶ 追加排队」按钮已迁移到
+                位于视口右下角的悬浮 FAB(见下方 .fab-start-batch)。FAB
+                完整继承了原按钮的所有判断逻辑:idle vs running、
+                processable.length vs appendable.length、disabled 条件、
+                title 文案。这里只保留嗅探取消入口与「已输出到子目录」
+                提示,因为它们与批处理按钮无关。 */}
+            {(sniffing || lastBatchDir) ? (
+              <div style={{ display: 'flex', gap: 8, marginTop: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+                {sniffing ? (
+                  <button onClick={onCancel} title="取消嗅探">取消嗅探</button>
+                ) : null}
+                {lastBatchDir ? (
+                  <span style={{ color: 'var(--muted)', fontSize: 11, marginLeft: 'auto' }}>
+                    已输出到子目录
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
           </div>
         </div>
 
@@ -1917,20 +1894,24 @@ const App: React.FC = () => {
             {logsVisible ? <LogBox lines={logs} /> : null}
           </div>
           {/* R-50 — Floating "Start" action button.
-              The in-section primary button at L1629-1651 keeps working,
-              but it sits inside `.section.fixed.left-bottom` which gets
-              covered by the resizable bottom dock + progress area on
-              short viewports. This FAB is a position:fixed mirror that
-              stays visible above the dock so users always have a
-              one-click batch start. State is reused 1:1: idle vs
-              running, processable.length vs appendable.length. */}
+              旧的内嵌主按钮已被移除(原位于 .section.fixed.left-bottom),
+              这个 FAB 完全继承了它的所有判断逻辑:idle 时显示
+              「▶ 开始批处理 (N / 共选 M)」(M≠N 才带 / 共选 M),
+              running 时显示「▶ 追加排队 (K)」;disabled 与 title 文案
+              全部 1:1 对齐;状态复用 isHomeBatchProcessing /
+              processable / appendable。FAB 是 position:fixed 故在底部
+              dock + 进度区盖住时仍可点。 */}
           {(() => {
             const running = isHomeBatchProcessing;
             const count = running ? appendable.length : processable.length;
             const disabled = count === 0;
+            const idleSuffix =
+              !running && selected.size !== processable.length
+                ? ` / 共选 ${selected.size}`
+                : '';
             const label = running
               ? `▶ 追加排队 (${count})`
-              : `▶ 开始批处理 (${count})`;
+              : `▶ 开始批处理 (${count}${idleSuffix})`;
             const title = running
               ? (count === 0
                   ? '当前没有新选中的可处理项可追加;勾选更多卡片后会启用'

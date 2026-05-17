@@ -71,7 +71,8 @@
     "appId": "com.giftoolkit.app",
     "productName": "Gif Toolkit",
     "directories": {
-      "output": "release"
+      "output": "release",
+      "buildResources": "build"
     },
     "files": [
       "dist/**/*",
@@ -88,6 +89,7 @@
       "node_modules/ytdlp-nodejs/bin/**"
     ],
     "mac": {
+      "icon": "build/icon.ico",
       "target": [
         {
           "target": "dmg",
@@ -107,6 +109,7 @@
       "category": "public.app-category.graphics-design"
     },
     "win": {
+      "icon": "build/icon.ico",
       "target": [
         {
           "target": "nsis",
@@ -115,6 +118,9 @@
           ]
         }
       ]
+    },
+    "linux": {
+      "icon": "build/icon.ico"
     }
   }
 }

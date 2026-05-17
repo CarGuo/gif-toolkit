@@ -88,6 +88,20 @@ npm run package:win    # 打包 nsis
 
 ---
 
+## 🎨 应用图标 / Logo
+
+应用统一使用 [build/icon.ico](file:///Users/guoshuyu/workspace/gif-toolkit/build/icon.ico) 作为各平台的 logo 来源,覆盖三处:
+
+| 位置 | 配置 | 文件 |
+|---|---|---|
+| Electron 打包(mac / win / linux) | [package.json](file:///Users/guoshuyu/workspace/gif-toolkit/package.json) `build.mac.icon` / `build.win.icon` / `build.linux.icon` | [build/icon.ico](file:///Users/guoshuyu/workspace/gif-toolkit/build/icon.ico) |
+| 应用窗口 icon(任务栏 / Dock) | [src/main/index.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/index.ts) `new BrowserWindow({ icon })` | 优先读 `build/icon.ico`,运行时找不到时安静兜底 |
+| 网页 favicon(开发模式标签页) | [src/renderer/index.html](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/index.html) `<link rel="icon">` | [src/renderer/public/icon.ico](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/public/icon.ico) |
+
+> 想换 logo:把新文件覆盖以上两处的 `icon.ico` 即可,Electron Builder / Vite 都会自动拾起;mac 想要更高分辨率的菜单栏图标可以另存一份 `build/icon.icns`,放在同一目录会被自动优先识别。
+
+---
+
 ## 🧱 技术栈
 
 | 层 | 技术 |
