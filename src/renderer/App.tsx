@@ -117,6 +117,23 @@ const App: React.FC = () => {
     clear: clearSniffHistory
   } = useSniffHistory();
   const [sniffHistoryOpen, setSniffHistoryOpen] = useState(false);
+  // R-51 — split-button state for the「网页嗅探」entry. The button now
+  // offers two backends: the embedded WebContentsView (fast, but blocked
+  // by Cloudflare on OpenAI / Medium / Patreon at the TLS layer) and a
+  // spawn-the-user's-real-Chrome path that delegates the handshake to a
+  // browser whose JA3 IS in CF's whitelist. The user's preferred mode is
+  // remembered in localStorage so power users do not have to re-pick.
+  const [webviewMenuOpen, setWebviewMenuOpen] = useState(false);
+  const [preferredWebviewMode, setPreferredWebviewMode] = useState<'embed' | 'system-chrome'>(() => {
+    try {
+      const v = typeof localStorage !== 'undefined' ? localStorage.getItem('giftk:preferredWebviewMode') : null;
+      return v === 'system-chrome' ? 'system-chrome' : 'embed';
+    } catch { return 'embed'; }
+  });
+  const persistPreferredMode = useCallback((m: 'embed' | 'system-chrome') => {
+    setPreferredWebviewMode(m);
+    try { localStorage.setItem('giftk:preferredWebviewMode', m); } catch { /* ignore */ }
+  }, []);
   // R-33A — manual two-stage optimize modal state. Stores the row the user
   // clicked "手动优化" on so we can pass its current size + warning + the
   // first output path into ManualOptimizeModal. Cleared back to null on
@@ -407,8 +424,15 @@ const App: React.FC = () => {
   // main process so the user can sign in to gated sites. Resolves with a
   // SniffResult, which we feed into the same downstream wiring as
   // `onSniff` (selection seeding, history record, sniff URL LRU).
-  const onWebviewSniff = useCallback(async () => {
-    if (!giftk?.sniffWithWebview) return;
+  //
+  // R-51 — Now also handles the system-Chrome backend: when `mode ===
+  // 'system-chrome'`, instead of opening our embedded WebContentsView we
+  // spawn the user's actual installed Chrome / Edge / Brave so the
+  // TLS/HTTP2 fingerprint comes from a real browser (mandatory for
+  // Cloudflare-protected pages like OpenAI / Medium / Patreon).
+  const runWebviewSniff = useCallback(async (mode: 'embed' | 'system-chrome') => {
+    const api = mode === 'system-chrome' ? giftk?.sniffWithSystemChrome : giftk?.sniffWithWebview;
+    if (!api) return;
     const trimmed = url.trim();
     if (!trimmed) {
       setUrlError('请先输入文章 URL');
@@ -426,9 +450,12 @@ const App: React.FC = () => {
     setResolvingSet(new Set());
     setResolveErrorMap({});
     activeHistoryIdRef.current = null;
-    setLogs((prev) => [...prev, `[webview] 打开 ${trimmed} — 浏览到目标页面后,点击顶部「✅ 完成嗅探」`].slice(-300));
+    const hint = mode === 'system-chrome'
+      ? `[system-chrome] 启动系统 Chrome 打开 ${trimmed} — 登录/通过验证后,关闭 Chrome 窗口完成嗅探`
+      : `[webview] 打开 ${trimmed} — 浏览到目标页面后,点击顶部「✅ 完成嗅探」`;
+    setLogs((prev) => [...prev, hint].slice(-300));
     try {
-      const r = await giftk.sniffWithWebview(trimmed);
+      const r = await api(trimmed);
       if (myId !== sniffReqId.current) return;
       setResult(r);
       const auto = new Set(
@@ -462,6 +489,14 @@ const App: React.FC = () => {
       }
     }
   }, [url, options, pushOrReplace, addSniffHistory]);
+  const onWebviewSniff = useCallback(() => runWebviewSniff('embed'), [runWebviewSniff]);
+  const onSystemChromeSniff = useCallback(() => runWebviewSniff('system-chrome'), [runWebviewSniff]);
+  // R-51 — main-button click goes to whichever mode the user last picked
+  // (or `embed` on first run); the small caret-arrow next to it opens
+  // the dropdown so they can switch.
+  const onPreferredWebviewSniff = useCallback(() => {
+    runWebviewSniff(preferredWebviewMode);
+  }, [runWebviewSniff, preferredWebviewMode]);
 
   const onPickDir = useCallback(async () => {
     if (!giftk) return;
@@ -1560,16 +1595,104 @@ const App: React.FC = () => {
                   since both paths share `sniffing` and the same UI
                   slot for results. R-47 reframes the entry as a
                   general-purpose "网页嗅探" since users may use it for
-                  bot-walled / OAuth pages, not only signed-in ones. */}
-              <button
-                className="ghost"
-                onClick={onWebviewSniff}
-                disabled={sniffing}
-                title="打开内置浏览器,先浏览到目标页面再嗅探(适合需要交互/登录/验证机器人的站点)"
-                style={{ whiteSpace: 'nowrap' }}
-              >
-                {sniffing ? '嗅探中…' : '🌐 网页嗅探'}
-              </button>
+                  bot-walled / OAuth pages, not only signed-in ones.
+                  R-51 — split button: main click runs the user's last
+                  preferred mode (embedded webview vs system Chrome),
+                  the caret next to it opens a small menu so they can
+                  switch. The system-Chrome path bypasses Cloudflare
+                  TLS / HTTP/2 fingerprint checks by spawning the
+                  user's actual installed Chrome. */}
+              <div className="webview-sniff-split" style={{ position: 'relative', display: 'inline-flex' }}>
+                <button
+                  className="ghost"
+                  onClick={onPreferredWebviewSniff}
+                  disabled={sniffing}
+                  title={preferredWebviewMode === 'system-chrome'
+                    ? '在你本机 Chrome / Edge / Brave 中打开,登录或通过验证后关闭窗口完成嗅探(适合 OpenAI / Medium 等高保护站点)'
+                    : '打开内置浏览器,先浏览到目标页面再嗅探(适合需要交互/登录/验证机器人的站点)'}
+                  style={{ whiteSpace: 'nowrap', borderTopRightRadius: 0, borderBottomRightRadius: 0 }}
+                >
+                  {sniffing
+                    ? '嗅探中…'
+                    : (preferredWebviewMode === 'system-chrome' ? '🚀 真 Chrome 嗅探' : '🌐 网页嗅探')}
+                </button>
+                <button
+                  className="ghost webview-sniff-caret"
+                  onClick={() => setWebviewMenuOpen((v) => !v)}
+                  disabled={sniffing}
+                  aria-haspopup="menu"
+                  aria-expanded={webviewMenuOpen}
+                  aria-label="切换网页嗅探方式"
+                  title="切换嗅探方式"
+                  style={{
+                    whiteSpace: 'nowrap',
+                    borderTopLeftRadius: 0,
+                    borderBottomLeftRadius: 0,
+                    borderLeft: 'none',
+                    padding: '0 8px',
+                    minWidth: 'auto'
+                  }}
+                >
+                  ▾
+                </button>
+                {webviewMenuOpen ? (
+                  <div
+                    role="menu"
+                    className="webview-sniff-menu"
+                    style={{
+                      position: 'absolute', top: 'calc(100% + 4px)', right: 0, zIndex: 60,
+                      minWidth: 280, padding: 6, borderRadius: 8,
+                      background: 'var(--bg-2, #23252b)', color: 'var(--fg, #e6e7eb)',
+                      border: '1px solid rgba(255,255,255,0.12)',
+                      boxShadow: '0 8px 24px rgba(0,0,0,0.35)'
+                    }}
+                    onMouseLeave={() => setWebviewMenuOpen(false)}
+                  >
+                    <button
+                      className="ghost"
+                      role="menuitem"
+                      onClick={() => {
+                        setWebviewMenuOpen(false);
+                        persistPreferredMode('embed');
+                        onWebviewSniff();
+                      }}
+                      style={{
+                        display: 'block', width: '100%', textAlign: 'left',
+                        padding: '8px 10px', whiteSpace: 'normal',
+                        background: preferredWebviewMode === 'embed' ? 'rgba(42,170,119,0.12)' : 'transparent'
+                      }}
+                    >
+                      <div style={{ fontWeight: 600 }}>
+                        🌐 嵌入式嗅探(快){preferredWebviewMode === 'embed' ? ' ✓' : ''}
+                      </div>
+                      <div style={{ fontSize: 11, color: 'var(--muted, #9aa0aa)', marginTop: 2 }}>
+                        在 app 内置浏览器打开,适合普通需登录/交互的站点。
+                      </div>
+                    </button>
+                    <button
+                      className="ghost"
+                      role="menuitem"
+                      onClick={() => {
+                        setWebviewMenuOpen(false);
+                        persistPreferredMode('system-chrome');
+                        onSystemChromeSniff();
+                      }}
+                      style={{
+                        display: 'block', width: '100%', textAlign: 'left',
+                        padding: '8px 10px', whiteSpace: 'normal', marginTop: 4,
+                        background: preferredWebviewMode === 'system-chrome' ? 'rgba(42,170,119,0.12)' : 'transparent'
+                      }}
+                    >
+                      <div style={{ fontWeight: 600 }}>
+                        🚀 真 Chrome 嗅探(过 Cloudflare){preferredWebviewMode === 'system-chrome' ? ' ✓' : ''}
+                      </div>
+                      <div style={{ fontSize: 11, color: 'var(--muted, #9aa0aa)', marginTop: 2 }}>
+                        启动你本机的 Chrome / Edge / Brave,真实浏览器握手,适合 OpenAI / Medium / Patreon 等高保护站点。
+                      </div>
+                    </button>
+                  </div>
+                ) : null}
+              </div>
               <SniffHistoryPicker
                 open={sniffHistoryOpen}
                 entries={sniffHistory}

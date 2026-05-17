@@ -4,6 +4,7 @@ import { promises as fsp, statSync } from 'fs';
 import crypto from 'crypto';
 import { sniffPage } from './sniffer';
 import { openWebviewSniff } from './webviewSniff';
+import { sniffViaSystemChrome, findInstalledBrowsers } from './systemChromeSniff';
 import { previewMedia, startBatch, cancelAllTasks, cancelTask, prefetchThumbnail, startToolbox } from './processor';
 import { killAllProcs, probe as probeMedia, extractFrameDataUrl } from './ffmpeg';
 import { log } from './logger';
@@ -558,6 +559,44 @@ ipcMain.handle('sniff:webview', async (_e, url: unknown) => {
     return await openWebviewSniff(safe, mainWindow);
   } finally {
     webviewSniffInFlight = false;
+  }
+});
+
+// R-51 — System-Chrome sniff. Spawns the user's actual installed Chrome
+// (or Edge / Brave) so the TLS / HTTP2 handshake comes from a browser
+// whose JA3/JA4 fingerprint is in Cloudflare's whitelist; the user
+// manually clicks through any Turnstile / login flow in that real
+// window, and we passively scrape the network log + final DOM via CDP.
+let systemChromeSniffInFlight = false;
+ipcMain.handle('sniff:system-chrome:detect', async () => {
+  return findInstalledBrowsers();
+});
+ipcMain.handle('sniff:system-chrome', async (_e, url: unknown) => {
+  if (systemChromeSniffInFlight) {
+    throw new Error('已经有一个真 Chrome 嗅探窗口在进行中,请先关闭它');
+  }
+  const safe = assertHttpUrl(url);
+  // Sniff progress + cancellation share the same channel & controller as
+  // headless sniff so the renderer's existing 嗅探中… spinner / cancel
+  // button keeps working unchanged.
+  if (currentSniffCtrl) {
+    try { currentSniffCtrl.abort(); } catch { /* ignore */ }
+  }
+  const ctrl = new AbortController();
+  currentSniffCtrl = ctrl;
+  systemChromeSniffInFlight = true;
+  try {
+    return await sniffViaSystemChrome(safe, {
+      signal: ctrl.signal,
+      onProgress: (p) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('sniff:progress', p);
+        }
+      }
+    });
+  } finally {
+    systemChromeSniffInFlight = false;
+    if (currentSniffCtrl === ctrl) currentSniffCtrl = null;
   }
 });
 

@@ -160,7 +160,7 @@ function attachHeaderSpoofer(partition: string): () => void {
  *     / video.twimg.com) get added as `kind:'video'` even though the
  *     iframe URL has no media extension.
  */
-const DOM_SCAN_SCRIPT = `(() => {
+export const DOM_SCAN_SCRIPT = `(() => {
   const media = [];
   const iframes = [];
   const pushTo = (arr, raw) => {

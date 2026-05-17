@@ -53,6 +53,24 @@ const api = {
     ensureString(url, 'url');
     return ipcRenderer.invoke('sniff:webview', url);
   },
+  // R-51 — system-Chrome sniff. Spawns the user's actual installed
+  // Chrome / Edge / Brave (NOT Electron's bundled Chromium) so TLS &
+  // HTTP/2 fingerprints come from a real browser; the user manually
+  // clears any Turnstile / login in that window, and we scrape via
+  // CDP. Same `SniffResult` shape as the other two sniff entries.
+  async sniffWithSystemChrome(url: string): Promise<SniffResult> {
+    ensureString(url, 'url');
+    return ipcRenderer.invoke('sniff:system-chrome', url);
+  },
+  /**
+   * Preflight: list installed system browsers (Chrome / Edge / Brave /
+   * Chromium) by probing canonical install paths. Renderer uses this to
+   * decide whether to surface the "真 Chrome 嗅探" entry, and to render
+   * an actionable "Chrome not installed" prompt with a download link.
+   */
+  async detectSystemBrowsers(): Promise<Array<{ id: string; label: string; exePath: string }>> {
+    return ipcRenderer.invoke('sniff:system-chrome:detect');
+  },
   async preview(media: SniffedMedia, options: ProcessOptions): Promise<PreviewResult> {
     ensureObject(media, 'media');
     ensureObject(options, 'options');
