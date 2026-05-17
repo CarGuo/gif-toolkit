@@ -20,7 +20,8 @@ import {
   isHighProtectionHost,
   FINGERPRINT_PATCH_SCRIPT,
   SPOOF_CHROME_MAJOR,
-  SPOOF_CHROME_FULL
+  SPOOF_CHROME_FULL,
+  acceptWebviewMedia
 } from '../../src/main/webviewSniffUtils';
 import type { SniffedMedia } from '../../src/shared/types';
 
@@ -293,5 +294,84 @@ describe('FINGERPRINT_PATCH_SCRIPT (R-49 client-side spoof)', () => {
   it('embeds the configured Chrome major version literal', () => {
     expect(FINGERPRINT_PATCH_SCRIPT).toContain(`const major = ${SPOOF_CHROME_MAJOR}`);
     expect(FINGERPRINT_PATCH_SCRIPT).toContain(SPOOF_CHROME_FULL);
+  });
+});
+
+/**
+ * R-50 — `acceptWebviewMedia` strict gate.
+ *
+ * Locked semantics:
+ *  - explicit `video`/`gif` kinds always pass through (extension or
+ *    mime classifier already trusted)
+ *  - explicit `image` kind is dropped (png/jpg/svg/static webp noise)
+ *  - `null` kind (extension-less CDN URLs) falls back to mime:
+ *      - any `video/*` → 'video'
+ *      - `image/gif` / `image/webp` / `image/apng` → 'gif'
+ *      - everything else → drop
+ *  - mime parameters / case / whitespace are tolerated.
+ */
+describe('acceptWebviewMedia (R-50 strict gate)', () => {
+  it('passes through explicit video kind regardless of mime', () => {
+    expect(acceptWebviewMedia('video', null)).toBe('video');
+    expect(acceptWebviewMedia('video', 'image/png')).toBe('video');
+    expect(acceptWebviewMedia('video', undefined)).toBe('video');
+  });
+
+  it('passes through explicit gif kind regardless of mime', () => {
+    expect(acceptWebviewMedia('gif', null)).toBe('gif');
+    expect(acceptWebviewMedia('gif', 'image/png')).toBe('gif');
+  });
+
+  it('drops explicit image kind even if mime would have matched', () => {
+    expect(acceptWebviewMedia('image', 'image/png')).toBeNull();
+    expect(acceptWebviewMedia('image', 'image/jpeg')).toBeNull();
+    expect(acceptWebviewMedia('image', 'image/svg+xml')).toBeNull();
+    // Defensive: even if a confused upstream tagged a row 'image' but
+    // the response was actually a video, we still respect kind=image.
+    expect(acceptWebviewMedia('image', 'video/mp4')).toBeNull();
+  });
+
+  it('drops null kind with null/empty mime', () => {
+    expect(acceptWebviewMedia(null, null)).toBeNull();
+    expect(acceptWebviewMedia(null, undefined)).toBeNull();
+    expect(acceptWebviewMedia(null, '')).toBeNull();
+    expect(acceptWebviewMedia(null, '   ')).toBeNull();
+  });
+
+  it('accepts null kind + video mime as video', () => {
+    expect(acceptWebviewMedia(null, 'video/mp4')).toBe('video');
+    expect(acceptWebviewMedia(null, 'video/webm')).toBe('video');
+    expect(acceptWebviewMedia(null, 'video/quicktime')).toBe('video');
+    // Note: HLS playlists ship as `application/vnd.apple.mpegurl` and
+    // are deliberately NOT routed to video here — the sniffer's
+    // ext-based classifier already covers `.m3u8`, and we want to
+    // avoid dragging HTTP API JSON of vaguely-similar `application/*`
+    // mimes into the grid.
+    expect(acceptWebviewMedia(null, 'application/vnd.apple.mpegurl')).toBeNull();
+  });
+
+  it('accepts null kind + gif/webp/apng mime as gif', () => {
+    expect(acceptWebviewMedia(null, 'image/gif')).toBe('gif');
+    expect(acceptWebviewMedia(null, 'image/webp')).toBe('gif');
+    expect(acceptWebviewMedia(null, 'image/apng')).toBe('gif');
+  });
+
+  it('drops null kind + still-image mime', () => {
+    expect(acceptWebviewMedia(null, 'image/png')).toBeNull();
+    expect(acceptWebviewMedia(null, 'image/jpeg')).toBeNull();
+    expect(acceptWebviewMedia(null, 'image/svg+xml')).toBeNull();
+    expect(acceptWebviewMedia(null, 'image/avif')).toBeNull();
+  });
+
+  it('drops null kind + non-media mime', () => {
+    expect(acceptWebviewMedia(null, 'text/html')).toBeNull();
+    expect(acceptWebviewMedia(null, 'application/json')).toBeNull();
+    expect(acceptWebviewMedia(null, 'application/octet-stream')).toBeNull();
+  });
+
+  it('strips charset / boundary parameters and is case-insensitive', () => {
+    expect(acceptWebviewMedia(null, 'Video/MP4; codecs="avc1.42E01E"')).toBe('video');
+    expect(acceptWebviewMedia(null, '  IMAGE/GIF ; charset=binary')).toBe('gif');
+    expect(acceptWebviewMedia(null, 'IMAGE/PNG; charset=binary')).toBeNull();
   });
 });

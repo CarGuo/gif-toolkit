@@ -92,7 +92,7 @@ const EMBED_RULES: EmbedRule[] = [
     pattern: /https?:(?:\\?\/){2}video\.twimg\.com(?:\\?\/)[^\s"'<>]+/gi }
 ];
 
-function matchEmbedProvider(host: string, fullUrl: string): string | null {
+export function matchEmbedProvider(host: string, fullUrl: string): string | null {
   const lowerUrl = fullUrl.toLowerCase();
   for (const r of EMBED_RULES) {
     if (host === r.hostSuffix || host.endsWith('.' + r.hostSuffix)) {

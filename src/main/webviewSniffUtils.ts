@@ -216,6 +216,49 @@ export const FINGERPRINT_PATCH_SCRIPT = `(() => { try {
 } catch (_) { /* swallow — page rendering must continue regardless */ } })();`;
 
 /**
+ * R-50 — Strict "what counts as a useful capture" filter.
+ *
+ * Earlier revisions accepted any `MediaKind` the classifiers returned,
+ * which let through bare images (png / jpg / svg / static webp / avif)
+ * — useful for general media discovery but distracting in this app
+ * whose entire pipeline targets gif and video output. The user
+ * explicitly asked for "only gif and video" with a fallback path for
+ * URLs that have no extension (decide via mime).
+ *
+ * Rules, in order:
+ *  1. If `kind` is `'video'` or `'gif'` we already trust the upstream
+ *     classifier and accept verbatim.
+ *  2. If `kind` is `'image'` we drop it. Static images are not what
+ *     this pipeline produces and surface as noise in the grid.
+ *  3. If `kind` is `null` (no extension match, e.g. CDN URLs that are
+ *     all opaque base64 path segments + query tokens), we fall back
+ *     to the response Content-Type:
+ *       - any `video/*` → 'video'
+ *       - `image/gif` / `image/webp` / `image/apng` → 'gif'
+ *         (animated webp/apng are funneled into the gif branch
+ *          throughout the rest of the app)
+ *       - everything else → reject
+ *
+ * Returns the resolved kind to use, or `null` if the candidate must be
+ * dropped. Pulled out for unit tests.
+ */
+export function acceptWebviewMedia(
+  kind: MediaKind | null,
+  mime: string | null | undefined
+): 'video' | 'gif' | null {
+  if (kind === 'video') return 'video';
+  if (kind === 'gif') return 'gif';
+  if (kind === 'image') return null;
+  // kind === null branch: rely entirely on the mime header.
+  if (!mime) return null;
+  const head = mime.split(';')[0].trim().toLowerCase();
+  if (!head) return null;
+  if (VIDEO_MIME.test(head)) return 'video';
+  if (head === 'image/gif' || head === 'image/webp' || head === 'image/apng') return 'gif';
+  return null;
+}
+
+/**
  * Translate a `Content-Type` response header into our 3-way `MediaKind`.
  *
  * We deliberately split GIF out before the generic image branch because

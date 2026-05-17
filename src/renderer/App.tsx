@@ -1793,6 +1793,41 @@ const App: React.FC = () => {
             />
             {logsVisible ? <LogBox lines={logs} /> : null}
           </div>
+          {/* R-50 — Floating "Start" action button.
+              The in-section primary button at L1629-1651 keeps working,
+              but it sits inside `.section.fixed.left-bottom` which gets
+              covered by the resizable bottom dock + progress area on
+              short viewports. This FAB is a position:fixed mirror that
+              stays visible above the dock so users always have a
+              one-click batch start. State is reused 1:1: idle vs
+              running, processable.length vs appendable.length. */}
+          {(() => {
+            const running = isHomeBatchProcessing;
+            const count = running ? appendable.length : processable.length;
+            const disabled = count === 0;
+            const label = running
+              ? `▶ 追加排队 (${count})`
+              : `▶ 开始批处理 (${count})`;
+            const title = running
+              ? (count === 0
+                  ? '当前没有新选中的可处理项可追加;勾选更多卡片后会启用'
+                  : `把 ${count} 个新选中的任务追加到当前队列`)
+              : (count === 0
+                  ? '请先在右侧勾选 video / gif'
+                  : '开始批处理');
+            return (
+              <button
+                type="button"
+                className="fab-start-batch"
+                onClick={running ? onAppend : onStart}
+                disabled={disabled}
+                title={title}
+                aria-label={label}
+              >
+                {label}
+              </button>
+            );
+          })()}
         </>
       ) : null}
 

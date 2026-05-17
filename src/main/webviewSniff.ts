@@ -24,7 +24,7 @@ import { BrowserWindow, WebContentsView, session, ipcMain, shell } from 'electro
 import path from 'path';
 import fs from 'fs';
 import type { SniffedMedia, SniffResult, MediaKind } from '../shared/types';
-import { classifyByExt } from './sniffer';
+import { classifyByExt, matchEmbedProvider } from './sniffer';
 import {
   classifyByContentType,
   mergeWebviewMedia,
@@ -35,7 +35,9 @@ import {
   buildSpoofedSecChUa,
   isCloudflareInfraHost,
   isHighProtectionHost,
-  FINGERPRINT_PATCH_SCRIPT
+  FINGERPRINT_PATCH_SCRIPT,
+  acceptWebviewMedia,
+  mediaId
 } from './webviewSniffUtils';
 import { log } from './logger';
 
@@ -76,12 +78,16 @@ function attachNetworkRecorder(out: Map<string, CapturedResource>, partition: st
     }
     const byMime = classifyByContentType(ct);
     const byExt = classifyByExt(url);
-    const kind = byMime || byExt;
-    if (!kind) return;
-    if (kind === 'image' && byMime !== 'image') return;
+    // R-50 — Strict gif-or-video gate. Static images (png / jpg / svg
+    // / static webp / avif) are dropped entirely; URLs with no
+    // extension fall back to the Content-Type header so opaque CDN
+    // URLs (`https://cdn.example.com/abc123?token=...`) that serve
+    // gifs / mp4s still make it through.
+    const accepted = acceptWebviewMedia(byMime || byExt, ct);
+    if (!accepted) return;
     const key = webviewDedupKey(url);
     if (out.has(key)) return;
-    out.set(key, { url, kind, mime: ct });
+    out.set(key, { url, kind: accepted, mime: ct });
   };
   ses.webRequest.onCompleted({ urls: ['http://*/*', 'https://*/*'] }, handler);
   return () => {
@@ -145,18 +151,28 @@ function attachHeaderSpoofer(partition: string): () => void {
 /**
  * Browser-side script run on the user's page. Returns plain JSON (URLs only)
  * so we can re-classify and dedupe in the main process where our helpers live.
+ *
+ * R-50 — Returns a single shape `{ media: string[]; iframes: string[] }`
+ * so the main process can decide:
+ *   - `media` URLs are matched by extension + accepted only if gif/video
+ *   - `iframes` URLs are matched against `matchEmbedProvider` so known
+ *     video-embed players (Vimeo / YouTube / Bilibili / Twitch / TED
+ *     / video.twimg.com) get added as `kind:'video'` even though the
+ *     iframe URL has no media extension.
  */
 const DOM_SCAN_SCRIPT = `(() => {
-  const out = [];
-  const push = (raw) => {
+  const media = [];
+  const iframes = [];
+  const pushTo = (arr, raw) => {
     if (!raw || typeof raw !== 'string') return;
     if (raw.startsWith('data:') || raw.startsWith('blob:')) return;
     try {
       const u = new URL(raw, location.href);
       if (u.protocol !== 'http:' && u.protocol !== 'https:') return;
-      out.push(u.toString());
+      arr.push(u.toString());
     } catch (_) { /* ignore */ }
   };
+  const push = (raw) => pushTo(media, raw);
   document.querySelectorAll('img').forEach((el) => {
     push(el.currentSrc || el.src);
     const ss = el.getAttribute('srcset');
@@ -167,6 +183,9 @@ const DOM_SCAN_SCRIPT = `(() => {
     push(el.poster);
   });
   document.querySelectorAll('source').forEach((el) => push(el.src));
+  document.querySelectorAll('iframe').forEach((el) => {
+    pushTo(iframes, el.src || el.getAttribute('data-src'));
+  });
   document.querySelectorAll('*').forEach((el) => {
     try {
       const bg = getComputedStyle(el).backgroundImage;
@@ -179,7 +198,10 @@ const DOM_SCAN_SCRIPT = `(() => {
       });
     } catch (_) { /* ignore */ }
   });
-  return Array.from(new Set(out)).slice(0, 500);
+  return {
+    media: Array.from(new Set(media)).slice(0, 500),
+    iframes: Array.from(new Set(iframes)).slice(0, 100)
+  };
 })();`;
 
 /** R-47 — Chrome HTML loaded into the outer window's webContents.
@@ -513,16 +535,47 @@ export async function openWebviewSniff(
 
       if (mode === 'confirm' && !view.webContents.isDestroyed()) {
         try {
-          const urls: string[] = await view.webContents.executeJavaScript(DOM_SCAN_SCRIPT, true);
-          if (Array.isArray(urls)) {
-            const dom: Array<{ url: string; kind: MediaKind; pageUrl: string }> = [];
-            for (const u of urls) {
-              if (typeof u !== 'string') continue;
-              const k = classifyByExt(u);
-              if (!k) continue;
-              dom.push({ url: u, kind: k, pageUrl });
-            }
-            mergeWebviewMedia(merged, dom);
+          const scan: { media?: unknown; iframes?: unknown } =
+            await view.webContents.executeJavaScript(DOM_SCAN_SCRIPT, true);
+          // R-50 — `media` array: extension-classified raw media URLs.
+          // Run through the strict `acceptWebviewMedia` filter so
+          // <img src="*.png"> entries never reach the grid.
+          const mediaUrls = Array.isArray(scan?.media) ? (scan.media as unknown[]) : [];
+          const dom: Array<{ url: string; kind: MediaKind; pageUrl: string }> = [];
+          for (const u of mediaUrls) {
+            if (typeof u !== 'string') continue;
+            const accepted = acceptWebviewMedia(classifyByExt(u), null);
+            if (!accepted) continue;
+            dom.push({ url: u, kind: accepted, pageUrl });
+          }
+          mergeWebviewMedia(merged, dom);
+
+          // R-50 — `iframes` array: iframe `src` attributes that we
+          // match against the well-known video-embed provider list.
+          // Hits become `kind:'video'` rows tagged
+          // `requiresExternalDownload:true` so the renderer routes
+          // them through the resolver pipeline (yt-dlp etc.) on
+          // demand. Non-matching iframes are dropped — they're
+          // typically ad / tracking / chat widgets.
+          const iframeUrls = Array.isArray(scan?.iframes) ? (scan.iframes as unknown[]) : [];
+          for (const u of iframeUrls) {
+            if (typeof u !== 'string') continue;
+            if (merged.size >= MAX_ITEMS) break;
+            let host: string | null = null;
+            try { host = new URL(u).host.toLowerCase(); } catch { continue; }
+            const provider = matchEmbedProvider(host, u);
+            if (!provider) continue;
+            const key = webviewDedupKey(u);
+            if (merged.has(key)) continue;
+            merged.set(key, {
+              id: mediaId(u),
+              url: u,
+              kind: 'video',
+              pageUrl,
+              source: 'iframe-embed',
+              requiresExternalDownload: true,
+              embedHost: provider
+            });
           }
         } catch (e) {
           log(`[webview-sniff] DOM scan failed: ${(e as Error).message}`);
