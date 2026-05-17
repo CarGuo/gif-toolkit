@@ -20,6 +20,28 @@ interface Props {
    * blind retry, spec failures want an explicit override.
    */
   onForceAllow?: (media: SniffedMedia) => void | Promise<void>;
+  /**
+   * R-33 — when supplied, "未达标" rows (status==='done' AND
+   * (warning includes 'exceeds hard target' OR 'did not reach soft target'))
+   * render a "手动优化" button. The host opens ManualOptimizeModal and
+   * dispatches a re-optimize task using the existing output gif as input.
+   * Skipped when not provided so the button stays out of read-only views.
+   */
+  onManualOptimize?: (media: SniffedMedia, progress: TaskProgress) => void;
+  /**
+   * R-43.2 — per-row cancellation. When supplied, every non-terminal
+   * task (pending / probing / converting / compressing / etc.) gets
+   * a "✕" button on the right that aborts JUST that task without
+   * touching its siblings. Optional so read-only views (history,
+   * tests, screenshots) keep working.
+   */
+  onCancelOne?: (media: SniffedMedia) => void | Promise<void>;
+  /**
+   * R-45 — per-row upload. When supplied, "done" rows that have at
+   * least one output path render an "📤 上传" button which kicks off
+   * an upload job for THAT output via the active backend.
+   */
+  onUploadOne?: (media: SniffedMedia, progress: TaskProgress) => void | Promise<void>;
 }
 
 function fileName(u: string): string {
@@ -45,6 +67,24 @@ function describe(p: TaskProgress): string {
   if (p.totalSegments && p.segmentIndex) parts.push(`段 ${p.segmentIndex}/${p.totalSegments}`);
   if (p.elapsedMs && p.elapsedMs > 1000) parts.push(fmtTime(p.elapsedMs));
   return parts.join(' · ');
+}
+
+/**
+ * R-33 — true when a "done" row's warning text indicates the compress loop
+ * could not meet the user's target. Two phrases are emitted by processor.ts:
+ *   - "exceeds hard target …"  (result.given === true)
+ *   - "did not reach soft target …" (over softMaxBytes but at-or-below maxBytes)
+ * Either case is a candidate for manual re-optimization.
+ *
+ * Exported so tests + the App-level "isUnderTargetDone" helper share the same
+ * predicate; flipping the warning string on the main side requires updating
+ * exactly one place.
+ */
+export function isUnderTargetDone(p: TaskProgress): boolean {
+  if (p.status !== 'done') return false;
+  const w = p.warning;
+  if (!w) return false;
+  return w.includes('exceeds hard target') || w.includes('did not reach soft target');
 }
 
 interface DetailModalState {
@@ -114,12 +154,16 @@ const WarningDetailModal: React.FC<{ s: DetailModalState; onClose: () => void }>
   );
 };
 
-export const TaskTable: React.FC<Props> = ({ items, progress, onRetry, onForceAllow }) => {
+export const TaskTable: React.FC<Props> = ({ items, progress, onRetry, onForceAllow, onManualOptimize, onCancelOne, onUploadOne }) => {
   const [detail, setDetail] = useState<DetailModalState | null>(null);
   // Track which task IDs are currently mid-retry so we can disable the button
   // until a fresh progress event arrives. Without this, double-clicks would
   // enqueue the same media twice while the IPC round-trip is in flight.
   const [retrying, setRetrying] = useState<Set<string>>(new Set());
+  // R-43.2 — IDs that the user has clicked "✕" on. Disables the button
+  // until main emits a terminal status, preventing double-clicks while
+  // the IPC round-trip is in flight.
+  const [cancelling, setCancelling] = useState<Set<string>>(new Set());
   const rows = items.filter((m) => progress[m.id]);
   if (rows.length === 0) {
     return (
@@ -189,6 +233,81 @@ export const TaskTable: React.FC<Props> = ({ items, progress, onRetry, onForceAl
             <div className={`size`}>{p.currentSizeMB ? `${p.currentSizeMB.toFixed(2)} MB` : ''}</div>
             <div className={`status ${cls}`}>
               <span>{p.status}</span>
+              {/* R-43.2 — per-row cancel. Visible only while the task is
+                  in a non-terminal state. We use the same set of statuses
+                  the home view uses to compute "isHomeBatchProcessing" so
+                  the button disappears the instant main emits a terminal
+                  event (cancelled / done / failed / skipped). */}
+              {onCancelOne && p.status !== 'done' && p.status !== 'failed' && p.status !== 'skipped' && p.status !== 'cancelled' ? (
+                <button
+                  type="button"
+                  className="retry-btn cancel-btn"
+                  disabled={cancelling.has(m.id)}
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    if (cancelling.has(m.id)) return;
+                    setCancelling((prev) => {
+                      const n = new Set(prev);
+                      n.add(m.id);
+                      return n;
+                    });
+                    try {
+                      await onCancelOne(m);
+                    } finally {
+                      // Clear after a short window — the next progress
+                      // event (cancelled) will already have hidden the
+                      // button via the status guard above; this is just
+                      // belt-and-braces in case main never emits.
+                      window.setTimeout(() => {
+                        setCancelling((prev) => {
+                          const n = new Set(prev);
+                          n.delete(m.id);
+                          return n;
+                        });
+                      }, 1500);
+                    }
+                  }}
+                  title="取消该任务(不影响其他正在处理的任务)"
+                  aria-label="取消任务"
+                  style={{
+                    marginLeft: 8, fontSize: 11, padding: '2px 8px',
+                    cursor: cancelling.has(m.id) ? 'wait' : 'pointer',
+                    opacity: cancelling.has(m.id) ? 0.5 : 1
+                  }}
+                >
+                  {cancelling.has(m.id) ? '取消中…' : '✕ 取消'}
+                </button>
+              ) : null}
+              {isUnderTargetDone(p) && onManualOptimize ? (
+                <button
+                  type="button"
+                  className="retry-btn manual-opt-btn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onManualOptimize(m, p);
+                  }}
+                  title="未达到目标大小,点击进行手动二次优化"
+                  style={{
+                    marginLeft: 8, fontSize: 11, padding: '2px 8px'
+                  }}
+                >
+                  手动优化
+                </button>
+              ) : null}
+              {onUploadOne && p.status === 'done' && (p.outputs?.length ?? 0) > 0 ? (
+                <button
+                  type="button"
+                  className="retry-btn upload-btn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void onUploadOne(m, p);
+                  }}
+                  title="上传该产物到当前默认图床"
+                  style={{ marginLeft: 8, fontSize: 11, padding: '2px 8px' }}
+                >
+                  📤 上传
+                </button>
+              ) : null}
               {(() => {
                 if (p.status !== 'failed' && p.status !== 'cancelled') return null;
                 // R-26 — spec failures get a single "强制允许" button.

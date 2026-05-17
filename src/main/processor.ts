@@ -9,18 +9,29 @@ import type {
   ProcessOptions,
   SniffedMedia,
   PreviewResult,
-  ThumbnailResult
+  ThumbnailResult,
+  ToolboxJob,
+  ToolboxParams
 } from '../shared/types';
+import { DEFAULT_OPTIONS } from '../shared/types';
 import { downloadToFile } from './downloader';
 import {
   probe,
   videoToGifPalette,
+  videoToAnimatedWebP,
   gifsicleOptimize,
+  gifsicleMethod,
   imageResizeKeepAspect,
   statSizeMB,
   extractFrameDataUrl,
   buildThumbnailDataUrl,
-  killAllProcs
+  killAllProcs,
+  toolboxTrim,
+  toolboxSpeed,
+  toolboxReverse,
+  toolboxRotate,
+  toolboxCrop,
+  convertGifWebp
 } from './ffmpeg';
 import type { ProbeInfo } from './ffmpeg';
 import { getCacheDir } from './binaries';
@@ -43,6 +54,14 @@ import {
 let currentConcurrency = DEFAULT_CONCURRENCY;
 const queue = new PQueue({ concurrency: DEFAULT_CONCURRENCY });
 const activeAborts: Set<AbortController> = new Set();
+// R-43.2 — per-task abort controllers, keyed by task id, so the
+// renderer can cancel ONE row in a running batch without nuking the
+// whole queue. cancelTask(id) calls .abort() on the matching entry;
+// the per-task controller's signal is also linked to its parent batch
+// so cancelAllTasks still works (parent abort propagates to every
+// child via an `addEventListener('abort', ...)` wire we set up at
+// queue.add() time).
+const taskAborts: Map<string, AbortController> = new Map();
 // Tracks all currently-running batches. cancelAllTasks awaits every one of
 // them so a retry-while-draining flow ('cancel → await → start') is race-free:
 // the OLD batches must fully settle (including in-flight ffmpeg/gifsicle child
@@ -117,6 +136,28 @@ export async function cancelAllTasks(): Promise<void> {
     try { await Promise.allSettled(inflight); } catch { /* ignore */ }
   }
   activeAborts.clear();
+  taskAborts.clear();
+}
+
+/**
+ * R-43.2 — cancel a single task by id. Aborts only that task's
+ * controller, which fires the signal observed by the worker (sharp /
+ * ffmpeg / gifsicle wrappers all re-check `signal.aborted` between
+ * stages). Returns true if a matching task was found and aborted, false
+ * if no such id is currently in-flight (already terminal, never
+ * existed, or was sniff/preview which don't go through this map).
+ *
+ * The abort propagates as a CancelledError out of processOneTask, so
+ * the existing `if (isAbortError(err))` branch in the queue worker
+ * already emits `{ status: 'cancelled' }` for us — no extra emit needed
+ * here.
+ */
+export function cancelTask(taskId: string): boolean {
+  const ctrl = taskAborts.get(taskId);
+  if (!ctrl) return false;
+  try { ctrl.abort(); } catch { /* ignore */ }
+  taskAborts.delete(taskId);
+  return true;
 }
 
 function safeMediaId(id: string): string {
@@ -867,6 +908,75 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
   const t0 = Date.now();
   const elapsed = (): number => Date.now() - t0;
 
+  // R-33A: manual re-optimize fast path. The renderer pre-validated the
+  // path via sanitizeOptions (whitelist + .gif extension). We skip
+  // download/encode and jump straight into the gif compress branch using
+  // the supplied file as our sourcePath. The branch below (`media.kind
+  // === 'gif' || options.reoptimizeFromGifPath`) does the rest.
+  if (options.reoptimizeFromGifPath) {
+    emit({
+      taskId: task.id,
+      status: 'compressing',
+      percent: 50,
+      message: 'optimizing gif (re-run)',
+      substep: 'optimizing',
+      elapsedMs: elapsed()
+    });
+    const localName = fileNameFor(media);
+    const reSrc = path.join(work, localName);
+    // Copy into the per-task work dir so compressLoop's intermediate
+    // outputs (gifsicle artefacts) live alongside it as usual. We never
+    // rename / mutate the user's original output file.
+    await fsp.copyFile(options.reoptimizeFromGifPath, reSrc);
+    const result = await compressLoop(
+      reSrc,
+      work,
+      fileNameFor(media, ''),
+      options,
+      (info) =>
+        emit({
+          taskId: task.id,
+          status: 'compressing',
+          percent: info.percent,
+          message: info.message,
+          substep: info.substep,
+          stepIndex: info.stepIndex,
+          totalSteps: info.totalSteps,
+          detail: info.detail,
+          currentSizeMB: info.currentSizeMB,
+          elapsedMs: elapsed()
+        }),
+      signal
+    );
+    const finalOut = path.join(outputBaseDir, fileNameFor(media, '.opt.gif', batchTaken));
+    await fsp.copyFile(result.finalPath, finalOut);
+    const targetMBLocal = options.maxBytes / (1024 * 1024);
+    const softMBLocal2 = options.softMaxBytes / (1024 * 1024);
+    const tier = result.reachedSoft
+      ? `<= ${softMBLocal2.toFixed(1)}MB (best)`
+      : !result.given
+        ? `<= ${targetMBLocal.toFixed(1)}MB (fallback)`
+        : `over ${targetMBLocal.toFixed(1)}MB`;
+    let warning: string | undefined;
+    if (result.given) {
+      warning = `re-opt size ${result.sizeMB.toFixed(2)}MB still over ${targetMBLocal.toFixed(1)}MB target`;
+    } else if (!result.reachedSoft) {
+      warning = `re-opt did not reach soft ${softMBLocal2.toFixed(1)}MB; ${result.sizeMB.toFixed(2)}MB`;
+    }
+    emit({
+      taskId: task.id,
+      status: 'done',
+      percent: 100,
+      outputs: [finalOut],
+      currentSizeMB: result.sizeMB,
+      warning,
+      phaseFailures: result.phaseFailures.length > 0 ? result.phaseFailures : undefined,
+      message: `gif re-optimized (${result.sizeMB.toFixed(2)}MB ${tier})`,
+      elapsedMs: elapsed()
+    });
+    return;
+  }
+
   emit({
     taskId: task.id,
     status: 'downloading',
@@ -980,6 +1090,29 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
       substep: 'optimizing',
       elapsedMs: elapsed()
     });
+
+    // R-33B: skip-compress fast path. User explicitly asked to bypass the
+    // gifsicle iterative loop. We just copy the downloaded gif as-is to the
+    // output directory and report success. Output may exceed maxBytes — we
+    // surface the actual size via currentSizeMB so the UI can display it
+    // without a warning (warning is reserved for *failures to meet target*,
+    // not *intentional skip*).
+    if (options.skipCompress === true) {
+      const finalOut = path.join(outputBaseDir, fileNameFor(media, '.gif', batchTaken));
+      await fsp.copyFile(sourcePath, finalOut);
+      const sizeMB = await statSizeMB(finalOut);
+      emit({
+        taskId: task.id,
+        status: 'done',
+        percent: 100,
+        outputs: [finalOut],
+        currentSizeMB: sizeMB,
+        message: `gif saved as-is (${sizeMB.toFixed(2)}MB · compress skipped)`,
+        elapsedMs: elapsed()
+      });
+      return;
+    }
+
     const result = await compressLoop(
       sourcePath,
       work,
@@ -1314,10 +1447,15 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
     // user explicitly chose). After ffmpeg produces the baseGif, if it is
     // already small enough we skip compressLoop entirely — palettegen
     // already does most of the work, no extra gifsicle pass needed.
+    //
+    // R-33B: when user asked to skip-compress entirely, take the same fast
+    // path *unconditionally* (no size check). The freshly-encoded gif from
+    // palettegen is what the user wants — no lossy/colour reduction.
     const baseSizeMB = await statSizeMB(baseGif);
     const softMBLocal = options.softMaxBytes / (1024 * 1024);
-    if (baseSizeMB <= softMBLocal) {
-      log(`seg ${i + 1} baseGif ${baseSizeMB.toFixed(2)}MB <= soft ${softMBLocal.toFixed(2)}MB; skipping compressLoop`);
+    if (options.skipCompress === true || baseSizeMB <= softMBLocal) {
+      const reason = options.skipCompress === true ? 'skipCompress' : `<= soft ${softMBLocal.toFixed(2)}MB`;
+      log(`seg ${i + 1} baseGif ${baseSizeMB.toFixed(2)}MB ${reason}; skipping compressLoop`);
       const finalOut = path.join(
         outputBaseDir,
         fileNameFor(media, segments.length > 1 ? `.part${i + 1}.gif` : '.gif', batchTaken)
@@ -1434,13 +1572,28 @@ export async function startBatch(
       await Promise.all(
         tasks.map((task) =>
           queue.add(async () => {
+            // R-43.2 — per-task abort controller. Linked to the parent
+            // batch signal so a `cancelAllTasks()` parent abort still
+            // propagates here; a `cancelTask(task.id)` only fires this
+            // controller, leaving siblings running.
+            const taskCtrl = new AbortController();
+            const onParentAbort = () => {
+              try { taskCtrl.abort(); } catch { /* ignore */ }
+            };
+            if (signal.aborted) {
+              taskCtrl.abort();
+            } else {
+              signal.addEventListener('abort', onParentAbort, { once: true });
+            }
+            taskAborts.set(task.id, taskCtrl);
+            const taskSignal = taskCtrl.signal;
             try {
-              if (signal.aborted) {
+              if (taskSignal.aborted) {
                 emit({ taskId: task.id, status: 'cancelled', percent: 100, message: 'cancelled before start' });
                 return;
               }
               emit({ taskId: task.id, status: 'pending', percent: 0 });
-              await processOneTask({ task, outputBaseDir, emit, signal, batchTaken });
+              await processOneTask({ task, outputBaseDir, emit, signal: taskSignal, batchTaken });
             } catch (err) {
               if (isAbortError(err)) {
                 log(`task ${task.id} cancelled`);
@@ -1472,6 +1625,14 @@ export async function startBatch(
                 return;
               }
               emit({ taskId: task.id, status: 'failed', percent: 100, error: msg });
+            } finally {
+              signal.removeEventListener('abort', onParentAbort);
+              // Only delete OUR entry — a retry of the same id may
+              // already have a fresh controller registered, in which
+              // case we must not clobber it.
+              if (taskAborts.get(task.id) === taskCtrl) {
+                taskAborts.delete(task.id);
+              }
             }
           })
         )
@@ -1483,6 +1644,667 @@ export async function startBatch(
   // Track ALL in-flight batches (not just the latest) so cancelAllTasks can
   // await every one before returning. Without this, a retry kicked off while
   // an earlier batch is still draining would leak past cancelAll.
+  activeBatchPromises.add(run);
+  run.finally(() => {
+    activeBatchPromises.delete(run);
+  });
+  return run;
+}
+
+/* ----------------------- R-35 Toolbox ----------------------- */
+
+/**
+ * Build a ProcessOptions snapshot from ToolboxParams. We reuse the existing
+ * ProcessOptions type because compressLoop / videoToGifPalette consume it
+ * directly — saves us from threading a parallel option struct down the
+ * call chain. Defaults are pulled from DEFAULT_OPTIONS so users get
+ * sensible knobs even when they leave fields blank.
+ */
+function toolboxParamsToProcessOptions(params: ToolboxParams): ProcessOptions {
+  const opts: ProcessOptions = { ...DEFAULT_OPTIONS };
+  if (typeof params.fps === 'number') opts.fps = params.fps;
+  if (typeof params.startSec === 'number') opts.startSec = params.startSec;
+  if (typeof params.endSec === 'number') opts.endSec = params.endSec;
+  if (typeof params.maxBytes === 'number') opts.maxBytes = params.maxBytes;
+  if (typeof params.softMaxBytes === 'number') {
+    opts.softMaxBytes = Math.min(opts.maxBytes, params.softMaxBytes);
+  }
+  // Toolbox 'width' is the longest-side cap (mirrors ProcessOptions.maxWidth).
+  // gif-resize's targetWidth is consumed differently — read directly from params.
+  if (typeof params.width === 'number') opts.maxWidth = Math.max(64, params.width);
+  return opts;
+}
+
+interface ToolboxRunArgs {
+  job: ToolboxJob;
+  outputBaseDir: string;
+  emit: (p: TaskProgress) => void;
+  signal: AbortSignal;
+  batchTaken: Set<string>;
+}
+
+async function processToolboxJob({ job, outputBaseDir, emit, signal, batchTaken }: ToolboxRunArgs): Promise<void> {
+  const t0 = Date.now();
+  const elapsed = (): number => Date.now() - t0;
+  const work = path.join(getCacheDir(), `toolbox-${safeName(job.id)}`);
+  await ensureDir(work);
+  await ensureDir(outputBaseDir);
+
+  const inputBaseRaw = path.basename(job.inputPath, path.extname(job.inputPath)) || job.id;
+  const inputStem = safeName(inputBaseRaw) || 'job';
+
+  // Synthesise a SniffedMedia-shaped lookup so existing helpers (fileNameFor)
+  // and the renderer-side TaskProgress consumers behave identically.
+  // The url field is unused (we never download it) — kept as file:// for
+  // diagnostic logs.
+  const fakeMedia: SniffedMedia = {
+    id: job.id,
+    url: `file://${job.inputPath}`,
+    kind: (() => {
+      if (job.kind === 'gif-resize' || job.kind === 'gif-optimize') return 'gif';
+      // R-37 — Trim/Speed/Reverse/Rotate are file-type-agnostic: pick
+      // 'gif' when the source is a .gif so downstream filename helpers
+      // and progress UI label it correctly, otherwise treat as video.
+      const ext = path.extname(job.inputPath).toLowerCase();
+      if (ext === '.gif') return 'gif';
+      return 'video';
+    })(),
+    pageUrl: `file://${job.inputPath}`,
+    source: 'pattern'
+  };
+
+  const opts = toolboxParamsToProcessOptions(job.params);
+
+  emit({
+    taskId: job.id,
+    status: 'pending',
+    percent: 1,
+    message: `${job.kind}: starting`,
+    elapsedMs: elapsed()
+  });
+
+  if (job.kind === 'video-to-gif' || job.kind === 'video-to-webp') {
+    let info: ProbeInfo;
+    emit({
+      taskId: job.id,
+      status: 'probing',
+      percent: 8,
+      substep: 'probing',
+      message: 'probing video',
+      elapsedMs: elapsed()
+    });
+    try {
+      info = await probe(job.inputPath);
+    } catch (e) {
+      throw new Error(`ffprobe failed: ${(e as Error).message}`);
+    }
+    if (!info.hasVideo || info.durationSec <= 0) {
+      throw new Error('input is not a valid video stream');
+    }
+    const totalDuration = info.durationSec;
+    const userStart = typeof job.params.startSec === 'number' ? job.params.startSec : 0;
+    const userEnd = typeof job.params.endSec === 'number' ? job.params.endSec : totalDuration;
+    const clipStart = Math.max(0, Math.min(totalDuration, userStart));
+    const clipEnd = Math.max(clipStart, Math.min(totalDuration, userEnd));
+    const range = clipEnd - clipStart;
+    if (range <= 0.05) throw new Error('clip range too short (< 0.05s)');
+
+    const fps = Math.max(1, Math.min(60, job.params.fps ?? DEFAULT_OPTIONS.fps));
+    // 'width' here is the longest-side cap; if not provided, keep source dims.
+    const widthCap = typeof job.params.width === 'number' ? Math.max(64, job.params.width) : 0;
+    const targetWidth = (() => {
+      if (widthCap <= 0) return Math.max(64, info.width || 0);
+      if (!info.width || !info.height) return widthCap;
+      const longest = Math.max(info.width, info.height);
+      if (longest <= widthCap) return info.width;
+      return Math.max(2, Math.round(info.width * (widthCap / longest)));
+    })();
+
+    const ext = job.kind === 'video-to-gif' ? '.gif' : '.webp';
+    const finalOut = path.join(outputBaseDir, fileNameFor(fakeMedia, ext, batchTaken));
+
+    if (job.kind === 'video-to-gif') {
+      emit({
+        taskId: job.id,
+        status: 'converting',
+        percent: 25,
+        substep: 'encoding',
+        message: 'encoding video → gif',
+        elapsedMs: elapsed()
+      });
+      const tmpGif = path.join(work, `${inputStem}.raw.gif`);
+      await videoToGifPalette(
+        {
+          input: job.inputPath,
+          output: tmpGif,
+          startSec: clipStart,
+          durationSec: range,
+          fps,
+          width: targetWidth,
+          speed: 1
+        },
+        (s) => log(`ffmpeg: ${s}`),
+        signal
+      );
+
+      emit({
+        taskId: job.id,
+        status: 'compressing',
+        percent: 65,
+        substep: 'optimizing',
+        message: 'optimizing gif',
+        elapsedMs: elapsed()
+      });
+      const result = await compressLoop(
+        tmpGif,
+        work,
+        inputStem,
+        opts,
+        (info2) =>
+          emit({
+            taskId: job.id,
+            status: 'compressing',
+            percent: Math.min(95, info2.percent),
+            substep: info2.substep,
+            stepIndex: info2.stepIndex,
+            totalSteps: info2.totalSteps,
+            detail: info2.detail,
+            currentSizeMB: info2.currentSizeMB,
+            message: info2.message,
+            elapsedMs: elapsed()
+          }),
+        signal
+      );
+      await fsp.copyFile(result.finalPath, finalOut);
+      emit({
+        taskId: job.id,
+        status: 'done',
+        percent: 100,
+        outputs: [finalOut],
+        currentSizeMB: result.sizeMB,
+        message: `gif saved (${result.sizeMB.toFixed(2)}MB)`,
+        elapsedMs: elapsed()
+      });
+      return;
+    }
+
+    // video-to-webp
+    emit({
+      taskId: job.id,
+      status: 'converting',
+      percent: 30,
+      substep: 'encoding',
+      message: 'encoding video → animated webp',
+      elapsedMs: elapsed()
+    });
+    await videoToAnimatedWebP(
+      {
+        input: job.inputPath,
+        output: finalOut,
+        startSec: clipStart,
+        durationSec: range,
+        fps,
+        width: targetWidth,
+        speed: 1,
+        quality: job.params.quality ?? 75,
+        loop: job.params.loop ?? 0
+      },
+      (s) => log(`ffmpeg(webp): ${s}`),
+      signal
+    );
+    const sizeMB = await statSizeMB(finalOut);
+    emit({
+      taskId: job.id,
+      status: 'done',
+      percent: 100,
+      outputs: [finalOut],
+      currentSizeMB: sizeMB,
+      message: `webp saved (${sizeMB.toFixed(2)}MB)`,
+      elapsedMs: elapsed()
+    });
+    return;
+  }
+
+  if (job.kind === 'gif-resize') {
+    const target = job.params.targetWidth;
+    if (typeof target !== 'number' || target < 64) {
+      throw new Error('gif-resize: targetWidth required (>=64)');
+    }
+    // R-41 — output extension mirrors the input so a .webp source
+    // round-trips back to .webp instead of being silently turned into
+    // a .gif. Defaults to .gif if the input has no extension (which
+    // shouldn't happen given the picker filters but is defensive).
+    const resizeOutExt = path.extname(job.inputPath).toLowerCase() || '.gif';
+    emit({
+      taskId: job.id,
+      status: 'converting',
+      percent: 30,
+      substep: 'resizing',
+      message: `resizing gif → width ${target}`,
+      elapsedMs: elapsed()
+    });
+    const finalOut = path.join(outputBaseDir, fileNameFor(fakeMedia, resizeOutExt, batchTaken));
+    await imageResizeKeepAspect(job.inputPath, finalOut, target, signal);
+    const sizeMB = await statSizeMB(finalOut);
+    emit({
+      taskId: job.id,
+      status: 'done',
+      percent: 100,
+      outputs: [finalOut],
+      currentSizeMB: sizeMB,
+      message: `gif resized (${sizeMB.toFixed(2)}MB · w=${target})`,
+      elapsedMs: elapsed()
+    });
+    return;
+  }
+
+  if (job.kind === 'gif-optimize') {
+    // Three execution modes (R-35 #2):
+    //   (a) explicit `method` picker — single-axis gifsicle pass via
+    //       gifsicleMethod (lossy / colors / drop frames / dedupe / etc).
+    //   (b) explicit lossy + colors pair (legacy explicit mode) when no
+    //       `method` was set — single gifsicle --lossy=N --colors=K pass.
+    //   (c) iterative compressLoop when user supplied size budget
+    //       — that's the "shrink to <= 2MB" autopilot mode.
+    // We pick based on which fields the user actually filled in. The
+    // method picker takes precedence over both legacy fields because
+    // it's the most explicit user intent.
+    const hasMethod = typeof job.params.method === 'string';
+    const hasExplicit = typeof job.params.lossy === 'number' || typeof job.params.colors === 'number';
+    const hasBudget = typeof job.params.maxBytes === 'number' || typeof job.params.softMaxBytes === 'number';
+    // R-41 — output extension mirrors the input so .webp inputs stay
+    // .webp on the way out. The gifsicleMethod/Optimize helpers
+    // transparently round-trip through a tmp .gif when needed.
+    const optOutExt = path.extname(job.inputPath).toLowerCase() || '.gif';
+
+    if (hasMethod && job.params.method !== 'budget') {
+      const method = job.params.method as Exclude<NonNullable<ToolboxParams['method']>, 'budget'>;
+      const lossy = job.params.lossy ?? 80;
+      const colors = job.params.colors ?? 128;
+      const dropEveryN = job.params.dropEveryN ?? 2;
+      emit({
+        taskId: job.id,
+        status: 'compressing',
+        percent: 30,
+        substep: 'optimizing',
+        message: `gifsicle method=${method}`,
+        elapsedMs: elapsed()
+      });
+      const finalOut = path.join(outputBaseDir, fileNameFor(fakeMedia, optOutExt, batchTaken));
+      await gifsicleMethod(job.inputPath, finalOut, method, { lossy, colors, dropEveryN, signal });
+      const sizeMB = await statSizeMB(finalOut);
+      emit({
+        taskId: job.id,
+        status: 'done',
+        percent: 100,
+        outputs: [finalOut],
+        currentSizeMB: sizeMB,
+        message: `gif optimized (${sizeMB.toFixed(2)}MB · ${method})`,
+        elapsedMs: elapsed()
+      });
+      return;
+    }
+
+    if (!hasMethod && hasExplicit && !hasBudget) {
+      const lossy = job.params.lossy ?? 0;
+      const colors = job.params.colors ?? 256;
+      emit({
+        taskId: job.id,
+        status: 'compressing',
+        percent: 30,
+        substep: 'optimizing',
+        message: `gifsicle lossy=${lossy} colors=${colors}`,
+        elapsedMs: elapsed()
+      });
+      const finalOut = path.join(outputBaseDir, fileNameFor(fakeMedia, optOutExt, batchTaken));
+      await gifsicleOptimize(job.inputPath, finalOut, lossy, colors, signal);
+      const sizeMB = await statSizeMB(finalOut);
+      emit({
+        taskId: job.id,
+        status: 'done',
+        percent: 100,
+        outputs: [finalOut],
+        currentSizeMB: sizeMB,
+        message: `gif optimized (${sizeMB.toFixed(2)}MB · lossy=${lossy} colors=${colors})`,
+        elapsedMs: elapsed()
+      });
+      return;
+    }
+    emit({
+      taskId: job.id,
+      status: 'compressing',
+      percent: 25,
+      substep: 'optimizing',
+      message: 'optimizing gif (size budget)',
+      elapsedMs: elapsed()
+    });
+    const result = await compressLoop(
+      job.inputPath,
+      work,
+      inputStem,
+      opts,
+      (info2) =>
+        emit({
+          taskId: job.id,
+          status: 'compressing',
+          percent: Math.min(95, info2.percent),
+          substep: info2.substep,
+          stepIndex: info2.stepIndex,
+          totalSteps: info2.totalSteps,
+          detail: info2.detail,
+          currentSizeMB: info2.currentSizeMB,
+          message: info2.message,
+          elapsedMs: elapsed()
+        }),
+      signal
+    );
+    const finalOut = path.join(outputBaseDir, fileNameFor(fakeMedia, '.opt.gif', batchTaken));
+    await fsp.copyFile(result.finalPath, finalOut);
+    emit({
+      taskId: job.id,
+      status: 'done',
+      percent: 100,
+      outputs: [finalOut],
+      currentSizeMB: result.sizeMB,
+      phaseFailures: result.phaseFailures.length > 0 ? result.phaseFailures : undefined,
+      message: `gif optimized (${result.sizeMB.toFixed(2)}MB)`,
+      elapsedMs: elapsed()
+    });
+    return;
+  }
+
+  /* ---------- R-37: Trim / Speed / Reverse / Rotate ----------
+   * These four tools accept either a video or a .gif. The output
+   * extension mirrors the input extension so a .mov stays .mov and
+   * a .gif stays .gif — that's the least-surprise behaviour, and the
+   * underlying ffmpeg / gifsicle helpers already handle both cases.
+   */
+  const inputExt = path.extname(job.inputPath).toLowerCase() || '.mp4';
+
+  if (job.kind === 'trim') {
+    const startSec = typeof job.params.startSec === 'number' ? job.params.startSec : 0;
+    const endSec = typeof job.params.endSec === 'number' ? job.params.endSec : undefined;
+    if (typeof endSec === 'number' && endSec <= startSec) {
+      throw new Error('trim: endSec must be greater than startSec');
+    }
+    emit({
+      taskId: job.id,
+      status: 'converting',
+      percent: 30,
+      substep: 'trimming',
+      message: `trim ${startSec.toFixed(2)}s..${typeof endSec === 'number' ? endSec.toFixed(2) + 's' : 'EOF'}`,
+      elapsedMs: elapsed()
+    });
+    const finalOut = path.join(outputBaseDir, fileNameFor(fakeMedia, inputExt, batchTaken));
+    await toolboxTrim(job.inputPath, finalOut, startSec, endSec, { signal });
+    const sizeMB = await statSizeMB(finalOut);
+    emit({
+      taskId: job.id,
+      status: 'done',
+      percent: 100,
+      outputs: [finalOut],
+      currentSizeMB: sizeMB,
+      message: `trimmed (${sizeMB.toFixed(2)}MB)`,
+      elapsedMs: elapsed()
+    });
+    return;
+  }
+
+  if (job.kind === 'speed') {
+    const factor = typeof job.params.speedFactor === 'number' ? job.params.speedFactor : 1;
+    emit({
+      taskId: job.id,
+      status: 'converting',
+      percent: 30,
+      substep: 'retiming',
+      message: `speed ×${factor.toFixed(2)}`,
+      elapsedMs: elapsed()
+    });
+    const finalOut = path.join(outputBaseDir, fileNameFor(fakeMedia, inputExt, batchTaken));
+    await toolboxSpeed(job.inputPath, finalOut, factor, { signal });
+    const sizeMB = await statSizeMB(finalOut);
+    emit({
+      taskId: job.id,
+      status: 'done',
+      percent: 100,
+      outputs: [finalOut],
+      currentSizeMB: sizeMB,
+      message: `speed ×${factor.toFixed(2)} (${sizeMB.toFixed(2)}MB)`,
+      elapsedMs: elapsed()
+    });
+    return;
+  }
+
+  if (job.kind === 'reverse') {
+    const audioMode: 'mute' | 'reverse' | 'keep' =
+      job.params.reverseAudioMode === 'reverse' || job.params.reverseAudioMode === 'keep'
+        ? job.params.reverseAudioMode
+        : 'mute';
+    emit({
+      taskId: job.id,
+      status: 'converting',
+      percent: 30,
+      substep: 'reversing',
+      message: `reverse (audio=${audioMode})`,
+      elapsedMs: elapsed()
+    });
+    const finalOut = path.join(outputBaseDir, fileNameFor(fakeMedia, inputExt, batchTaken));
+    await toolboxReverse(job.inputPath, finalOut, audioMode, { signal });
+    const sizeMB = await statSizeMB(finalOut);
+    emit({
+      taskId: job.id,
+      status: 'done',
+      percent: 100,
+      outputs: [finalOut],
+      currentSizeMB: sizeMB,
+      message: `reversed (${sizeMB.toFixed(2)}MB · audio=${audioMode})`,
+      elapsedMs: elapsed()
+    });
+    return;
+  }
+
+  if (job.kind === 'rotate') {
+    const degrees = typeof job.params.rotateDegrees === 'number' ? job.params.rotateDegrees : 0;
+    const flipH = !!job.params.flipH;
+    const flipV = !!job.params.flipV;
+    emit({
+      taskId: job.id,
+      status: 'converting',
+      percent: 30,
+      substep: 'rotating',
+      message: `rotate ${degrees}°${flipH ? ' +flipH' : ''}${flipV ? ' +flipV' : ''}`,
+      elapsedMs: elapsed()
+    });
+    const finalOut = path.join(outputBaseDir, fileNameFor(fakeMedia, inputExt, batchTaken));
+    await toolboxRotate(job.inputPath, finalOut, degrees, { flipH, flipV }, { signal });
+    const sizeMB = await statSizeMB(finalOut);
+    emit({
+      taskId: job.id,
+      status: 'done',
+      percent: 100,
+      outputs: [finalOut],
+      currentSizeMB: sizeMB,
+      message: `rotated ${degrees}° (${sizeMB.toFixed(2)}MB)`,
+      elapsedMs: elapsed()
+    });
+    return;
+  }
+
+  if (job.kind === 'crop') {
+    // R-38 — Crop is single-file only (UI enforced); we still re-validate
+    // the rect here so a corrupted IPC payload can't trigger ffmpeg with
+    // garbage dimensions. All four fields must be defined and positive.
+    const { cropX, cropY, cropW, cropH } = job.params;
+    if (
+      typeof cropX !== 'number' || typeof cropY !== 'number' ||
+      typeof cropW !== 'number' || typeof cropH !== 'number' ||
+      cropW <= 0 || cropH <= 0
+    ) {
+      throw new Error('crop: cropX/Y/W/H all required and W/H must be positive');
+    }
+    emit({
+      taskId: job.id,
+      status: 'converting',
+      percent: 30,
+      substep: 'cropping',
+      message: `crop ${cropW}×${cropH} @ (${cropX},${cropY})`,
+      elapsedMs: elapsed()
+    });
+    const finalOut = path.join(outputBaseDir, fileNameFor(fakeMedia, inputExt, batchTaken));
+    await toolboxCrop(
+      job.inputPath,
+      finalOut,
+      { x: cropX, y: cropY, w: cropW, h: cropH },
+      { signal }
+    );
+    const sizeMB = await statSizeMB(finalOut);
+    emit({
+      taskId: job.id,
+      status: 'done',
+      percent: 100,
+      outputs: [finalOut],
+      currentSizeMB: sizeMB,
+      message: `cropped to ${cropW}×${cropH} (${sizeMB.toFixed(2)}MB)`,
+      elapsedMs: elapsed()
+    });
+    return;
+  }
+
+  if (job.kind === 'gif-webp-convert') {
+    // R-42 — GIF ↔ WebP transcode. The sanitizer already restricts
+    // targetFormat to one of the two literals, so an `undefined` here
+    // means the renderer didn't send the field at all; that's a real
+    // bug, not something we should silently paper over with a default.
+    //
+    // R-43 M-3 — surface the missing field as an explicit error so any
+    // future regression in the renderer (e.g. a setKind path that
+    // forgets to seed defaultParamsFor) is caught immediately instead
+    // of producing wrong-format output.
+    const requested = job.params.targetFormat;
+    if (requested !== 'gif' && requested !== 'webp') {
+      throw new Error(`gif-webp-convert: targetFormat is required (got ${String(requested)})`);
+    }
+    const target: 'gif' | 'webp' = requested;
+    const outExt: '.gif' | '.webp' = target === 'gif' ? '.gif' : '.webp';
+    const inputExtLower = path.extname(job.inputPath).toLowerCase();
+
+    // R-43 H-1 — same-format short circuit. If the user picked the
+    // same container their source already has, transcoding through
+    // sharp/ffmpeg would needlessly re-encode (lossy webp at q=75 even
+    // when the source is already lossless webp). Just copy the file
+    // into the toolbox output directory verbatim. fileNameFor's
+    // batchTaken set still ensures we don't collide with another
+    // job's output.
+    const finalOut = path.join(outputBaseDir, fileNameFor(fakeMedia, outExt, batchTaken));
+    if (inputExtLower === outExt) {
+      emit({
+        taskId: job.id,
+        status: 'converting',
+        percent: 30,
+        substep: 'copying',
+        message: `same-format copy → ${target.toUpperCase()}`,
+        elapsedMs: elapsed()
+      });
+      await fsp.copyFile(job.inputPath, finalOut);
+      const sizeMB = await statSizeMB(finalOut);
+      emit({
+        taskId: job.id,
+        status: 'done',
+        percent: 100,
+        outputs: [finalOut],
+        currentSizeMB: sizeMB,
+        message: `copied as ${target.toUpperCase()} (${sizeMB.toFixed(2)}MB, same format)`,
+        elapsedMs: elapsed()
+      });
+      return;
+    }
+
+    emit({
+      taskId: job.id,
+      status: 'converting',
+      percent: 30,
+      substep: 'transcoding',
+      message: `→ ${target.toUpperCase()}`,
+      elapsedMs: elapsed()
+    });
+    await convertGifWebp(job.inputPath, finalOut, target, signal);
+    const sizeMB = await statSizeMB(finalOut);
+    emit({
+      taskId: job.id,
+      status: 'done',
+      percent: 100,
+      outputs: [finalOut],
+      currentSizeMB: sizeMB,
+      message: `converted to ${target.toUpperCase()} (${sizeMB.toFixed(2)}MB)`,
+      elapsedMs: elapsed()
+    });
+    return;
+  }
+
+  throw new Error(`unsupported toolbox kind: ${(job as { kind: string }).kind}`);
+}
+
+/**
+ * Public entry point for the R-35 Toolbox. Mirrors startBatch's queue-and-
+ * track structure exactly so a toolbox job and a sniff-batch task share
+ * the same PQueue (single source of concurrency truth) and the same
+ * cancellation surface (cancelAllTasks aborts both).
+ */
+export async function startToolbox(
+  jobs: ToolboxJob[],
+  outputBaseDir: string,
+  emit: (p: TaskProgress) => void
+): Promise<void> {
+  const ctrl = new AbortController();
+  activeAborts.add(ctrl);
+  const signal = ctrl.signal;
+  const batchTaken = new Set<string>();
+  const run = (async (): Promise<void> => {
+    try {
+      await Promise.all(
+        jobs.map((job) =>
+          queue.add(async () => {
+            // R-43.2 — per-task abort controller (toolbox parity with startBatch).
+            const taskCtrl = new AbortController();
+            const onParentAbort = () => {
+              try { taskCtrl.abort(); } catch { /* ignore */ }
+            };
+            if (signal.aborted) {
+              taskCtrl.abort();
+            } else {
+              signal.addEventListener('abort', onParentAbort, { once: true });
+            }
+            taskAborts.set(job.id, taskCtrl);
+            const taskSignal = taskCtrl.signal;
+            try {
+              if (taskSignal.aborted) {
+                emit({ taskId: job.id, status: 'cancelled', percent: 100, message: 'cancelled before start' });
+                return;
+              }
+              emit({ taskId: job.id, status: 'pending', percent: 0 });
+              await processToolboxJob({ job, outputBaseDir, emit, signal: taskSignal, batchTaken });
+            } catch (err) {
+              if (isAbortError(err)) {
+                log(`toolbox ${job.id} cancelled`);
+                emit({ taskId: job.id, status: 'cancelled', percent: 100, message: 'cancelled' });
+                return;
+              }
+              const msg = (err as Error).message || String(err);
+              log(`toolbox ${job.id} failed: ${msg}`);
+              emit({ taskId: job.id, status: 'failed', percent: 100, error: msg });
+            } finally {
+              signal.removeEventListener('abort', onParentAbort);
+              if (taskAborts.get(job.id) === taskCtrl) {
+                taskAborts.delete(job.id);
+              }
+            }
+          })
+        )
+      );
+    } finally {
+      activeAborts.delete(ctrl);
+    }
+  })();
   activeBatchPromises.add(run);
   run.finally(() => {
     activeBatchPromises.delete(run);

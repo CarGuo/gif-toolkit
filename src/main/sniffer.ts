@@ -33,7 +33,7 @@ function abs(base: string, link: string): string | null {
   }
 }
 
-function classifyByExt(url: string): MediaKind | null {
+export function classifyByExt(url: string): MediaKind | null {
   const lower = url.split('?')[0].toLowerCase();
   if (VIDEO_EXT.some((e) => lower.endsWith(e))) return 'video';
   if (GIF_EXT.some((e) => lower.endsWith(e))) return 'gif';
@@ -201,7 +201,7 @@ function isTransformSegment(seg: string): boolean {
   return false;
 }
 
-function dedupKey(url: string): string {
+export function dedupKey(url: string): string {
   try {
     const u = new URL(url);
     const rawSegs = u.pathname.split('/');

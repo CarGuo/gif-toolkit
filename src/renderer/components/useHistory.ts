@@ -24,13 +24,14 @@
  * multiple progress events can't lose entries. We also debounce writes
  * so a stream of progress events doesn't thrash localStorage.
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type {
   ProcessOptions,
   SniffedMedia,
   TaskProgress,
   TaskStatus
 } from '../../shared/types';
+import { DEFAULT_OPTIONS } from '../../shared/types';
 
 export const HISTORY_STORAGE_KEY = 'giftk.history.v1';
 export const HISTORY_MAX_ENTRIES = 30;
@@ -79,15 +80,35 @@ function readAll(): HistoryRecord[] {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
     // Defensive: drop entries missing required shape so a partially
-    // corrupted blob doesn't crash the panel.
-    return parsed.filter(
-      (e: unknown): e is HistoryRecord =>
-        !!e &&
-        typeof e === 'object' &&
-        typeof (e as HistoryRecord).id === 'string' &&
-        typeof (e as HistoryRecord).pageUrl === 'string' &&
-        Array.isArray((e as HistoryRecord).items)
-    );
+    // corrupted blob doesn't crash the panel. Also normalise optional
+    // sub-objects (outputsByTaskId / taskStatus / options) so
+    // mergeProgressIntoRecord can safely index them later.
+    const out: HistoryRecord[] = [];
+    for (const e of parsed) {
+      if (!e || typeof e !== 'object') continue;
+      const r = e as Partial<HistoryRecord>;
+      if (typeof r.id !== 'string' || typeof r.pageUrl !== 'string' || !Array.isArray(r.items)) {
+        continue;
+      }
+      out.push({
+        id: r.id,
+        createdAt: typeof r.createdAt === 'number' ? r.createdAt : Date.now(),
+        pageUrl: r.pageUrl,
+        title: typeof r.title === 'string' ? r.title : undefined,
+        items: r.items as SniffedMedia[],
+        options: (r.options && typeof r.options === 'object' ? r.options : DEFAULT_OPTIONS) as ProcessOptions,
+        outputDir: typeof r.outputDir === 'string' ? r.outputDir : undefined,
+        outputsByTaskId:
+          r.outputsByTaskId && typeof r.outputsByTaskId === 'object'
+            ? (r.outputsByTaskId as Record<string, string[]>)
+            : {},
+        taskStatus:
+          r.taskStatus && typeof r.taskStatus === 'object'
+            ? (r.taskStatus as Record<string, TaskStatus>)
+            : {}
+      });
+    }
+    return out;
   } catch {
     return [];
   }
@@ -98,8 +119,16 @@ function writeAll(list: HistoryRecord[]): void {
   try {
     window.localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(list));
   } catch {
-    // QuotaExceeded etc. — silently drop, the in-memory copy is still
-    // authoritative for this session.
+    // QuotaExceeded / TypeError on circular refs etc. — silently drop.
+    // Best-effort recovery: nuke the key once so the next setItem with
+    // an even smaller list has a clean slate.
+    try {
+      window.localStorage.removeItem(HISTORY_STORAGE_KEY);
+      window.localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(list));
+    } catch {
+      // Truly out of room or storage disabled (privacy mode); the
+      // in-memory copy is still authoritative for this session.
+    }
   }
 }
 
@@ -116,6 +145,16 @@ export interface UseHistoryApi {
   remove(id: string): void;
   /** Wipe everything (with the user's confirmation in the UI). */
   clear(): void;
+  /** R-34 — force-resync from localStorage.
+   *  Use case: the history tab is opened and the user expects to see
+   *  the *current* truth, including any (a) in-flight progress that
+   *  the 250ms debounce hasn't flushed yet, and (b) external mutations
+   *  from another renderer/tab/window that wrote to the same key.
+   *  We flush our in-memory state to disk first so we never overwrite
+   *  newer-in-memory rows with stale-on-disk rows, then we reread.
+   *  If readback === current, we skip the setState to avoid a wasted
+   *  re-render. */
+  reload(): void;
 }
 
 /**
@@ -125,16 +164,18 @@ export interface UseHistoryApi {
  */
 export function useHistory(): UseHistoryApi {
   const [history, setHistory] = useState<HistoryRecord[]>(() => readAll());
-  // Latest snapshot for closure-stable mutators.
-  const ref = useRef(history);
-  useEffect(() => { ref.current = history; }, [history]);
 
-  // Persist on any change. We don't debounce here because state
-  // updates already coalesce within React's batching window for normal
-  // UI events; the heavy progress stream goes through `patch` which
-  // does its own batching via setState's functional form.
+  // R-27 (post-review): debounce persistence so a high-frequency
+  // progress stream doesn't synchronously hit localStorage.setItem on
+  // every emit. setItem on a 30-record blob is ~tens of KB synchronous
+  // disk write that competes with the renderer's main thread; a 250ms
+  // trailing-edge debounce gives ~4 writes/sec at most while still
+  // surviving an unexpected reload (the next mount reads back from
+  // disk; in-flight changes within 250ms of a crash are accepted as
+  // lost — history is a convenience feature, never a hard dependency).
   useEffect(() => {
-    writeAll(history);
+    const t = setTimeout(() => writeAll(history), 250);
+    return () => clearTimeout(t);
   }, [history]);
 
   const pushOrReplace = useCallback((rec: HistoryRecord): string => {
@@ -177,7 +218,47 @@ export function useHistory(): UseHistoryApi {
     setHistory([]);
   }, []);
 
-  return { history, pushOrReplace, patch, remove, clear };
+  const reload = useCallback((): void => {
+    // R-34 — implemented inside a functional setHistory so the
+    // updater's `prev` is guaranteed to be the most recent state
+    // React knows about, even when reload is called in the same act
+    // batch as a previous setHistory call. Capturing `history` from
+    // the surrounding closure (or via a useEffect-synced ref) would
+    // observe a stale snapshot in that scenario.
+    //
+    // Two real-world scenarios drive the merge logic:
+    //
+    //   A. EXTERNAL writer (another renderer / window) updated the
+    //      key while we were mounted. Disk is the freshest source of
+    //      truth — adopt it.
+    //
+    //   B. IN-MEMORY state is newer than disk because the 250ms
+    //      debounce hasn't fired yet (e.g. the user clicks 历史
+    //      immediately after a progress emit). Adopting disk here
+    //      would drop the in-flight update. We instead flush memory
+    //      to disk and keep the same state object.
+    //
+    // Heuristic: if disk has at least one record that the in-memory
+    // list lacks (by id), we treat that as evidence of an external
+    // write and adopt disk wholesale. Otherwise we trust memory and
+    // flush it through. This keeps the API a no-op for the common
+    // single-renderer case while still surfacing external changes.
+    setHistory((prev) => {
+      const fresh = readAll();
+      const prevIds = new Set(prev.map((r) => r.id));
+      const diskHasNewIds = fresh.some((r) => !prevIds.has(r.id));
+      if (!diskHasNewIds) {
+        // Memory is at least as fresh as disk — flush and return prev
+        // so React skips the re-render.
+        writeAll(prev);
+        return prev;
+      }
+      // Disk had ids we've never seen — treat as authoritative.
+      return fresh;
+    });
+  }, []);
+
+  return { history, pushOrReplace, patch, remove, clear, reload };
 }
 
 /**
@@ -194,10 +275,35 @@ export function mergeProgressIntoRecord(
     Array.isArray(p.outputs) && p.outputs.length > 0
       ? Array.from(new Set([...prevOutputs, ...p.outputs]))
       : prevOutputs;
-  // Status only ever moves "forward" toward a terminal state; we don't
-  // want a late-arriving 'compressing' to overwrite a previous 'done'.
+  // R-27 #2 (post-review): once a task reaches ANY terminal status
+  // (done / failed / cancelled / skipped) we freeze the value — this
+  // includes terminal-over-terminal writes, e.g. a `cancelAll` sweep
+  // racing in after a `done` emit MUST NOT downgrade the row.
   const TERMINAL: TaskStatus[] = ['done', 'failed', 'cancelled', 'skipped'];
   const prevStatus = rec.taskStatus[p.taskId];
+  // R-29 (P1-G): skip writing a brand-new `pending` row into the
+  // record. Reasoning: the renderer seeds `pending` rows in the
+  // *transient* progress map for instant TaskTable feedback (R-28
+  // #3), but the persisted history record is the long-term truth and
+  // a `pending` taskStatus that never advances (e.g. user cancels
+  // before main starts the task, or main rejects with `busy`) would
+  // leave the history row permanently in "pending" with no way to
+  // recover. We accept `pending` only when there's already a
+  // (non-terminal) prior status to overwrite — which means main has
+  // really started emitting for this task. First-write `pending` is
+  // dropped; the next non-pending emit (`running` / a terminal) will
+  // become the first persisted status.
+  if (prevStatus === undefined && p.status === 'pending') {
+    if (nextOutputs === prevOutputs) {
+      // Nothing meaningful to record yet — keep the record untouched
+      // so React skips the re-render.
+      return rec;
+    }
+    return {
+      ...rec,
+      outputsByTaskId: { ...rec.outputsByTaskId, [p.taskId]: nextOutputs }
+    };
+  }
   const nextStatus =
     prevStatus && TERMINAL.includes(prevStatus) ? prevStatus : p.status;
   return {

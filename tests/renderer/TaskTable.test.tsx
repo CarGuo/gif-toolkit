@@ -138,6 +138,26 @@ describe('TaskTable empty state', () => {
     render(<TaskTable items={[mkMedia('a')]} progress={{}} />);
     expect(screen.getByText(/任务列表/)).toBeTruthy();
   });
+
+  // R-28 #3 — when App seeds a `pending` row immediately on dispatch,
+  // the table must render the row right away (no longer empty), with
+  // a 0% bar and the "已加入队列" message. This is the visible
+  // contract that fixes the user's "批量处理时,有已解析的视频,它
+  // 应该立刻出现在进度列表里" complaint.
+  it('renders a pending row immediately with 0% bar and queued message', () => {
+    const m = mkMedia('a');
+    const progress = {
+      a: { taskId: 'a', status: 'pending' as const, percent: 0, message: '已加入队列' }
+    };
+    render(<TaskTable items={[m]} progress={progress} />);
+    // Empty placeholder is gone.
+    expect(screen.queryByText(/开始批处理后这里会出现进度/)).toBeNull();
+    // Message visible.
+    expect(screen.getByText(/已加入队列/)).toBeInTheDocument();
+    // Bar at 0%.
+    const bar = document.querySelector('.bar') as HTMLElement;
+    expect(bar.style.width).toBe('0%');
+  });
 });
 
 /**
@@ -224,5 +244,109 @@ describe('TaskTable R-26 force-allow vs retry split', () => {
     );
     expect(screen.queryByRole('button', { name: /强制允许/ })).toBeNull();
     expect(screen.queryByRole('button', { name: /^重试$/ })).toBeNull();
+  });
+});
+
+describe('TaskTable manual-optimize button (R-33)', () => {
+  it('renders 手动优化 only on done rows whose warning indicates over-target', () => {
+    const items = [mkMedia('a'), mkMedia('b'), mkMedia('c'), mkMedia('d')];
+    const progress = {
+      a: mkProgress('a', 'done', { warning: 'final size 8.2MB exceeds hard target 5.0MB' }),
+      b: mkProgress('b', 'done', { warning: 'did not reach soft target 1.5MB; saved at 3.2MB' }),
+      c: mkProgress('c', 'done'), // no warning -> no button
+      d: mkProgress('d', 'failed', { warning: 'exceeds hard target' }) // not done -> no button
+    };
+    render(
+      <TaskTable
+        items={items}
+        progress={progress}
+        onManualOptimize={vi.fn()}
+      />
+    );
+    expect(screen.getAllByRole('button', { name: /手动优化/ })).toHaveLength(2);
+  });
+
+  it('does not render 手动优化 when onManualOptimize is missing', () => {
+    const items = [mkMedia('a')];
+    const progress = {
+      a: mkProgress('a', 'done', { warning: 'final size 8.2MB exceeds hard target 5.0MB' })
+    };
+    render(<TaskTable items={items} progress={progress} />);
+    expect(screen.queryByRole('button', { name: /手动优化/ })).toBeNull();
+  });
+
+  it('calls onManualOptimize with media + progress when clicked', () => {
+    const m = mkMedia('a');
+    const p = mkProgress('a', 'done', { warning: 'exceeds hard target', currentSizeMB: 7.3 });
+    const cb = vi.fn();
+    render(<TaskTable items={[m]} progress={{ a: p }} onManualOptimize={cb} />);
+    fireEvent.click(screen.getByRole('button', { name: /手动优化/ }));
+    expect(cb).toHaveBeenCalledTimes(1);
+    expect(cb).toHaveBeenCalledWith(m, expect.objectContaining({ warning: 'exceeds hard target' }));
+  });
+});
+
+// R-43.2 — per-row cancel button. Visible only while the task is in a
+// non-terminal status; firing onCancelOne disables the button to absorb
+// double-clicks while the IPC round-trip is in flight.
+describe('TaskTable per-row cancel button (R-43.2)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('shows ✕ 取消 only for non-terminal rows', () => {
+    const m1 = mkMedia('running');
+    const m2 = mkMedia('done');
+    const m3 = mkMedia('failed');
+    const m4 = mkMedia('cancelled');
+    render(
+      <TaskTable
+        items={[m1, m2, m3, m4]}
+        progress={{
+          running: mkProgress('running', 'compressing'),
+          done: mkProgress('done', 'done', { percent: 100 }),
+          failed: mkProgress('failed', 'failed', { error: 'boom' }),
+          cancelled: mkProgress('cancelled', 'cancelled', { percent: 100 })
+        }}
+        onCancelOne={vi.fn()}
+      />
+    );
+    const cancelBtns = screen.getAllByRole('button', { name: '取消任务' });
+    expect(cancelBtns).toHaveLength(1);
+  });
+
+  it('does not render ✕ 取消 when onCancelOne is omitted (read-only view)', () => {
+    const m = mkMedia('a');
+    render(
+      <TaskTable
+        items={[m]}
+        progress={{ a: mkProgress('a', 'compressing') }}
+      />
+    );
+    expect(screen.queryByRole('button', { name: '取消任务' })).toBeNull();
+  });
+
+  it('calls onCancelOne with the matching media; double-click is absorbed', async () => {
+    const m = mkMedia('a');
+    let resolve: (() => void) | null = null;
+    const cb = vi.fn().mockImplementation(
+      () => new Promise<void>((r) => { resolve = r; })
+    );
+    render(
+      <TaskTable
+        items={[m]}
+        progress={{ a: mkProgress('a', 'compressing') }}
+        onCancelOne={cb}
+      />
+    );
+    const btn = screen.getByRole('button', { name: '取消任务' });
+    fireEvent.click(btn);
+    fireEvent.click(btn);
+    expect(cb).toHaveBeenCalledTimes(1);
+    expect(cb).toHaveBeenCalledWith(m);
+    resolve!();
   });
 });

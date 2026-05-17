@@ -52,6 +52,16 @@ beforeEach(() => {
   window.localStorage.clear();
 });
 
+// R-27 (post-review): the persistence effect now debounces writes by
+// 250ms so a flood of progress events doesn't thrash localStorage.
+// Tests that assert "raw storage shape" or "fresh hook re-hydrates"
+// must therefore advance past 250ms before peeking at storage.
+async function flushPersist(): Promise<void> {
+  await act(async () => {
+    await new Promise((res) => setTimeout(res, 260));
+  });
+}
+
 describe('makeHistoryRecord', () => {
   it('produces a record with empty maps and the provided id/timestamp', () => {
     const r = rec('a', 1000);
@@ -127,6 +137,26 @@ describe('mergeProgressIntoRecord', () => {
     } as TaskProgress);
     expect(r.outputsByTaskId['m-1']).toEqual(['/out/a.gif']);
   });
+
+  it('does NOT let one terminal overwrite another (done then cancelled stays done)', () => {
+    // R-27 (post-review #4.2): cancelAll cleanup races emit a terminal
+    // 'cancelled' AFTER a real 'done' for the same task. The merge MUST
+    // preserve the original terminal value so completed work isn't
+    // visually downgraded.
+    let r = rec('a', 1000);
+    r = mergeProgressIntoRecord(r, {
+      taskId: 'm-1',
+      status: 'done',
+      percent: 100,
+      outputs: ['/out/a.gif']
+    } as TaskProgress);
+    r = mergeProgressIntoRecord(r, {
+      taskId: 'm-1',
+      status: 'cancelled',
+      percent: 100
+    } as TaskProgress);
+    expect(r.taskStatus['m-1']).toBe('done');
+  });
 });
 
 describe('useHistory hook', () => {
@@ -167,12 +197,13 @@ describe('useHistory hook', () => {
     expect(result.current.history.find((r) => r.id === 'r-0')).toBeUndefined();
   });
 
-  it('persists to localStorage and re-hydrates on a fresh hook instance', () => {
+  it('persists to localStorage and re-hydrates on a fresh hook instance', async () => {
     const first = renderHook(() => useHistory());
     act(() => {
       first.result.current.pushOrReplace(rec('a', 1000));
       first.result.current.pushOrReplace(rec('b', 2000));
     });
+    await flushPersist();
     // Confirm raw storage shape.
     const raw = window.localStorage.getItem(HISTORY_STORAGE_KEY);
     expect(raw).toBeTruthy();
@@ -195,7 +226,7 @@ describe('useHistory hook', () => {
     expect(b?.outputDir).toBeUndefined();
   });
 
-  it('remove drops just the targeted record; clear wipes all', () => {
+  it('remove drops just the targeted record; clear wipes all', async () => {
     const { result } = renderHook(() => useHistory());
     act(() => {
       result.current.pushOrReplace(rec('a', 1000));
@@ -205,6 +236,7 @@ describe('useHistory hook', () => {
     expect(result.current.history.map((r) => r.id)).toEqual(['b']);
     act(() => result.current.clear());
     expect(result.current.history).toEqual([]);
+    await flushPersist();
     expect(window.localStorage.getItem(HISTORY_STORAGE_KEY)).toBe('[]');
   });
 
@@ -220,5 +252,54 @@ describe('useHistory hook', () => {
     );
     const { result } = renderHook(() => useHistory());
     expect(result.current.history.map((r) => r.id)).toEqual(['good']);
+  });
+
+  // R-34 — reload() force-resyncs from localStorage.
+  // Two scenarios matter:
+  //   1. an EXTERNAL writer (another renderer/window) has updated the
+  //      key while this hook was mounted — reload picks up the change;
+  //   2. the IN-MEMORY state is newer than disk (debounce hasn't
+  //      fired yet) — reload flushes first so disk is at least as
+  //      fresh as memory before reading back, ensuring no data loss.
+  it('reload picks up external writes that happened after mount', async () => {
+    const { result } = renderHook(() => useHistory());
+    act(() => {
+      result.current.pushOrReplace(rec('a', 1000));
+    });
+    await flushPersist();
+    // External writer drops in a brand-new record + drops 'a'.
+    const externalRec = {
+      id: 'x',
+      pageUrl: 'https://x.test/p',
+      title: 't-x',
+      items: [],
+      createdAt: 9999,
+      options: DEFAULT_OPTIONS,
+      outputsByTaskId: {},
+      taskStatus: {}
+    };
+    window.localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify([externalRec]));
+    // Sanity: in-memory is still 'a' until reload.
+    expect(result.current.history.map((r) => r.id)).toEqual(['a']);
+    act(() => result.current.reload());
+    expect(result.current.history.map((r) => r.id)).toEqual(['x']);
+  });
+
+  it('reload flushes pending in-memory state before re-reading', () => {
+    // We do NOT awaitflushPersist here — the debounce is still in
+    // flight when we call reload. Without the writeAll-first step
+    // inside reload, the readAll would observe an empty key and
+    // overwrite our brand-new in-memory record.
+    const { result } = renderHook(() => useHistory());
+    act(() => {
+      result.current.pushOrReplace(rec('a', 1000));
+      // No flushPersist; debounce hasn't fired.
+      result.current.reload();
+    });
+    expect(result.current.history.map((r) => r.id)).toEqual(['a']);
+    // Disk should now also have it (reload's flush wrote it through).
+    const raw = window.localStorage.getItem(HISTORY_STORAGE_KEY);
+    expect(raw).toBeTruthy();
+    expect(JSON.parse(raw as string).map((r: { id: string }) => r.id)).toEqual(['a']);
   });
 });

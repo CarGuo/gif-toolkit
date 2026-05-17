@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import type { SniffedMedia, ThumbnailResult } from '../../shared/types';
+import type { SniffedMedia, ThumbnailResult, TaskStatus } from '../../shared/types';
 
 interface Props {
   items: SniffedMedia[];
@@ -17,6 +17,14 @@ interface Props {
   isResolving?: (id: string) => boolean;
   /** Per-item resolve error message (sticky until retry). */
   resolveErrorMap?: Record<string, string>;
+  /** R-30 #3: per-task processing status. When supplied (history
+   *  detail modal does), each card paints a small chip on the
+   *  bottom-right of the thumbnail so the user can see at a glance
+   *  whether a given item succeeded / failed / is still running.
+   *  The home view leaves this undefined — the home TaskTable below
+   *  the grid already shows the same data, so a second indicator
+   *  would be redundant. */
+  taskStatusMap?: Record<string, TaskStatus>;
 }
 
 function fmtBytes(n?: number): string {
@@ -101,7 +109,10 @@ const ResolvingChip: React.FC<{ host?: string }> = ({ host }) => {
   );
 };
 
-const Thumb: React.FC<{ media: SniffedMedia }> = ({ media }) => {
+/** Lazy-loading thumbnail fetcher. Exported so HistoryPanel (R-30 #2)
+ *  can reuse the exact same IPC + IntersectionObserver path for its
+ *  per-record cover image without re-implementing the protocol. */
+export const Thumb: React.FC<{ media: SniffedMedia }> = ({ media }) => {
   const [state, setState] = useState<ThumbState>({ status: 'idle' });
   const ref = useRef<HTMLDivElement | null>(null);
 
@@ -186,7 +197,7 @@ const Thumb: React.FC<{ media: SniffedMedia }> = ({ media }) => {
   );
 };
 
-export const MediaGrid: React.FC<Props> = ({ items, selected, onToggle, onOpen, onProcessOne, isProcessing, onRetryResolve, isResolving, resolveErrorMap }) => {
+export const MediaGrid: React.FC<Props> = ({ items, selected, onToggle, onOpen, onProcessOne, isProcessing, onRetryResolve, isResolving, resolveErrorMap, taskStatusMap }) => {
   if (items.length === 0) {
     return (
       <div className="media-grid empty">
@@ -240,13 +251,78 @@ export const MediaGrid: React.FC<Props> = ({ items, selected, onToggle, onOpen, 
             <div className="card-thumb-wrap">
               <Thumb media={m} />
               <span className={`badge ${m.kind} card-badge`}>{m.kind}</span>
+              {/* R-30 #3: per-task status chip on the bottom-right
+                  of the thumbnail. Only rendered when the parent
+                  passes a taskStatusMap (history detail modal) and
+                  this item has an entry in it. The "in-flight"
+                  bucket covers every non-terminal status so the
+                  user sees a single rotating indicator while a job
+                  is running rather than 5 different glyphs as it
+                  walks through downloading/segmenting/converting/
+                  compressing. */}
+              {(() => {
+                const st = taskStatusMap?.[m.id];
+                if (!st) return null;
+                if (st === 'done') {
+                  return (
+                    <span className="card-status-chip done" title="处理成功" aria-label="done">
+                      ✓
+                    </span>
+                  );
+                }
+                if (st === 'failed') {
+                  return (
+                    <span className="card-status-chip failed" title="处理失败" aria-label="failed">
+                      ✗
+                    </span>
+                  );
+                }
+                if (st === 'cancelled') {
+                  return (
+                    <span className="card-status-chip cancelled" title="已取消" aria-label="cancelled">
+                      ⊘
+                    </span>
+                  );
+                }
+                if (st === 'skipped') {
+                  return (
+                    <span className="card-status-chip skipped" title="已跳过" aria-label="skipped">
+                      –
+                    </span>
+                  );
+                }
+                // pending / downloading / probing / segmenting /
+                // converting / compressing — collapse into one
+                // rotating chip.
+                return (
+                  <span
+                    className="card-status-chip running"
+                    title={`处理中 · ${st}`}
+                    aria-label="running"
+                  >
+                    <span className="card-status-spinner" aria-hidden />
+                  </span>
+                );
+              })()}
               <label
                 className="card-check"
                 onClick={(e) => e.stopPropagation()}
+                title={
+                  isEmbed && !isResolved
+                    ? (resolving
+                        ? '解析中,完成后会自动勾选'
+                        : '该 embed 未解析直链,无法勾选(等解析完成或点击 ↻ 重试)')
+                    : undefined
+                }
               >
                 <input
                   type="checkbox"
                   checked={isSel}
+                  // F1 (post R-27): embed videos cannot be ticked until
+                  // yt-dlp returns a resolved direct URL. Disabling here
+                  // (in tandem with App.tsx toggleSelected guard) makes
+                  // the affordance match the underlying capability.
+                  disabled={isEmbed && !isResolved}
                   onChange={() => onToggle(m.id)}
                   onClick={(e) => e.stopPropagation()}
                 />

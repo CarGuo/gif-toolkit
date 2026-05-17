@@ -62,6 +62,13 @@ input[type="text"]:focus { border-color: var(--accent); }
   grid-template-rows: 56px 1fr 6px var(--bottom-h, 180px);
   height: 100vh;
 }
+/* R-34 — history view doesn't render the resize handle or bottom panel
+   (TaskTable + LogBox are home-only concepts). Collapse the grid to
+   two rows so the history body claims the full remaining viewport
+   instead of leaving an empty 6px+180px track at the bottom. */
+.app.app-no-bottom {
+  grid-template-rows: 56px 1fr;
+}
 /* Draggable separator between the main body and the bottom panel.
    - 6px tall but with a 1px visible accent line on top for affordance.
    - ns-resize cursor; visual highlight on hover/active.
@@ -119,6 +126,13 @@ input[type="text"]:focus { border-color: var(--accent); }
   overflow: hidden;
   min-height: 0;
 }
+/* R-30 #2: history view replaces the home 360px+1fr two-column
+   layout with a full-width single column so HistoryPanel is no
+   longer compressed into the left sidebar (which was the root cause
+   of the "narrow strip" + "清空历史" wrapping bug). */
+.body-history {
+  grid-template-columns: 1fr;
+}
 .left {
   border-right: 1px solid var(--border);
   display: flex;
@@ -157,8 +171,142 @@ input[type="text"]:focus { border-color: var(--accent); }
   letter-spacing: 0.6px;
   color: var(--muted);
 }
-.url-bar { display: flex; gap: 8px; }
+.url-bar { display: flex; gap: 8px; position: relative; }
 .url-bar input { flex: 1; }
+
+/* R-32 — 解析历史触发按钮 + popover. The popover anchors to the
+   .url-bar (position: relative above) and overlays the rest of the
+   page so it never gets clipped by the section's overflow. */
+.sniff-hist-trigger {
+  flex: 0 0 auto;
+  padding: 0 10px;
+  background: var(--bg-2);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  /* Match the input height visually without locking to a magic
+     number — let the flex container stretch us. */
+  align-self: stretch;
+}
+.sniff-hist-trigger:hover { background: var(--bg-3, var(--bg-2)); }
+.sniff-hist-trigger:disabled { opacity: 0.45; cursor: not-allowed; }
+.sniff-hist-trigger.open { background: var(--accent-bg, var(--bg-3, var(--bg-2))); }
+
+.sniff-hist-popover {
+  position: absolute;
+  /* Drop just under the url-bar row. */
+  top: calc(100% + 6px);
+  right: 0;
+  /* On a wide screen the popover would otherwise stretch to the
+     full url-bar width and look unbalanced; cap it. */
+  width: min(420px, 100%);
+  max-height: 60vh;
+  /* R-41 — `--bg-1` is not a defined design token (we only have --bg
+     and --bg-2). The previous `var(--bg-1)` resolved to `unset` and
+     fell back to transparent, which made the popover appear to bleed
+     through to the form fields underneath. Use the solid `--panel`
+     token (the same one used by every other floating popover/menu in
+     this app) and lift the z-index above sticky form rows. */
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--text);
+}
+.sniff-hist-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.sniff-hist-title { font-weight: 600; }
+.sniff-hist-empty { padding: 16px; text-align: center; font-size: 13px; }
+.sniff-hist-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  flex: 1 1 auto;
+}
+.sniff-hist-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border-faint, var(--border));
+}
+.sniff-hist-row:last-child { border-bottom: none; }
+.sniff-hist-row:hover,
+.sniff-hist-row:focus-visible {
+  background: var(--bg-2);
+  outline: none;
+}
+.sniff-hist-row-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.sniff-hist-row-title {
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sniff-hist-row-url {
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sniff-hist-row-meta {
+  margin-top: 2px;
+  font-size: 11px;
+}
+.sniff-hist-row-remove {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0;
+}
+.sniff-hist-row-remove:hover {
+  background: var(--bg-3, var(--bg-2));
+  color: var(--fg);
+  border-color: var(--border);
+}
+.sniff-hist-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 6px 8px;
+  border-top: 1px solid var(--border);
+}
+.sniff-hist-clear {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+}
+.sniff-hist-clear:hover { color: var(--fg); }
+
 .media-list {
   flex: 1 1 0;
   min-height: 0;
@@ -300,6 +448,23 @@ input[type="text"]:focus { border-color: var(--accent); }
   color: var(--muted);
 }
 .options input { width: 100%; }
+.options .opt-skip-compress {
+  grid-column: 1 / -1;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+.options .opt-skip-compress input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+  cursor: pointer;
+}
+.options .opt-skip-compress span {
+  flex: 1;
+  color: var(--text);
+}
 
 .preview-pane {
   flex: 1;
@@ -340,6 +505,17 @@ input[type="text"]:focus { border-color: var(--accent); }
 .grid-tip {
   color: var(--muted);
   font-size: 11.5px;
+  flex: 1;
+  min-width: 0;
+}
+/* R-30 #1: 「打开目录」relocated from titlebar to grid-header.
+   Right-aligned via flex:1 on .grid-tip above; matches the
+   .hist-open-dir size so the two button styles in the app are
+   consistent. */
+.grid-open-dir {
+  padding: 4px 12px;
+  font-size: 12px;
+  flex-shrink: 0;
 }
 .grid-scroll {
   flex: 1 1 0;
@@ -411,6 +587,57 @@ input[type="text"]:focus { border-color: var(--accent); }
   top: 8px;
   left: 8px;
   margin: 0;
+}
+/* R-30 #3: per-task status chip pinned to the bottom-left of the
+   thumbnail so it stays clear of .card-check (top-right) and
+   .card-process-btn (bottom-right). The chip is round + 22px so
+   it reads as a status indicator, not a label. */
+.card-status-chip {
+  position: absolute;
+  bottom: 8px;
+  left: 8px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.55);
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+  z-index: 1;
+}
+.card-status-chip.done {
+  background: var(--good);
+  color: #0b1220;
+}
+.card-status-chip.failed {
+  background: var(--bad);
+  color: #fff;
+}
+.card-status-chip.cancelled {
+  background: rgba(120, 130, 150, 0.85);
+}
+.card-status-chip.skipped {
+  background: rgba(120, 130, 150, 0.6);
+}
+.card-status-chip.running {
+  background: rgba(91, 141, 239, 0.85);
+}
+.card-status-spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+  animation: card-status-spin 0.9s linear infinite;
+}
+@keyframes card-status-spin {
+  to { transform: rotate(360deg); }
 }
 .card-check {
   position: absolute;
@@ -971,9 +1198,44 @@ input[type="text"]:focus { border-color: var(--accent); }
   border-top: 1px solid var(--border);
   background: var(--bg-2);
   display: grid;
-  grid-template-columns: 1fr 240px;
+  /* R-43.1 — 改为行布局:工具栏(自适应) / TaskTable(填满) / LogBox(自适应)
+     原先的 `1fr 240px` 双栏把 LogBox 钉在底部右侧,挤占 TaskTable 视觉
+     空间。新布局让 TaskTable 默认拥有底部面板的全部宽度。 */
+  grid-template-rows: auto 1fr auto;
+  grid-template-columns: 1fr;
   height: 100%;
   overflow: hidden;
+}
+.bottom-no-logs {
+  /* 用户折叠了日志面板:第三行尺寸归零(LogBox 已条件性卸载,这里
+     只是在隐藏过渡阶段保险地不预留空间)。 */
+  grid-template-rows: auto 1fr 0;
+}
+.bottom-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--bg-2);
+}
+.bottom-toolbar-title {
+  font-weight: 500;
+}
+.bottom-toolbar .ghost {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  padding: 2px 8px;
+  font-size: 11px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.bottom-toolbar .ghost:hover {
+  background: var(--panel);
+  color: var(--text);
 }
 .tasks {
   overflow-y: auto;
@@ -1032,6 +1294,13 @@ input[type="text"]:focus { border-color: var(--accent); }
   border-color: var(--accent);
   color: #fff;
 }
+/* R-43.2 — per-row cancel button: 用红色 hover 提示这是一个破坏性
+   操作,与重试 / 强制允许的中性 hover 区分开。 */
+.task .retry-btn.cancel-btn:hover:not(:disabled) {
+  background: var(--danger, #b04141);
+  border-color: var(--danger, #b04141);
+  color: #fff;
+}
 .task .size { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 11.5px; text-align: right; }
 .task-warn {
   color: var(--warn);
@@ -1048,7 +1317,9 @@ input[type="text"]:focus { border-color: var(--accent); }
 
 .logbox {
   background: black;
-  border-left: 1px solid var(--border);
+  /* R-43.1 — 从右侧 240px 边栏改为底部抽屉:用顶 border + max-height
+     约束高度,grid 行布局会自动从 TaskTable 下方推出来。 */
+  border-top: 1px solid var(--border);
   font-family: ui-monospace, Menlo, Consolas, monospace;
   font-size: 11px;
   color: #b6c1d4;
@@ -1056,6 +1327,7 @@ input[type="text"]:focus { border-color: var(--accent); }
   overflow-y: auto;
   white-space: pre-wrap;
   line-height: 1.4;
+  max-height: 160px;
 }
 
 .notice {
@@ -1101,15 +1373,148 @@ input[type="text"]:focus { border-color: var(--accent); }
   color: var(--bad);
   background: transparent;
   border: 1px solid rgba(239, 91, 110, 0.4);
+  /* R-30 #4: keep the label on a single line. The original 360px
+     sidebar layout truncated this button into "清空历/史"; the
+     fundamental fix is the full-width body in history view, but a
+     belt-and-suspenders nowrap means even a future narrow layout
+     won't regress this. */
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .hist-clear:hover {
   background: rgba(239, 91, 110, 0.12);
 }
 
-.hist-list {
+/* R-30 #2: replace the old .hist-list single-column rows with a
+   responsive auto-fill grid of large cards. minmax(260px, 1fr) gives
+   ~3 cards/row on a 1280-wide window, ~5 on a 1920 window. */
+.hist-grid {
   flex: 1;
   overflow-y: auto;
-  padding: 8px;
+  padding: 16px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 14px;
+  align-content: start;
+}
+
+.hist-card {
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  cursor: pointer;
+  transition: border-color 120ms ease, transform 120ms ease;
+}
+.hist-card:hover {
+  border-color: rgba(91, 141, 239, 0.4);
+}
+.hist-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.hist-card-cover {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  background: var(--bg-2);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+/* R-34 — fixed decorative cover.
+   Replaces the previous Thumb/poster pipeline. The cover is now a
+   subtle gradient panel with a centred film-strip icon — the visual
+   weight is intentionally low so the eye lands on the title + URL +
+   timestamp instead. */
+.hist-card-cover-fixed {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background:
+    linear-gradient(135deg, rgba(91, 141, 239, 0.08), rgba(91, 141, 239, 0.18)),
+    var(--bg-2);
+  color: rgba(91, 141, 239, 0.55);
+}
+.hist-card-cover-icon {
+  width: 48px;
+  height: 48px;
+  opacity: 0.85;
+}
+.hist-card-count-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  border-radius: 999px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.hist-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px 8px;
+  flex: 1;
+  min-width: 0;
+}
+.hist-card-title {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.hist-card-url {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hist-card-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 11.5px;
+  flex-wrap: wrap;
+}
+.hist-card-stats {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-variant-numeric: tabular-nums;
+}
+.hist-card-stats .hist-done { color: var(--good); }
+.hist-card-stats .hist-failed { color: var(--bad); }
+.hist-card-stats .muted { color: var(--muted); }
+
+.hist-card-actions {
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px 10px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-2);
+}
+.hist-card-actions button {
+  flex: 1;
+  padding: 5px 8px;
+  font-size: 11.5px;
+  white-space: nowrap;
 }
 
 .hist-row {
@@ -1118,9 +1523,26 @@ input[type="text"]:focus { border-color: var(--accent); }
   background: var(--panel);
   margin-bottom: 8px;
   overflow: hidden;
+  display: flex;
+  align-items: stretch;
 }
 .hist-row.expanded {
   background: var(--panel-2);
+}
+/* R-28 #2: per-row inline actions (打开目录 / 删除) replace the
+   removed expand-body toolbar — they sit on the right of the row
+   head and never trigger the row's onClick. */
+.hist-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--border);
+}
+.hist-row-actions button {
+  font-size: 11px;
+  padding: 4px 8px;
 }
 
 .hist-row-head {
@@ -1329,3 +1751,909 @@ input[type="text"]:focus { border-color: var(--accent); }
   color: var(--text);
   border-color: var(--border);
 }
+
+/* R-28 #2 — HistoryDetailModal layout. The modal body has a flex
+   column with the home-page-like 2-column body on top and the
+   TaskTable + LogBox stack at the bottom. We override .modal default
+   sizing so the layout fills the available height of the modal. */
+.hist-detail-mask .modal.hist-detail-modal {
+  width: min(96vw, 1600px);
+  height: min(94vh, 1100px);
+}
+.hist-detail-modal .layout {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  gap: 12px;
+  padding: 12px;
+}
+.hist-detail-modal .layout > .left {
+  flex: 0 0 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+}
+.hist-detail-modal .layout > .right {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.hist-detail-modal .grid-pane {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.hist-detail-modal .grid-scroll {
+  flex: 1 1 auto;
+  overflow-y: auto;
+}
+.hist-detail-bottom {
+  flex: 0 0 220px;
+  display: flex;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  min-height: 0;
+}
+.hist-detail-bottom > .tasks {
+  flex: 2;
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+}
+.hist-detail-bottom > .logs {
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* R-33 — manual two-stage optimize modal */
+.manual-opt-modal {
+  background: #1c1f26;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.55);
+  width: min(92vw, 520px);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.manual-opt-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+}
+.manual-opt-header h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+.manual-opt-close {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 22px;
+  line-height: 1;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  cursor: pointer;
+  border-radius: 6px;
+}
+.manual-opt-close:hover {
+  background: var(--panel-2);
+  color: var(--text);
+}
+.manual-opt-body {
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+}
+.manual-opt-title {
+  font-size: 12.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.manual-opt-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.manual-opt-meta strong {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+}
+.manual-opt-warn {
+  color: #f6a623;
+  font-size: 11.5px;
+  flex-basis: 100%;
+}
+.manual-opt-presets {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.preset-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 8px 10px;
+  text-align: left;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: 0.12s ease;
+}
+.preset-chip:hover {
+  background: #2c3140;
+}
+.preset-chip.active {
+  border-color: var(--accent);
+  background: rgba(120, 144, 255, 0.12);
+}
+.preset-chip .preset-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.preset-chip .preset-hint {
+  font-size: 11px;
+  color: var(--muted);
+}
+.manual-opt-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+}
+.manual-opt-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.manual-opt-fields input { width: 100%; }
+.manual-opt-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--border);
+}
+
+/* ======================================================================
+   R-35 — Toolbox panel
+   ====================================================================== */
+
+.body-toolbox {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.toolbox {
+  display: grid;
+  grid-template-rows: auto auto auto 1fr auto;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.tb-header {
+  padding: 16px 20px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-2);
+}
+
+.tb-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tb-subtitle {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.tb-chip {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  padding: 7px 14px;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.tb-chip:hover:not(:disabled) {
+  background: var(--panel-2);
+  border-color: var(--accent);
+}
+
+.tb-chip.is-active {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  border-color: transparent;
+  color: #fff;
+  box-shadow: 0 4px 14px rgba(91, 141, 239, 0.25);
+}
+
+.tb-chip:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.tb-dropzone {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 14px 20px 6px;
+  padding: 18px 20px;
+  border: 1.5px dashed var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.tb-dropzone:hover {
+  border-color: var(--accent);
+  background: var(--panel-2);
+}
+
+.tb-dropzone-icon {
+  font-size: 28px;
+  filter: grayscale(0.1);
+  opacity: 0.85;
+}
+
+.tb-dropzone-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.tb-dropzone-text strong {
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.tb-pick-btn {
+  appearance: none;
+  border: 1px solid var(--accent);
+  color: #fff;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  padding: 9px 22px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  box-shadow: 0 2px 8px rgba(91, 141, 239, 0.25);
+  transition: filter 120ms ease, transform 60ms ease;
+}
+
+.tb-pick-btn:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.tb-pick-btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.tb-pick-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.tb-notice {
+  margin: 4px 20px 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  border: 1px solid transparent;
+}
+
+.tb-notice-error {
+  background: rgba(239, 68, 68, 0.1);
+  border-color: rgba(239, 68, 68, 0.4);
+  color: #fca5a5;
+}
+
+.tb-body {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 0;
+  margin: 12px 20px 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  min-height: 0;
+  background: var(--bg-2);
+}
+
+.tb-jobs {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--border);
+  background: var(--bg-2);
+}
+
+.tb-jobs-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--panel);
+}
+
+.tb-link {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0;
+}
+
+.tb-link:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.tb-link:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.tb-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  padding: 32px 24px;
+}
+
+.tb-empty-art {
+  font-size: 44px;
+  opacity: 0.45;
+}
+
+.tb-empty-title {
+  font-size: 14px;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.tb-empty-hint {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.tb-job-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  overflow: auto;
+}
+
+.tb-job-row {
+  display: grid;
+  grid-template-columns: 56px 1fr 160px 140px 50px 32px;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border);
+  transition: background 120ms ease;
+}
+
+.tb-job-row:last-child {
+  border-bottom: none;
+}
+
+.tb-job-row:hover {
+  background: var(--panel);
+}
+
+.tb-job-row.is-done { background: rgba(34, 197, 94, 0.08); }
+.tb-job-row.is-failed { background: rgba(239, 68, 68, 0.08); }
+.tb-job-row.is-cancelled { background: rgba(156, 163, 175, 0.08); }
+.tb-job-row.is-skipped { background: rgba(234, 179, 8, 0.08); }
+
+/* R-39 — per-row thumbnail column. Fixed 48x48 box that hosts either
+   the first-frame preview img or a placeholder emoji while the probe is
+   in flight. The img uses object-fit:cover so wide videos still fill
+   the square cleanly. */
+.tb-job-thumb {
+  width: 48px;
+  height: 48px;
+  border-radius: 6px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.tb-job-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.tb-job-thumb-fallback {
+  font-size: 22px;
+  opacity: 0.5;
+}
+
+/* R-39 — main info column: filename on top, ezgif-style meta below. */
+.tb-job-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tb-job-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text);
+}
+
+.tb-job-meta {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+
+.tb-job-status {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tb-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+
+.tb-badge-pending {
+  background: var(--panel-2);
+  color: var(--muted);
+  border-color: var(--border);
+}
+
+.tb-badge-running {
+  background: rgba(91, 141, 239, 0.15);
+  color: #a5c0ff;
+  border-color: rgba(91, 141, 239, 0.4);
+}
+
+.tb-badge-done {
+  background: rgba(34, 197, 94, 0.15);
+  color: #86efac;
+  border-color: rgba(34, 197, 94, 0.4);
+}
+
+.tb-badge-failed {
+  background: rgba(239, 68, 68, 0.15);
+  color: #fca5a5;
+  border-color: rgba(239, 68, 68, 0.4);
+}
+
+.tb-badge-cancelled {
+  background: rgba(156, 163, 175, 0.15);
+  color: #d1d5db;
+  border-color: rgba(156, 163, 175, 0.4);
+}
+
+.tb-badge-skipped {
+  background: rgba(234, 179, 8, 0.15);
+  color: #fde68a;
+  border-color: rgba(234, 179, 8, 0.4);
+}
+
+.tb-job-bar {
+  height: 6px;
+  background: var(--panel-2);
+  border-radius: 999px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.tb-job-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width 120ms ease;
+}
+
+.tb-job-pct {
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--muted);
+  text-align: right;
+}
+
+.tb-job-remove {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.tb-job-remove:hover:not(:disabled) {
+  color: #fca5a5;
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.tb-job-remove:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.tb-side {
+  background: var(--panel);
+  padding: 14px 16px;
+  overflow: auto;
+  position: sticky;
+  top: 0;
+  align-self: start;
+  max-height: 100%;
+}
+
+.tb-side-head {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  padding-bottom: 10px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tb-params {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.tb-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tb-field-label {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.tb-field-hint {
+  font-size: 11px;
+  color: var(--muted);
+  opacity: 0.8;
+}
+
+/* R-37 — checkbox row used by Rotate's flipH/flipV. We hijack
+ * `.tb-field-label` to host the inline checkbox + label so the row
+ * still aligns with the rest of the .tb-params grid. */
+.tb-field-check .tb-field-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-weight: 500;
+}
+
+.tb-check {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.tb-input {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--text);
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.tb-input::placeholder {
+  color: var(--muted);
+  opacity: 0.6;
+}
+
+.tb-input:hover {
+  border-color: var(--accent);
+}
+
+.tb-input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+  background: var(--bg);
+}
+
+.tb-select {
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(100% - 14px) calc(50% - 2px), calc(100% - 9px) calc(50% - 2px);
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 28px;
+  cursor: pointer;
+}
+
+.tb-select option {
+  background: var(--panel);
+  color: var(--text);
+}
+
+.tb-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 20px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-2);
+  gap: 8px;
+}
+
+/* R-38 — Crop / Trim helper styles. Lightweight on top of the existing
+   .tb-* design tokens so we don't duplicate spacing/color rules. */
+.tb-info-row {
+  font-size: 12px;
+  color: var(--text);
+  line-height: 1.5;
+}
+.tb-info-row.tb-muted,
+.tb-muted {
+  color: var(--muted);
+}
+.tb-warn {
+  color: #f0a14b;
+  font-size: 12px;
+}
+.tb-crop-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tb-crop-canvas {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  max-width: 100%;
+  max-height: 360px;
+  overflow: hidden;
+}
+.tb-crop-canvas img {
+  max-height: 360px;
+  width: auto;
+}
+.tb-crop-fields {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.tb-footer-left,
+.tb-footer-right {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+/* R-39 — toolbox history section (sits below the action footer). The
+   list is a stack of clickable rows; each row reveals the primary
+   output in OS file manager via window.giftk.revealItem(). */
+.tb-history {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border);
+  background: var(--bg-2);
+  max-height: 260px;
+  overflow: hidden;
+}
+
+.tb-history-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.tb-history-title {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.tb-history-empty {
+  padding: 18px 20px;
+  font-size: 12px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.tb-history-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  overflow: auto;
+}
+
+.tb-history-row {
+  display: grid;
+  grid-template-columns: 1fr 32px;
+  align-items: stretch;
+  border-bottom: 1px solid var(--border);
+  transition: background 120ms ease;
+}
+
+.tb-history-row:last-child {
+  border-bottom: none;
+}
+
+.tb-history-row.is-clickable:hover {
+  background: var(--panel);
+}
+
+.tb-history-row-failed { background: rgba(239, 68, 68, 0.06); }
+.tb-history-row-cancelled { background: rgba(156, 163, 175, 0.06); }
+.tb-history-row-skipped { background: rgba(234, 179, 8, 0.06); }
+
+.tb-history-main {
+  appearance: none;
+  background: transparent;
+  border: none;
+  text-align: left;
+  padding: 8px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  cursor: pointer;
+  color: var(--text);
+  min-width: 0;
+}
+
+.tb-history-main:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.tb-history-line1 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.tb-history-kind {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.tb-history-time {
+  color: var(--muted);
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.tb-history-line2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tb-history-input {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 1;
+  min-width: 0;
+}
+
+.tb-history-arrow {
+  color: var(--muted);
+  opacity: 0.6;
+  flex-shrink: 0;
+}
+
+.tb-history-output {
+  color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 1;
+  min-width: 0;
+}
+
+.tb-history-error {
+  font-size: 11px;
+  color: #fca5a5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tb-history-remove {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0;
+  border-radius: 4px;
+}
+
+.tb-history-remove:hover {
+  color: #fca5a5;
+  background: rgba(239, 68, 68, 0.12);
+}
+
