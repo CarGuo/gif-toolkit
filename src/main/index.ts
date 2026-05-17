@@ -5,6 +5,7 @@ import crypto from 'crypto';
 import { sniffPage } from './sniffer';
 import { openWebviewSniff } from './webviewSniff';
 import { sniffViaSystemChrome, findInstalledBrowsers } from './systemChromeSniff';
+import { sniffViaYtdlp } from './ytdlpDirectSniff';
 import { previewMedia, startBatch, cancelAllTasks, cancelTask, prefetchThumbnail, startToolbox } from './processor';
 import { killAllProcs, probe as probeMedia, extractFrameDataUrl } from './ffmpeg';
 import { log } from './logger';
@@ -617,6 +618,38 @@ ipcMain.handle('sniff:system-chrome', async (_e, url: unknown) => {
     });
   } finally {
     systemChromeSniffInFlight = false;
+    if (currentSniffCtrl === ctrl) currentSniffCtrl = null;
+  }
+});
+
+// R-52 — yt-dlp direct sniff. The third tier (alongside R-44 embedded
+// webview and R-51 real-Chrome+CDP). No webview at all — hand the page
+// URL straight to yt-dlp's 1900+ extractors and return the resolved
+// direct media as a single SniffedMedia. Best for sites where ① is too
+// fragile (Cloudflare) AND ② is too heavy (user just wants the file).
+let ytdlpDirectSniffInFlight = false;
+ipcMain.handle('sniff:ytdlp-direct', async (_e, url: unknown) => {
+  if (ytdlpDirectSniffInFlight) {
+    throw new Error('已经有一个 yt-dlp 直链解析在进行中,请先取消');
+  }
+  const safe = assertHttpUrl(url);
+  if (currentSniffCtrl) {
+    try { currentSniffCtrl.abort(); } catch { /* ignore */ }
+  }
+  const ctrl = new AbortController();
+  currentSniffCtrl = ctrl;
+  ytdlpDirectSniffInFlight = true;
+  try {
+    return await sniffViaYtdlp(safe, {
+      signal: ctrl.signal,
+      onProgress: (p) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('sniff:progress', p);
+        }
+      }
+    });
+  } finally {
+    ytdlpDirectSniffInFlight = false;
     if (currentSniffCtrl === ctrl) currentSniffCtrl = null;
   }
 });

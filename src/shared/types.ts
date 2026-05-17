@@ -28,7 +28,7 @@ export interface SniffedMedia {
   durationSec?: number;
   sizeBytes?: number;
   poster?: string;
-  source: 'video-tag' | 'source-tag' | 'img-tag' | 'og-meta' | 'link' | 'json-ld' | 'pattern' | 'iframe-embed' | 'webview';
+  source: 'video-tag' | 'source-tag' | 'img-tag' | 'og-meta' | 'link' | 'json-ld' | 'pattern' | 'iframe-embed' | 'webview' | 'ytdlp-direct';
   pageUrl: string;
   /** True for embeds (Vimeo / YouTube / etc.) whose underlying media stream
    *  cannot be retrieved via a plain HTTP GET. Renderer should disable the

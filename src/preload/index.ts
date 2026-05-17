@@ -71,6 +71,15 @@ const api = {
   async detectSystemBrowsers(): Promise<Array<{ id: string; label: string; exePath: string }>> {
     return ipcRenderer.invoke('sniff:system-chrome:detect');
   },
+  // R-52 — yt-dlp direct sniff. No webview involved at all; the page URL
+  // is handed straight to yt-dlp's 1900+ extractors. Returns the same
+  // SniffResult shape as the other entries, with a single SniffedMedia
+  // whose `resolved` field is already populated so the renderer can
+  // dispatch it into the processor without an extra resolve step.
+  async sniffWithYtdlpDirect(url: string): Promise<SniffResult> {
+    ensureString(url, 'url');
+    return ipcRenderer.invoke('sniff:ytdlp-direct', url);
+  },
   async preview(media: SniffedMedia, options: ProcessOptions): Promise<PreviewResult> {
     ensureObject(media, 'media');
     ensureObject(options, 'options');

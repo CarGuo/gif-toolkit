@@ -117,20 +117,22 @@ const App: React.FC = () => {
     clear: clearSniffHistory
   } = useSniffHistory();
   const [sniffHistoryOpen, setSniffHistoryOpen] = useState(false);
-  // R-51 — split-button state for the「网页嗅探」entry. The button now
-  // offers two backends: the embedded WebContentsView (fast, but blocked
-  // by Cloudflare on OpenAI / Medium / Patreon at the TLS layer) and a
-  // spawn-the-user's-real-Chrome path that delegates the handshake to a
-  // browser whose JA3 IS in CF's whitelist. The user's preferred mode is
-  // remembered in localStorage so power users do not have to re-pick.
+  // R-51/R-52 — split-button state for the「网页嗅探」entry. Three
+  // backends are available and the user's choice is remembered in
+  // localStorage:
+  //   ① embed         : embedded WebContentsView (fast, fails on heavy CF)
+  //   ② system-chrome : spawn user's real Chrome+CDP (clears CF Turnstile)
+  //   ③ ytdlp-direct  : no webview at all, hand URL to yt-dlp's 1900+
+  //                     extractors (YouTube / X / Bilibili / TikTok / …)
   const [webviewMenuOpen, setWebviewMenuOpen] = useState(false);
-  const [preferredWebviewMode, setPreferredWebviewMode] = useState<'embed' | 'system-chrome'>(() => {
+  const [preferredWebviewMode, setPreferredWebviewMode] = useState<'embed' | 'system-chrome' | 'ytdlp-direct'>(() => {
     try {
       const v = typeof localStorage !== 'undefined' ? localStorage.getItem('giftk:preferredWebviewMode') : null;
-      return v === 'system-chrome' ? 'system-chrome' : 'embed';
+      if (v === 'system-chrome' || v === 'ytdlp-direct') return v;
+      return 'embed';
     } catch { return 'embed'; }
   });
-  const persistPreferredMode = useCallback((m: 'embed' | 'system-chrome') => {
+  const persistPreferredMode = useCallback((m: 'embed' | 'system-chrome' | 'ytdlp-direct') => {
     setPreferredWebviewMode(m);
     try { localStorage.setItem('giftk:preferredWebviewMode', m); } catch { /* ignore */ }
   }, []);
@@ -430,8 +432,18 @@ const App: React.FC = () => {
   // spawn the user's actual installed Chrome / Edge / Brave so the
   // TLS/HTTP2 fingerprint comes from a real browser (mandatory for
   // Cloudflare-protected pages like OpenAI / Medium / Patreon).
-  const runWebviewSniff = useCallback(async (mode: 'embed' | 'system-chrome') => {
-    const api = mode === 'system-chrome' ? giftk?.sniffWithSystemChrome : giftk?.sniffWithWebview;
+  //
+  // R-52 — Adds the `ytdlp-direct` mode: no webview at all, hand the
+  // URL straight to yt-dlp's 1900+ extractors. Best for known video
+  // platforms (YouTube / X / Bilibili / TikTok / Reddit / …) where the
+  // user just wants the file and doesn't care about page exploration.
+  const runWebviewSniff = useCallback(async (mode: 'embed' | 'system-chrome' | 'ytdlp-direct') => {
+    const api =
+      mode === 'system-chrome'
+        ? giftk?.sniffWithSystemChrome
+        : mode === 'ytdlp-direct'
+          ? giftk?.sniffWithYtdlpDirect
+          : giftk?.sniffWithWebview;
     if (!api) return;
     const trimmed = url.trim();
     if (!trimmed) {
@@ -450,9 +462,12 @@ const App: React.FC = () => {
     setResolvingSet(new Set());
     setResolveErrorMap({});
     activeHistoryIdRef.current = null;
-    const hint = mode === 'system-chrome'
-      ? `[system-chrome] 启动系统 Chrome 打开 ${trimmed} — 登录/通过验证后,关闭 Chrome 窗口完成嗅探`
-      : `[webview] 打开 ${trimmed} — 浏览到目标页面后,点击顶部「✅ 完成嗅探」`;
+    const hint =
+      mode === 'system-chrome'
+        ? `[system-chrome] 启动系统 Chrome 打开 ${trimmed} — 登录/通过验证后,关闭 Chrome 窗口完成嗅探`
+        : mode === 'ytdlp-direct'
+          ? `[ytdlp-direct] 调用 yt-dlp 直接解析 ${trimmed}(无需 webview)`
+          : `[webview] 打开 ${trimmed} — 浏览到目标页面后,点击顶部「✅ 完成嗅探」`;
     setLogs((prev) => [...prev, hint].slice(-300));
     try {
       const r = await api(trimmed);
@@ -491,6 +506,7 @@ const App: React.FC = () => {
   }, [url, options, pushOrReplace, addSniffHistory]);
   const onWebviewSniff = useCallback(() => runWebviewSniff('embed'), [runWebviewSniff]);
   const onSystemChromeSniff = useCallback(() => runWebviewSniff('system-chrome'), [runWebviewSniff]);
+  const onYtdlpDirectSniff = useCallback(() => runWebviewSniff('ytdlp-direct'), [runWebviewSniff]);
   // R-51 — main-button click goes to whichever mode the user last picked
   // (or `embed` on first run); the small caret-arrow next to it opens
   // the dropdown so they can switch.
@@ -1609,12 +1625,18 @@ const App: React.FC = () => {
                   disabled={sniffing}
                   title={preferredWebviewMode === 'system-chrome'
                     ? '在你本机 Chrome / Edge / Brave 中打开,登录或通过验证后关闭窗口完成嗅探(适合 OpenAI / Medium 等高保护站点)'
-                    : '打开内置浏览器,先浏览到目标页面再嗅探(适合需要交互/登录/验证机器人的站点)'}
+                    : preferredWebviewMode === 'ytdlp-direct'
+                      ? '把 URL 直接交给 yt-dlp 解析,无需打开任何浏览器(适合 YouTube / X / Bilibili / TikTok 等已知视频站)'
+                      : '打开内置浏览器,先浏览到目标页面再嗅探(适合需要交互/登录/验证机器人的站点)'}
                   style={{ whiteSpace: 'nowrap', borderTopRightRadius: 0, borderBottomRightRadius: 0 }}
                 >
                   {sniffing
                     ? '嗅探中…'
-                    : (preferredWebviewMode === 'system-chrome' ? '🚀 真 Chrome 嗅探' : '🌐 网页嗅探')}
+                    : preferredWebviewMode === 'system-chrome'
+                      ? '🚀 真 Chrome 嗅探'
+                      : preferredWebviewMode === 'ytdlp-direct'
+                        ? '⚡ yt-dlp 直接抓'
+                        : '🌐 网页嗅探'}
                 </button>
                 <button
                   className="ghost webview-sniff-caret"
@@ -1688,6 +1710,27 @@ const App: React.FC = () => {
                       </div>
                       <div style={{ fontSize: 11, color: 'var(--muted, #9aa0aa)', marginTop: 2 }}>
                         启动你本机的 Chrome / Edge / Brave,真实浏览器握手,适合 OpenAI / Medium / Patreon 等高保护站点。
+                      </div>
+                    </button>
+                    <button
+                      className="ghost"
+                      role="menuitem"
+                      onClick={() => {
+                        setWebviewMenuOpen(false);
+                        persistPreferredMode('ytdlp-direct');
+                        onYtdlpDirectSniff();
+                      }}
+                      style={{
+                        display: 'block', width: '100%', textAlign: 'left',
+                        padding: '8px 10px', whiteSpace: 'normal', marginTop: 4,
+                        background: preferredWebviewMode === 'ytdlp-direct' ? 'rgba(42,170,119,0.12)' : 'transparent'
+                      }}
+                    >
+                      <div style={{ fontWeight: 600 }}>
+                        ⚡ yt-dlp 直接抓(YouTube / X / B站 等 1900+ 站点){preferredWebviewMode === 'ytdlp-direct' ? ' ✓' : ''}
+                      </div>
+                      <div style={{ fontSize: 11, color: 'var(--muted, #9aa0aa)', marginTop: 2 }}>
+                        无需打开任何浏览器,把 URL 交给 yt-dlp 直接解析。最快,但只支持已识别的视频站。
                       </div>
                     </button>
                   </div>
