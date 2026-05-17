@@ -71,6 +71,35 @@ const api = {
   async detectSystemBrowsers(): Promise<Array<{ id: string; label: string; exePath: string }>> {
     return ipcRenderer.invoke('sniff:system-chrome:detect');
   },
+  /**
+   * R-55 Fix #2 — Cooperative finalize for the real-Chrome sniff.
+   * Resolves the in-flight `sniffWithSystemChrome` Promise as if the
+   * user had closed the Chrome window — runs a final DOM scan and
+   * returns whatever was captured so far. Used by the「✓ 完成嗅探」
+   * button that appears at the 60% stage so users no longer have to
+   * fully quit Chrome to escape the wait.
+   *
+   * Returns `true` if a sniff was actually in flight.
+   */
+  async finalizeSystemChromeSniff(): Promise<boolean> {
+    return ipcRenderer.invoke('sniff:system-chrome:finalize');
+  },
+  /**
+   * R-55 Fix #3 — Offline import. Hand a fully-saved web page (or any
+   * single media file) on disk back to the renderer wrapped as a
+   * `SniffResult`. Three input shapes:
+   *
+   *  - .mhtml / .mht  (Chrome / Edge "Webpage, single file")
+   *  - .html + sibling _files/  (Chrome "Webpage, complete")
+   *  - single .mp4 / .webm / .gif / .png / .jpg / .webp / etc.
+   *
+   * If `absPath` is omitted, a native file/directory picker pops up.
+   * If the picker is cancelled, returns `null`.
+   */
+  async importOfflinePage(absPath?: string): Promise<SniffResult | null> {
+    if (typeof absPath === 'string') ensureString(absPath, 'absPath');
+    return ipcRenderer.invoke('sniff:offlineImport', absPath);
+  },
   // R-52 — yt-dlp direct sniff. No webview involved at all; the page URL
   // is handed straight to yt-dlp's 1900+ extractors. Returns the same
   // SniffResult shape as the other entries, with a single SniffedMedia

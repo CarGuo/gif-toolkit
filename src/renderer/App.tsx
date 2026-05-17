@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type {
   SniffResult,
   ProcessOptions,
@@ -48,6 +48,10 @@ const App: React.FC = () => {
   const [urlError, setUrlError] = useState<string | null>(null);
   const [sniffing, setSniffing] = useState(false);
   const [sniffProgress, setSniffProgress] = useState<SniffProgress | null>(null);
+  // R-55 Fix #2 — current sniff backend; non-null only while sniffing.
+  // Drives whether the「✓ 完成嗅探」button shows up at the 60% stage
+  // (only meaningful for system-chrome which waits for child exit).
+  const [activeSniffMode, setActiveSniffMode] = useState<'embed' | 'system-chrome' | 'ytdlp-direct' | null>(null);
   const [result, setResult] = useState<SniffResult | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -148,6 +152,35 @@ const App: React.FC = () => {
   const webviewMenuRef = useRef<HTMLDivElement | null>(null);
   const webviewCaretRef = useRef<HTMLButtonElement | null>(null);
   const webviewMenuItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  // R-55 Fix #1 — split-button menu used to set `minWidth: 280` and
+  // `right: 0` unconditionally. When the URL bar lives in a narrow
+  // column (≤ 320 px in the user's screenshot) the popup punched
+  // outside the viewport on the right and got clipped on the left,
+  // hiding all the radio descriptions. We now measure the caret's
+  // bounding rect and decide left vs. right anchoring AFTER the menu
+  // is mounted, falling back to right when both edges fit.
+  // `webviewMenuAnchor` is `'right'` (default) or `'left'` (flipped).
+  const [webviewMenuAnchor, setWebviewMenuAnchor] = useState<'left' | 'right'>('right');
+  useLayoutEffect(() => {
+    if (!webviewMenuOpen) return;
+    const recompute = (): void => {
+      const caret = webviewCaretRef.current;
+      const menu = webviewMenuRef.current;
+      if (!caret || !menu) return;
+      const caretRect = caret.getBoundingClientRect();
+      const menuW = menu.offsetWidth;
+      const vw = typeof window !== 'undefined' ? window.innerWidth : 0;
+      // Anchor right (top-right corner of menu == top-right corner
+      // of caret) when there's enough room to the LEFT of the caret;
+      // otherwise anchor left so the menu opens toward the wider
+      // side of the screen.
+      const fitsRightAnchor = caretRect.right - menuW >= 8;
+      setWebviewMenuAnchor(fitsRightAnchor ? 'right' : caretRect.left + menuW + 8 <= vw ? 'left' : 'right');
+    };
+    recompute();
+    window.addEventListener('resize', recompute);
+    return () => window.removeEventListener('resize', recompute);
+  }, [webviewMenuOpen]);
   useEffect(() => {
     if (!webviewMenuOpen) return;
     // Move focus into the menu on open, defaulting to the currently
@@ -549,6 +582,9 @@ const App: React.FC = () => {
     setUrlError(null);
     const myId = ++sniffReqId.current;
     setSniffing(true);
+    // R-55 Fix #2 — remember which sniff backend is active so we can
+    // show the「✓ 完成嗅探」button only for system-chrome runs.
+    setActiveSniffMode(mode);
     setSniffProgress({ stage: 'fetching', percent: 0 });
     setResult(null);
     setSelected(new Set());
@@ -597,6 +633,7 @@ const App: React.FC = () => {
       if (myId === sniffReqId.current) {
         setSniffing(false);
         setSniffProgress(null);
+        setActiveSniffMode(null);
       }
     }
   }, [url, options, pushOrReplace, addSniffHistory]);
@@ -879,6 +916,115 @@ const App: React.FC = () => {
     setLogs((prev) => [...prev, `[batch] 追加 ${appendable.length} 个任务到当前队列`].slice(-300));
     await dispatchBatch(null, appendable);
   }, [appendable, options, dispatchBatch]);
+
+  // R-55 Fix #2 — Cooperative finalize for the real-Chrome sniff. The
+  // user clicks「✓ 完成嗅探」at the 60% stage, the main process resolves
+  // the sniff promise as if the Chrome window was closed (final DOM
+  // scan + cleanup), and the same `setSniffing(false)` path runs. This
+  // is a separate flow from cancel because we WANT the captured media,
+  // we just don't want to wait for Chrome to fully exit.
+  const onFinalizeSystemChromeSniff = useCallback(async () => {
+    if (!giftk?.finalizeSystemChromeSniff) return;
+    try {
+      await giftk.finalizeSystemChromeSniff();
+      setLogs((prev) => [...prev, '[system-chrome] 用户点击「完成嗅探」,正在收尾…'].slice(-300));
+    } catch { /* ignore — likely not in flight anymore */ }
+  }, []);
+
+  // R-55 Fix #3 — Offline import. Wraps `giftk.importOfflinePage` in
+  // the same UI lifecycle hooks used by `runWebviewSniff` (sniffing
+  // flag, sniffReqId guard, history pin, log line) so the result
+  // grid / batch UI / upload-all flow all light up exactly as if the
+  // user had run a normal online sniff. The optional `path` arg
+  // lets us reuse this handler for both the toolbar button (no path
+  // → main pops a picker) and drag-and-drop (renderer already has
+  // the absolute path).
+  const runOfflineImport = useCallback(async (absPath?: string) => {
+    if (!giftk?.importOfflinePage) return;
+    const myId = ++sniffReqId.current;
+    setSniffing(true);
+    setActiveSniffMode(null);
+    setSniffProgress({ stage: 'parsing', percent: 50, message: '解析离线网页/媒体…' });
+    setResult(null);
+    setSelected(new Set());
+    setActiveId(null);
+    setPreview(null);
+    setResolvedMap({});
+    setResolvingSet(new Set());
+    setResolveErrorMap({});
+    activeHistoryIdRef.current = null;
+    setLogs((prev) => [...prev, `[offline-import] ${absPath ? absPath : '(等用户在弹窗里选择文件/目录)'}`].slice(-300));
+    try {
+      const r = await giftk.importOfflinePage(absPath);
+      if (myId !== sniffReqId.current) return;
+      if (!r) {
+        // Picker cancelled — silently bail.
+        return;
+      }
+      setResult(r);
+      const auto = new Set(
+        r.items
+          .filter((i) => (i.kind === 'video' || i.kind === 'gif') && !i.requiresExternalDownload)
+          .map((i) => i.id)
+      );
+      setSelected(auto);
+      if (r.items.length > 0 || (r.warnings?.length ?? 0) === 0) {
+        const rec = makeHistoryRecord({
+          pageUrl: r.pageUrl,
+          title: r.title,
+          items: r.items,
+          options: { ...options }
+        });
+        pushOrReplace(rec);
+        activeHistoryIdRef.current = rec.id;
+      }
+    } catch (e) {
+      if (myId !== sniffReqId.current) return;
+      setResult({ pageUrl: absPath ?? '(offline)', items: [], warnings: [(e as Error).message] });
+    } finally {
+      if (myId === sniffReqId.current) {
+        setSniffing(false);
+        setSniffProgress(null);
+        setActiveSniffMode(null);
+      }
+    }
+  }, [options, pushOrReplace]);
+
+  const onOfflineImport = useCallback(() => {
+    void runOfflineImport(undefined);
+  }, [runOfflineImport]);
+
+  // R-55 Fix #3 — Global drag-and-drop bridge for the offline import.
+  // Attached to `window` instead of a specific div so the user can
+  // drop anywhere on the app surface. We aggressively `preventDefault`
+  // on dragover so the browser doesn't try to navigate away to the
+  // dropped file. Only the FIRST file is imported because the offline
+  // path is single-source-of-truth (one page → one SniffResult).
+  useEffect(() => {
+    const onDragOver = (e: DragEvent) => {
+      if (!e.dataTransfer) return;
+      // Only react if the drag actually carries files.
+      if (Array.from(e.dataTransfer.types).indexOf('Files') < 0) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+    };
+    const onDrop = (e: DragEvent) => {
+      if (!e.dataTransfer) return;
+      if (!e.dataTransfer.files || e.dataTransfer.files.length === 0) return;
+      e.preventDefault();
+      const f = e.dataTransfer.files[0];
+      // Electron exposes a non-standard `path` on File when the file
+      // came from the OS (vs. a renderer-fetched blob).
+      const p = (f as File & { path?: string }).path;
+      if (p) void runOfflineImport(p);
+    };
+    window.addEventListener('dragover', onDragOver);
+    window.addEventListener('drop', onDrop);
+    return () => {
+      window.removeEventListener('dragover', onDragOver);
+      window.removeEventListener('drop', onDrop);
+    };
+  }, [runOfflineImport]);
 
   const onCancel = useCallback(() => {
     if (!giftk) return;
@@ -1834,8 +1980,20 @@ const App: React.FC = () => {
                     aria-label="网页嗅探方式"
                     className="webview-sniff-menu"
                     style={{
-                      position: 'absolute', top: 'calc(100% + 4px)', right: 0, zIndex: 60,
-                      minWidth: 280, padding: 6, borderRadius: 8,
+                      position: 'absolute', top: 'calc(100% + 4px)',
+                      // R-55 Fix #1 — anchor side decided by useLayoutEffect
+                      // measure-after-mount; fallback to right.
+                      ...(webviewMenuAnchor === 'right' ? { right: 0 } : { left: 0 }),
+                      zIndex: 60,
+                      // R-55 Fix #1 — width is content-driven now,
+                      // bounded by 240..min(360, viewport-16) so the
+                      // popup never overflows the screen and never
+                      // collapses into a single column on tiny URL
+                      // bars.
+                      width: 'max-content',
+                      minWidth: 240,
+                      maxWidth: 'min(360px, calc(100vw - 16px))',
+                      padding: 6, borderRadius: 8,
                       background: 'var(--bg-2, #23252b)', color: 'var(--fg, #e6e7eb)',
                       border: '1px solid rgba(255,255,255,0.12)',
                       boxShadow: '0 8px 24px rgba(0,0,0,0.35)'
@@ -1919,6 +2077,19 @@ const App: React.FC = () => {
                   </div>
                 ) : null}
               </div>
+              {/* R-55 Fix #3 — Offline import escape hatch. Sits next
+                  to the network sniff buttons because the user reaches
+                  for it for the same reason: "I want media off this
+                  page", just from a local file instead of a URL. */}
+              <button
+                className="ghost"
+                onClick={onOfflineImport}
+                disabled={sniffing}
+                title="从本地选择 .mhtml / .html(可带 _files 目录)/ 单图 / 单视频,直接进入处理流程"
+                style={{ whiteSpace: 'nowrap' }}
+              >
+                📂 离线导入
+              </button>
               <SniffHistoryPicker
                 open={sniffHistoryOpen}
                 entries={sniffHistory}
@@ -1956,7 +2127,48 @@ const App: React.FC = () => {
                   <div className="bar" style={{ width: `${Math.max(0, Math.min(100, sniffProgress.percent))}%` }} />
                 </div>
                 {sniffProgress.message ? (
-                  <div className="notice" style={{ marginTop: 4 }}>{sniffProgress.message}</div>
+                  // R-55 Fix #2c — When the system-chrome sniff is in
+                  // its「等用户操作」60% wait phase, the message is the
+                  // ONLY signal that the app isn't frozen. Promote
+                  // that single line to a high-contrast amber banner
+                  // with a pulsing dot so the user understands input
+                  // is needed. Other progress messages (e.g. parsing
+                  // detail) keep the muted look.
+                  activeSniffMode === 'system-chrome' && sniffProgress.percent >= 55 && sniffProgress.percent < 90 ? (
+                    <div
+                      className="notice"
+                      role="status"
+                      aria-live="polite"
+                      style={{
+                        marginTop: 6,
+                        padding: '8px 10px',
+                        background: 'rgba(241, 161, 64, 0.16)',
+                        border: '1px solid rgba(241, 161, 64, 0.5)',
+                        color: '#f1a140',
+                        borderRadius: 6,
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 8,
+                        fontSize: 12,
+                        fontWeight: 600
+                      }}
+                    >
+                      <span
+                        aria-hidden="true"
+                        style={{
+                          width: 8,
+                          height: 8,
+                          borderRadius: '50%',
+                          background: '#f1a140',
+                          animation: 'sniff-pulse 1s ease-in-out infinite alternate',
+                          flexShrink: 0
+                        }}
+                      />
+                      <span>{sniffProgress.message}</span>
+                    </div>
+                  ) : (
+                    <div className="notice" style={{ marginTop: 4 }}>{sniffProgress.message}</div>
+                  )
                 ) : null}
               </div>
             ) : null}
@@ -1979,6 +2191,24 @@ const App: React.FC = () => {
               <div style={{ display: 'flex', gap: 8, marginTop: 12, alignItems: 'center', flexWrap: 'wrap' }}>
                 {sniffing ? (
                   <button onClick={onCancel} title="取消嗅探">取消嗅探</button>
+                ) : null}
+                {/* R-55 Fix #2 — Always-visible escape hatch for the
+                    real-Chrome path. The user can hit this even before
+                    the 60% banner shows up if they navigate quickly,
+                    and we still get the captured media because the
+                    finalize signal runs the synchronous DOM scan
+                    before tearing down. We deliberately do NOT gate
+                    this on percent >= 60 to keep the affordance
+                    discoverable. */}
+                {sniffing && activeSniffMode === 'system-chrome' ? (
+                  <button
+                    className="primary"
+                    onClick={onFinalizeSystemChromeSniff}
+                    title="立即结束嗅探并返回到目前已抓到的媒体(无需关闭 Chrome 整个进程)"
+                    style={{ background: '#2aaa77', color: '#fff' }}
+                  >
+                    ✓ 完成嗅探
+                  </button>
                 ) : null}
                 {lastBatchDir ? (
                   <span style={{ color: 'var(--muted)', fontSize: 11, marginLeft: 'auto' }}>

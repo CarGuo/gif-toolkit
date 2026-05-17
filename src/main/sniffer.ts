@@ -424,7 +424,7 @@ async function fetchHtmlStreamed(
  * the SPA / anti-bot fallback path: once on the raw HTTP response, then
  * again on the headless-rendered DOM if the first pass yielded nothing.
  */
-function extractFromHtml(
+export function extractFromHtml(
   html: string,
   pageUrl: string,
   map: Map<string, SniffedMedia>

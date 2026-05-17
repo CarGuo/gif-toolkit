@@ -13,7 +13,7 @@
 - **iframe 嵌入自动解直链**:嗅探完即静默后台调起 [yt-dlp](https://github.com/yt-dlp/yt-dlp)(已随包分发,**Unlicense,开箱即用,零额外配置**),YouTube / 推特 / B 站等 1800+ 站点的视频也能进流水线
 - 卡片式 UI 一眼看全:缩略图 / 时长 / 体积 / 解析状态(`⏳ 解析中` / `✓ 已解析 720p` / `↻ 重试`),失败永不卡死
 
-### 1b. 四档嗅探链路(R-44 → R-53)
+### 1b. 四档嗅探链路(R-44 → R-53) + 离线导入兜底(R-55)
 > 详见 [docs/sniffer-cascade.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/sniffer-cascade.md)。
 
 针对不同站点的反爬强度,工具栏的「网页嗅探」是一个 **split-button**:左侧主按钮跑你上次选的方式,右侧 ▾ 弹出菜单可在三种 webview 模式间切换;另外纯 URL 嗅探作为最快路径默认始终可用:
@@ -24,13 +24,17 @@
 | 🌐 嵌入式嗅探(快) | split-button 左 / 菜单 ① | 需要登录 / 交互 / OAuth 但 TLS 不严的站 | `WebContentsView` + `webRequest` + DOM 扫描(R-44 / R-47 / R-49 / R-50) |
 | 🚀 真 Chrome 嗅探(过 Cloudflare) | split-button 左 / 菜单 ② | OpenAI / Medium / Patreon 等 Cloudflare TLS-JA3/JA4 严防站 | 启动用户本机 Chrome / Edge / Brave + CDP `chrome-remote-interface`,**真实浏览器握手过 Turnstile**(R-51) |
 | ⚡ yt-dlp 直接抓 | split-button 左 / 菜单 ③ | YouTube / X / B 站 / TikTok 等 1900+ 已识别视频站 | 不开任何浏览器,URL → `yt-dlp --dump-single-json`,主进程一次过(R-52) |
+| 📂 离线导入 | URL 栏右侧按钮 / 拖拽 | 网站完全打不开 / 已经手动存到本地 | `.mhtml` / `.html + _files/` / 单文件,RFC 2557 解析 + 本地相对路径解析(R-55 Fix #3) |
 
 工程要点:
 - **统一 single-flight**(R-53 Fix #2):四档共享 `currentSniffCtrl: AbortController`,切换任意一档会先 `abort()` 上一次,孤儿 webview / Chrome 子进程都会被强制收回。
 - **AbortSignal 真透传**(R-53 Fix #1):取消时不再只关 UI;yt-dlp 子进程走 SIGTERM → 1 s SIGKILL 兜底,真 Chrome 收到 abort 会清掉 `SingletonLock` / `SingletonCookie` / `SingletonSocket`,下次启动同 profile 不会被锁。
+- **真 Chrome 协作 finalize**(R-55 Fix #2):本机已开 Chrome 时,新 spawn 实例会瞬间合并到既有进程,关一个 tab 不会触发 `child.exit`,导致进度卡 60% 永远不结束。新增「✓ 完成嗅探」按钮 + `finalizeSignal: AbortSignal`(独立于 cancel 信号),让用户随时把当前已抓到的资源拿回 app,并配橙色脉冲 banner 强提示「在等你」而非卡死。
 - **入口安全**(R-53 Fix #4):每档入口前先过 `ensurePublicHttp(url)`(协议 + IP/host 白名单,挡 SSRF / 私有网段);主进程 `sanitizeMedia(media)` 只接受 [src/shared/headers.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/headers.ts) 单一真源里声明的 `SNIFFED_MEDIA_SOURCES`,非法 source 直接 `throw`。
 - **错误分类**(R-53 Fix #6):yt-dlp 失败被分到 `not-installed / aborted / login-wall / rate-limit / unsupported / network / generic` 6 档,UI 给的是中文人话提示,而不是甩一行 stderr。
-- **a11y 菜单**(R-53 Fix #3):split menu 用 `role="menuitemradio"` + `aria-checked` + ArrowUp/Down/Home/End 键盘导航 + Esc 关闭 + 点击外部关闭 + 打开时焦点跳到当前选中项。
+- **a11y 菜单**(R-53 Fix #3):split menu 用 `role="menuitemradio"` + `aria-checked` + ArrowUp/Down/Home/End 键盘导航 + Esc 关闭 + 点击外部关闭 + 打开时焦点跳到当前选中项;窄 URL 栏下自适应宽度 + 智能左右翻转(R-55 Fix #1)。
+- **离线导入**(R-55 Fix #3):支持 `.mhtml` 多 part 解析(把每个 part 落到 `os.tmpdir()` 后改写主 html 引用)、`.html + _files/` 完整目录、单图/单视频/单 GIF 直接合成 `SniffedMedia`;`resolveOfflineRef` 拒绝 `../` 与绝对系统路径,只在 baseDir 子树内开放;支持点按钮选 + 直接拖文件入窗。
+
 
 
 ### 2. 视频 → GIF 全自动,**长视频也能搞定**

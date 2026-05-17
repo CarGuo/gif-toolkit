@@ -71,6 +71,13 @@ R-53 加固:
 - cleanup 走 SIGTERM → 1.5 s SIGKILL 兜底,清完再删 Singleton 文件,下次同 profile 能继续用
 - `waitForDevToolsPort` 内部 `child.once('exit', onExit)` 改成命名函数 + cleanup 解绑,防长 session Chrome 退出回调撞已 settle 的 Promise
 
+R-55 Fix #2 加固(2026-05-17):
+- 加 `SniffOpts.finalizeSignal: AbortSignal`,renderer 调 `giftk.finalizeSystemChromeSniff()` 触发它,让等 `child.exit` 的 Promise 第三种 resolve 路径(`finalizedByUser=true` 走完整 DOM scan,语义=success 不是 abort)
+- 解决「本机已开 Chrome,新 spawn 实例瞬间合并 → 关 tab 不触发 child.exit → 卡 60%」
+- main 多并列一根 `currentSystemChromeFinalizeCtrl: AbortController`(独立于 `currentSniffCtrl`)
+- 60% message 在 renderer 升级为橙色脉冲 banner(`@keyframes sniff-pulse`),并在右侧渲染绿色「✓ 完成嗅探」按钮(只在 `activeSniffMode === 'system-chrome'` 时显示)
+
+
 ---
 
 ## 通路 ④  yt-dlp 直接抓(R-52)
@@ -96,6 +103,21 @@ R-53 加固:
   - `rate-limit`:命中 `HTTP Error 429|HTTP Error 403|too many requests|throttle|rate.?limit`
   - `network`:命中 `getaddrinfo|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|TLS|SSL`
   - `unsupported`:命中 `Unsupported URL|no playable format|Requested format is not available`
+
+---
+
+## 通路 ⑤  离线导入(R-55 Fix #3)
+
+- IPC: `sniff:offlineImport`
+- 实现:[src/main/offlineImport.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/offlineImport.ts)
+- 触发:URL 栏右侧「📂 离线导入」按钮 / 任意位置拖拽文件入窗
+- 适合:Cloudflare 死锁 / 登录墙 / GFW 不通,但你已经手动把页面 / 文件存到了本地的兜底
+- 三种输入形态:
+  1. `.mhtml / .mht`(Chrome / Edge「网页,单一文件」)— 解析 RFC 2557 multipart/related,把每个 part 落到 `os.tmpdir()/giftk-mhtml-*`,然后把主 html 里的引用按 `Content-Location` 重写成 `file://`
+  2. `.html / .htm`(可带兄弟 `_files/` 目录,即 Chrome「网页,完整」)— 把所在目录当 base,相对 src 解析为 `file://`(不存在则丢弃 + warning)
+  3. 单 `.mp4 / .webm / .mov / .gif / .png / .jpg / .webp / ...` — 直接合成一条 `SniffedMedia`
+- 安全:`resolveOfflineRef` 拒绝 parent traversal(`../`)与绝对系统路径(`/etc/...`),只允许 baseDir 子树
+- 单测:[tests/main/offlineImport.test.ts](file:///Users/guoshuyu/workspace/gif-toolkit/tests/main/offlineImport.test.ts) 12 条覆盖三种形态 + 防穿越 + 缺失资源 + boundary 缺失
 
 ---
 

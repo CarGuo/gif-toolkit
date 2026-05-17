@@ -543,6 +543,11 @@ async function createWindow(): Promise<void> {
 /* ----------------------- IPC handlers ----------------------- */
 
 let currentSniffCtrl: AbortController | null = null;
+// R-55 Fix #2 — separate controller used to *finalize* an in-flight
+// system-chrome sniff cooperatively. Distinct from currentSniffCtrl
+// because finalize means "I'm done, take what you have, return
+// success" while abort means "cancel + show empty".
+let currentSystemChromeFinalizeCtrl: AbortController | null = null;
 
 ipcMain.handle('sniff:url', async (_e, url: unknown) => {
   const safe = assertHttpUrl(url);
@@ -626,10 +631,14 @@ ipcMain.handle('sniff:system-chrome', async (_e, url: unknown) => {
   }
   const ctrl = new AbortController();
   currentSniffCtrl = ctrl;
+  // R-55 Fix #2 — fresh finalize controller for this run.
+  const finalizeCtrl = new AbortController();
+  currentSystemChromeFinalizeCtrl = finalizeCtrl;
   systemChromeSniffInFlight = true;
   try {
     return await sniffViaSystemChrome(safe, {
       signal: ctrl.signal,
+      finalizeSignal: finalizeCtrl.signal,
       onProgress: (p) => {
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('sniff:progress', p);
@@ -639,7 +648,52 @@ ipcMain.handle('sniff:system-chrome', async (_e, url: unknown) => {
   } finally {
     systemChromeSniffInFlight = false;
     if (currentSniffCtrl === ctrl) currentSniffCtrl = null;
+    if (currentSystemChromeFinalizeCtrl === finalizeCtrl) currentSystemChromeFinalizeCtrl = null;
   }
+});
+
+// R-55 Fix #2 — Cooperative finalize for the real-Chrome sniff. The
+// renderer fires this when the user clicks「✓ 完成嗅探」at the 60%
+// stage. Returns true iff a finalize signal was actually sent (i.e.
+// there was a real-Chrome sniff in flight).
+ipcMain.handle('sniff:system-chrome:finalize', async () => {
+  if (currentSystemChromeFinalizeCtrl) {
+    try { currentSystemChromeFinalizeCtrl.abort(); } catch { /* ignore */ }
+    currentSystemChromeFinalizeCtrl = null;
+    return true;
+  }
+  return false;
+});
+
+// R-55 Fix #3 — Offline import. Bypasses all four online sniff
+// backends and hands a saved page (or single media file) straight
+// to the offline parser. Either:
+//
+//  - the renderer already has a path (e.g. drag-and-drop, recent
+//    files), and passes it as the second IPC argument; OR
+//  - it passes nothing, in which case we open a native file picker
+//    here. The picker accepts both files and directories so the
+//    user can choose a Chrome "Webpage, complete" folder in one go.
+ipcMain.handle('sniff:offlineImport', async (_e, maybePath: unknown) => {
+  const { importOfflinePath } = await import('./offlineImport');
+  let absPath: string | null = null;
+  if (typeof maybePath === 'string' && maybePath.trim()) {
+    absPath = path.resolve(maybePath.trim());
+  } else {
+    if (!mainWindow) return null;
+    const r = await dialog.showOpenDialog(mainWindow, {
+      title: '选择保存到本地的网页 / 媒体文件',
+      properties: ['openFile', 'openDirectory'],
+      filters: [
+        { name: '网页 / 媒体', extensions: ['mhtml', 'mht', 'html', 'htm', 'mp4', 'webm', 'mov', 'm4v', 'mkv', 'gif', 'png', 'jpg', 'jpeg', 'webp'] },
+        { name: '所有文件', extensions: ['*'] }
+      ]
+    });
+    if (r.canceled || r.filePaths.length === 0) return null;
+    absPath = path.resolve(r.filePaths[0]);
+  }
+  if (!absPath) return null;
+  return importOfflinePath(absPath);
 });
 
 // R-52 — yt-dlp direct sniff. The third tier (alongside R-44 embedded

@@ -1004,6 +1004,13 @@ input[type="text"]:focus { border-color: var(--accent); }
 @keyframes giftk-spin {
   to { transform: rotate(360deg); }
 }
+/* R-55 Fix #2c — pulsing dot used in the system-chrome 60% wait
+ * banner so the UI conveys "we're waiting on YOU, not frozen" even
+ * if the user doesn't read the text. */
+@keyframes sniff-pulse {
+  from { opacity: 0.35; transform: scale(0.85); }
+  to   { opacity: 1;    transform: scale(1.15); }
+}
 .modal-player-loading-label {
   font-size: 13px;
   font-weight: 600;

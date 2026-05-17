@@ -118,6 +118,24 @@ interface SniffOpts {
    * resolve with whatever we captured so far (warnings flagged).
    */
   signal?: AbortSignal;
+  /**
+   * R-55 Fix #2 — Cooperative *finalize* signal (distinct from cancel).
+   * When fired, the function treats the situation as "user finished
+   * sniffing" — it will:
+   *
+   *  1. Stop waiting for Chrome's parent process to exit (root cause
+   *     of the "stuck at 60%" report when Chrome merges into a
+   *     pre-existing user instance and `child.exit` never fires).
+   *  2. Run one final DOM scan synchronously.
+   *  3. Tear down Chrome cleanly (SIGTERM → SIGKILL fallback) just
+   *     like the user-closed-window path.
+   *  4. Return the captured media — NOT mark the run as cancelled.
+   *
+   * This is wired to a「✓ 完成嗅探」button on the renderer that
+   * appears at the 60% stage so users no longer have to fight Chrome
+   * lifecycle to get their results out.
+   */
+  finalizeSignal?: AbortSignal;
 }
 
 /** Wait for Chrome to print/write the chosen debugger port. We poll the
@@ -362,17 +380,30 @@ export async function sniffViaSystemChrome(
     });
 
     // Resolution path: the user closes the Chrome window OR we get
-    // aborted. Chrome's parent process exit fires `child.exit`, which
-    // is what we listen to here.
+    // aborted OR (R-55) the renderer fires the finalize signal because
+    // the user clicked「✓ 完成嗅探」. Chrome's parent process exit
+    // fires `child.exit`, which is what we listen to for the "user
+    // closed everything" path. The finalize path is treated like
+    // user-closed for result purposes (userClosed stays true).
     let userClosed = false;
+    let finalizedByUser = false;
     const finished = new Promise<void>((resolve) => {
       child.once('exit', () => { userClosed = true; resolve(); });
       if (opts.signal) {
         if (opts.signal.aborted) resolve();
         else opts.signal.addEventListener('abort', () => resolve(), { once: true });
       }
+      if (opts.finalizeSignal) {
+        const onFinalize = (): void => {
+          finalizedByUser = true;
+          userClosed = true;
+          resolve();
+        };
+        if (opts.finalizeSignal.aborted) onFinalize();
+        else opts.finalizeSignal.addEventListener('abort', onFinalize, { once: true });
+      }
     });
-    opts.onProgress?.({ stage: 'parsing', percent: 60, message: '在 Chrome 中浏览/登录,关闭窗口完成嗅探' });
+    opts.onProgress?.({ stage: 'parsing', percent: 60, message: '在 Chrome 中浏览/登录,然后点「✓ 完成嗅探」或关闭整个 Chrome 即可结束' });
 
     // While waiting, run a final DOM scan periodically as a safety net
     // (some users may not navigate at all — they just want what's on
@@ -407,9 +438,15 @@ export async function sniffViaSystemChrome(
 
     await finished;
     try { clearInterval(domTick); } catch { /* ignore */ }
-    if (opts.signal?.aborted) userClosed = false;
+    // R-55: only treat the run as aborted if the caller's cancel
+    // signal fired AND it wasn't an explicit finalize click.
+    if (opts.signal?.aborted && !finalizedByUser) userClosed = false;
 
-    opts.onProgress?.({ stage: 'parsing', percent: 90 });
+    opts.onProgress?.({
+      stage: 'parsing',
+      percent: 90,
+      message: finalizedByUser ? '正在收尾,处理 DOM 扫描结果…' : undefined
+    });
 
     // Try one last DOM scan synchronously before tearing down (only if
     // page is still alive).
