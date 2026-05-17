@@ -20,7 +20,7 @@
  * `<video src>` / CSS `background-image`. Both sources are deduped and
  * resolved as a `SniffResult`.
  */
-import { BrowserWindow, WebContentsView, session, ipcMain } from 'electron';
+import { BrowserWindow, WebContentsView, session, ipcMain, shell } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import type { SniffedMedia, SniffResult, MediaKind } from '../shared/types';
@@ -130,7 +130,14 @@ const DOM_SCAN_SCRIPT = `(() => {
  *  We fold it into a `data:text/html;base64,...` URL so we do not need a
  *  filesystem-resident html asset (keeps the build script untouched).
  *  The toolbar talks to the main process exclusively through the preload-
- *  exposed `window.giftkChrome` API. */
+ *  exposed `window.giftkChrome` API.
+ *
+ *  R-48 — Progress bar reworked into a 4px high element with an
+ *  indeterminate slider keyframe animation (so the user sees something
+ *  moving even before any `did-frame-finish-load` event fires) layered
+ *  under a determinate fill driven by `state.progress`. Also adds a
+ *  「🧭 系统浏览器」 button that delegates to `shell.openExternal` for
+ *  users who want to debug / inspect the page in their real browser. */
 function buildChromeHtml(): string {
   return `<!doctype html>
 <html lang="zh-CN"><head>
@@ -138,7 +145,8 @@ function buildChromeHtml(): string {
 <title>GIF Toolkit — 网页嗅探</title>
 <style>
   :root { --bg:#1a1b1f; --bg-2:#23252b; --line:rgba(255,255,255,0.08);
-    --fg:#e6e7eb; --muted:#9aa0aa; --accent:#2a7; --warn:#ef5b6e; }
+    --fg:#e6e7eb; --muted:#9aa0aa; --accent:#2a7; --accent-2:#5cf;
+    --warn:#ef5b6e; }
   * { box-sizing: border-box; }
   html, body { margin:0; padding:0; height:100%; background:var(--bg); color:var(--fg);
     font: 13px -apple-system, system-ui, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
@@ -158,10 +166,25 @@ function buildChromeHtml(): string {
   #addr:focus { border-color:var(--accent); }
   #status { flex:0 0 auto; font-size:11px; color:var(--muted); max-width:240px; overflow:hidden;
     text-overflow:ellipsis; white-space:nowrap; }
-  #progress { position:absolute; left:0; right:0; bottom:0; height:2px; pointer-events:none; }
-  #progress > div { height:100%; width:0%; background:var(--accent);
-    transition:width 200ms linear, opacity 200ms linear; opacity:0; }
-  #progress.loading > div { opacity:1; }
+  /* R-48 progress bar — 4px tall, two layers:
+     1. .indet — indeterminate sliding gradient (visible whenever
+        isLoading is true, so the user sees motion immediately even
+        before our pushState catches up to the inner view).
+     2. .det  — determinate fill driven by state.progress (0..100).
+     Both fade out together once isLoading flips false. */
+  #progress { position:absolute; left:0; right:0; bottom:-1px; height:4px;
+    pointer-events:none; overflow:hidden; opacity:0; transition:opacity 220ms linear; }
+  #progress.loading { opacity:1; }
+  #progress .indet { position:absolute; inset:0; background:
+    linear-gradient(90deg, transparent 0%, var(--accent-2) 35%, var(--accent) 65%, transparent 100%);
+    background-size: 40% 100%; background-repeat: no-repeat;
+    animation: indet 1.1s linear infinite; }
+  #progress .det { position:absolute; left:0; top:0; bottom:0; width:0%;
+    background:var(--accent); transition:width 220ms ease-out; }
+  @keyframes indet {
+    0%   { background-position: -40% 0; }
+    100% { background-position: 140% 0; }
+  }
   .sep { width:1px; height:18px; background:var(--line); margin:0 4px; }
 </style>
 </head><body>
@@ -171,10 +194,14 @@ function buildChromeHtml(): string {
   <button id="b-reload" title="刷新" aria-label="刷新">⟳</button>
   <input id="addr" type="text" spellcheck="false" placeholder="https://..." />
   <span id="status" aria-live="polite"></span>
+  <button id="b-external" title="在系统浏览器打开当前地址(用于调试或继续在浏览器里浏览)">🧭 系统浏览器</button>
   <span class="sep" aria-hidden="true"></span>
   <button id="b-finish" class="primary" title="从当前页面收集媒体">✅ 完成嗅探</button>
   <button id="b-cancel" class="danger" title="取消并关闭">✕ 关闭</button>
-  <div id="progress"><div></div></div>
+  <div id="progress" aria-hidden="true">
+    <div class="indet"></div>
+    <div class="det"></div>
+  </div>
 </div>
 <script>
   // The page CSP we ship is permissive on inline-script for this single
@@ -185,6 +212,7 @@ function buildChromeHtml(): string {
   $('b-back').addEventListener('click', () => send({ kind: 'back' }));
   $('b-forward').addEventListener('click', () => send({ kind: 'forward' }));
   $('b-reload').addEventListener('click', () => send({ kind: 'reload' }));
+  $('b-external').addEventListener('click', () => send({ kind: 'open-external' }));
   $('b-finish').addEventListener('click', () => send({ kind: 'finish' }));
   $('b-cancel').addEventListener('click', () => send({ kind: 'cancel' }));
   $('addr').addEventListener('keydown', (e) => {
@@ -196,6 +224,7 @@ function buildChromeHtml(): string {
     }
   });
   let lastUrl = '';
+  const det = $('progress').querySelector('.det');
   window.giftkChrome.onState((s) => {
     $('b-back').disabled = !s.canGoBack;
     $('b-forward').disabled = !s.canGoForward;
@@ -205,7 +234,8 @@ function buildChromeHtml(): string {
     }
     $('status').textContent = s.message || s.title || '';
     $('progress').classList.toggle('loading', !!s.isLoading);
-    $('progress').firstElementChild.style.width = (s.isLoading ? Math.max(8, Math.min(95, s.progress || 30)) : 100) + '%';
+    const p = s.isLoading ? Math.max(8, Math.min(95, s.progress || 30)) : 100;
+    det.style.width = p + '%';
   });
 </script>
 </body></html>`;
@@ -245,12 +275,23 @@ export async function openWebviewSniff(
 
   // Inner view — actually loads the user's URL. Lives in the same window
   // as a sibling content view, positioned just below the toolbar.
+  // R-48 perf flags:
+  //  - backgroundThrottling:false — keep timers/RAF running at full
+  //    speed even when the user briefly focuses the host app's main
+  //    window during sniff (otherwise lazy-loaded media may stall).
+  //  - spellcheck:false — disable the spellchecker we never need
+  //    (saves ~20-40 MB and a noticeable amount of init time).
+  //  - v8CacheOptions:'code' — let V8 cache compiled JS to disk so
+  //    re-visits of the same site re-enter steady state faster.
   const view = new WebContentsView({
     webPreferences: {
       partition: PARTITION,
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
+      sandbox: true,
+      backgroundThrottling: false,
+      spellcheck: false,
+      v8CacheOptions: 'code'
     }
   });
   view.webContents.setUserAgent(CHROME_UA);
@@ -286,9 +327,22 @@ export async function openWebviewSniff(
       } catch { /* ignore */ }
     };
 
-    // Mirror inner-view navigation events back to the chrome.
-    view.webContents.on('did-start-loading', () => pushState({ isLoading: true, progress: 20 }));
-    view.webContents.on('did-stop-loading', () => pushState({ isLoading: false, progress: 100 }));
+    // R-48 — Stage-based progress so the user always sees motion even
+    // when an event upstream fires once and then the page stalls
+    // (Cloudflare verification, hCaptcha, OpenAI's blank pre-hydration
+    // shell). The numbers do not need to be accurate; they just need to
+    // *move*.
+    let lastStageProgress = 5;
+    const stage = (n: number, message?: string): void => {
+      lastStageProgress = Math.max(lastStageProgress, n);
+      pushState({ isLoading: lastStageProgress < 100, progress: lastStageProgress, message });
+    };
+    view.webContents.on('did-start-loading', () => { lastStageProgress = 0; stage(15, '正在连接…'); });
+    view.webContents.on('dom-ready', () => stage(55, '正在解析…'));
+    view.webContents.on('did-frame-finish-load', (_e, isMainFrame) => {
+      if (isMainFrame) stage(80, '资源加载中…');
+    });
+    view.webContents.on('did-stop-loading', () => stage(100));
     view.webContents.on('did-navigate', () => pushState());
     view.webContents.on('did-navigate-in-page', () => pushState());
     view.webContents.on('page-title-updated', () => pushState());
@@ -307,9 +361,19 @@ export async function openWebviewSniff(
       callback(false);
     });
 
+    // R-48 — Heartbeat so the toolbar always reflects current state even
+    // if upstream events bunch up or fire before the chrome HTML's IPC
+    // listener is wired. Cleared by finish() / window close.
+    const heartbeat = setInterval(() => {
+      if (settled || win.isDestroyed()) return;
+      pushState();
+    }, 800);
+    const stopHeartbeat = (): void => { try { clearInterval(heartbeat); } catch { /* ignore */ } };
+
     const finish = async (mode: 'confirm' | 'cancel' | 'closed'): Promise<void> => {
       if (settled) return;
       settled = true;
+      stopHeartbeat();
       try {
         if (!view.webContents.isDestroyed()) {
           pageUrl = view.webContents.getURL() || pageUrl;
@@ -382,6 +446,23 @@ export async function openWebviewSniff(
             void wc.loadURL(c.url).catch(() => undefined);
           }
           break;
+        case 'open-external': {
+          // R-48 — Hand the current URL off to the system browser. We
+          // deliberately do NOT join the user's session there (cookies /
+          // localStorage / SW are isolated per-process), so this is a
+          // browse-only escape hatch — useful for users who want to
+          // continue reading the article in their real browser, or
+          // sanity-check a page that misbehaves inside our shell.
+          // Validate the protocol before handing off so we never feed
+          // shell.openExternal a `file://` / `javascript:` URL.
+          const u = wc.getURL();
+          if (typeof u === 'string' && /^https?:\/\//i.test(u)) {
+            void shell.openExternal(u).catch((e) => {
+              log(`[webview-sniff] openExternal failed: ${(e as Error).message}`);
+            });
+          }
+          break;
+        }
         case 'finish':
           void finish('confirm');
           break;
@@ -394,22 +475,37 @@ export async function openWebviewSniff(
 
     win.on('closed', () => { void finish('closed'); });
 
-    // Push initial state once the chrome HTML is ready, then load the
-    // user's URL into the inner view.
+    // R-48 — Critical ordering: load the chrome HTML *first*, wait for
+    // its preload to register the `webview-sniff:chrome` listener, then
+    // kick off the inner-view navigation. Otherwise the very first
+    // `did-start-loading` event arrives before the renderer is wired
+    // and the toolbar stays in its idle state forever (which the user
+    // perceived as "the webview never opens").
     win.webContents.once('did-finish-load', () => {
-      pushState({ message: '正在加载…', isLoading: true, progress: 10 });
+      // Push an immediate state with the requested URL so the address
+      // bar shows what we are about to load (the inner view's getURL()
+      // is still 'about:blank' at this instant).
+      try {
+        win.webContents.send('webview-sniff:chrome', {
+          url: targetUrl,
+          title: '',
+          canGoBack: false,
+          canGoForward: false,
+          isLoading: true,
+          progress: 10,
+          message: '正在打开…'
+        });
+      } catch { /* ignore */ }
+      // Now actually start the inner navigation.
+      view.webContents.loadURL(targetUrl).catch((e) => {
+        log(`[webview-sniff] inner load failed: ${(e as Error).message}`);
+        pushState({ message: `加载失败:${(e as Error).message}`, isLoading: false, progress: 100 });
+      });
     });
 
     void win.loadURL(chromeDataUrl()).catch((e) => {
       log(`[webview-sniff] chrome load failed: ${(e as Error).message}`);
       void finish('cancel');
-    });
-
-    view.webContents.loadURL(targetUrl).catch((e) => {
-      log(`[webview-sniff] inner load failed: ${(e as Error).message}`);
-      // Don't fail the whole flow — user can type a different URL into
-      // the address bar.
-      pushState({ message: `加载失败:${(e as Error).message}`, isLoading: false, progress: 100 });
     });
   });
 }

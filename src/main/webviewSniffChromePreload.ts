@@ -33,6 +33,7 @@ type ChromeCmd =
   | { kind: 'reload' }
   | { kind: 'finish' }
   | { kind: 'cancel' }
+  | { kind: 'open-external' }
   | { kind: 'navigate'; url: string };
 
 contextBridge.exposeInMainWorld('giftkChrome', {
