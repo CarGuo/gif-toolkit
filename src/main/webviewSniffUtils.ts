@@ -24,6 +24,24 @@ const IMAGE_MIME = /^image\//i;
  *  page cannot grow the result set unboundedly. */
 export const WEBVIEW_MAX_ITEMS = 200;
 
+/** R-47 — Height of the chrome toolbar in CSS px. Mirrored in the
+ *  inline HTML in `webviewSniff.ts` so the inner WebContentsView can be
+ *  positioned right below the bar without overlap. Pulled out for unit
+ *  tests so we can lock the layout math without spinning up Electron. */
+export const WEBVIEW_TOOLBAR_HEIGHT = 44;
+
+/**
+ * Compute the bounds of the inner page-host view inside an outer window
+ * of given content size, leaving room for the chrome toolbar at the top.
+ * Negative inputs clamp to zero so a freshly-created (0×0) window does
+ * not try to set a `WebContentsView` to negative dimensions.
+ */
+export function innerViewBounds(contentWidth: number, contentHeight: number): { x: number; y: number; width: number; height: number } {
+  const w = Math.max(0, Math.floor(contentWidth));
+  const h = Math.max(0, Math.floor(contentHeight - WEBVIEW_TOOLBAR_HEIGHT));
+  return { x: 0, y: WEBVIEW_TOOLBAR_HEIGHT, width: w, height: h };
+}
+
 /**
  * Translate a `Content-Type` response header into our 3-way `MediaKind`.
  *

@@ -426,7 +426,7 @@ const App: React.FC = () => {
     setResolvingSet(new Set());
     setResolveErrorMap({});
     activeHistoryIdRef.current = null;
-    setLogs((prev) => [...prev, `[webview] 打开 ${trimmed} — 登录后请点窗口顶部「✅ 完成嗅探」`].slice(-300));
+    setLogs((prev) => [...prev, `[webview] 打开 ${trimmed} — 浏览到目标页面后,点击顶部「✅ 完成嗅探」`].slice(-300));
     try {
       const r = await giftk.sniffWithWebview(trimmed);
       if (myId !== sniffReqId.current) return;
@@ -1552,19 +1552,23 @@ const App: React.FC = () => {
               >
                 ☰
               </button>
-              <button className="primary" onClick={onSniff} disabled={sniffing}>
+              <button className="primary" onClick={onSniff} disabled={sniffing} style={{ whiteSpace: 'nowrap' }}>
                 {sniffing ? '嗅探中…' : '嗅探'}
               </button>
-              {/* R-44 — webview-assisted sniff button. Disabled while any
-                  sniff (headless or webview) is in flight, since both
-                  paths share `sniffing` and the same UI slot for results. */}
+              {/* R-44/R-47 — webview-assisted sniff button. Disabled
+                  while any sniff (headless or webview) is in flight,
+                  since both paths share `sniffing` and the same UI
+                  slot for results. R-47 reframes the entry as a
+                  general-purpose "网页嗅探" since users may use it for
+                  bot-walled / OAuth pages, not only signed-in ones. */}
               <button
                 className="ghost"
                 onClick={onWebviewSniff}
                 disabled={sniffing}
-                title="打开内置浏览器,登录后再嗅探(适合 Medium / Twitter / Patreon 等需要登录的站点)"
+                title="打开内置浏览器,先浏览到目标页面再嗅探(适合需要交互/登录/验证机器人的站点)"
+                style={{ whiteSpace: 'nowrap' }}
               >
-                {sniffing ? '嗅探中…' : '🔐 Webview 登录嗅探'}
+                {sniffing ? '嗅探中…' : '🌐 网页嗅探'}
               </button>
               <SniffHistoryPicker
                 open={sniffHistoryOpen}

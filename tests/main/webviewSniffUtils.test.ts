@@ -12,7 +12,9 @@ import {
   mediaId,
   mergeWebviewMedia,
   webviewDedupKey,
-  WEBVIEW_MAX_ITEMS
+  WEBVIEW_MAX_ITEMS,
+  WEBVIEW_TOOLBAR_HEIGHT,
+  innerViewBounds
 } from '../../src/main/webviewSniffUtils';
 import type { SniffedMedia } from '../../src/shared/types';
 
@@ -129,5 +131,33 @@ describe('mergeWebviewMedia', () => {
       { url: 'https://x.com/a.mp4', kind: 'video', mime: 'video/mp4', pageUrl: PAGE }
     ]);
     expect(Array.from(map.values())[0].mime).toBe('video/mp4');
+  });
+});
+
+describe('innerViewBounds (R-47 chrome-shell layout)', () => {
+  it('places the inner view directly below the toolbar', () => {
+    const r = innerViewBounds(1100, 800);
+    expect(r.x).toBe(0);
+    expect(r.y).toBe(WEBVIEW_TOOLBAR_HEIGHT);
+    expect(r.width).toBe(1100);
+    expect(r.height).toBe(800 - WEBVIEW_TOOLBAR_HEIGHT);
+  });
+
+  it('floors fractional sizes (Electron content-bounds occasionally yields .5px)', () => {
+    const r = innerViewBounds(1100.7, 800.9);
+    expect(r.width).toBe(1100);
+    expect(r.height).toBe(Math.floor(800.9 - WEBVIEW_TOOLBAR_HEIGHT));
+  });
+
+  it('clamps to zero rather than producing negative dimensions', () => {
+    const r = innerViewBounds(0, 0);
+    expect(r.width).toBe(0);
+    expect(r.height).toBe(0);
+    expect(r.y).toBe(WEBVIEW_TOOLBAR_HEIGHT);
+  });
+
+  it('clamps when content height is smaller than the toolbar', () => {
+    const r = innerViewBounds(400, 20);
+    expect(r.height).toBe(0);
   });
 });

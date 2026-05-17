@@ -172,7 +172,13 @@ input[type="text"]:focus { border-color: var(--accent); }
   color: var(--muted);
 }
 .url-bar { display: flex; gap: 8px; position: relative; }
-.url-bar input { flex: 1; }
+.url-bar input { flex: 1; min-width: 0; }
+/* R-47 — keep the action buttons readable on narrow windows: never
+   wrap or compress their labels (compressed text was reported as
+   illegible). `flex-shrink: 0` paired with `white-space: nowrap`
+   forces the URL input to absorb width changes instead of the
+   buttons. */
+.url-bar button { white-space: nowrap; flex-shrink: 0; }
 
 /* R-32 — 解析历史触发按钮 + popover. The popover anchors to the
    .url-bar (position: relative above) and overlays the rest of the

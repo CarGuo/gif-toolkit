@@ -1,33 +1,47 @@
 /**
- * R-44 — Webview-assisted sniffing.
+ * R-47 — Browser-shell webview sniffing.
  *
- * Some pages (Medium private posts, Twitter/X media tabs, members-only
- * Patreon attachments, ...) only render their media after the user signs in
- * inside a real Chromium UI. The headless `sniffPage()` path cannot reach
- * these resources because it never sees a session cookie.
+ * Spawns a real Chromium window with our own native-feeling chrome on top
+ * (back / forward / reload / address bar / progress / finish / cancel) and
+ * embeds the user's target URL in a sibling `WebContentsView` mounted just
+ * below the toolbar. The toolbar lives in the **outer** window and is
+ * therefore always interactive — it does not depend on the target page
+ * loading or honouring our injected DOM, which used to break on:
+ *   - SPA navigations that wiped our toolbar element
+ *   - sites whose CSP rejected inline `<script>`
+ *   - third-party iframes (OpenAI's Cloudflare verification, Patreon
+ *     OAuth) that rendered while the host page was still blank
  *
- * This module spawns a dedicated `BrowserWindow` backed by a persistent
- * partition (`persist:webview-sniff`) so the same login survives across
- * runs. While the user browses, we passively record every media-shaped
- * network response via `session.webRequest.onCompleted`. When the user
- * clicks "✅ 完成嗅探" in our injected toolbar, we additionally execute a
- * DOM-walking script as a fallback (covers `<img src>`, `<video src>`,
- * `<source src>`, and CSS `background-image:url(...)`), then merge both
- * sources, dedupe, and resolve the IPC promise back to the renderer.
+ * The session partition (`persist:webview-sniff`) is kept so the user's
+ * cookies survive across runs. While the user browses the inner view, we
+ * passively record media-shaped responses through
+ * `session.webRequest.onCompleted`. On "完成嗅探", we additionally run a
+ * DOM-walking script in the **inner** view to merge in `<img src>` /
+ * `<video src>` / CSS `background-image`. Both sources are deduped and
+ * resolved as a `SniffResult`.
  */
-import { BrowserWindow, session, ipcMain } from 'electron';
+import { BrowserWindow, WebContentsView, session, ipcMain } from 'electron';
 import path from 'path';
+import fs from 'fs';
 import type { SniffedMedia, SniffResult, MediaKind } from '../shared/types';
 import { classifyByExt } from './sniffer';
 import {
   classifyByContentType,
   mergeWebviewMedia,
   webviewDedupKey,
-  WEBVIEW_MAX_ITEMS as MAX_ITEMS
+  WEBVIEW_MAX_ITEMS as MAX_ITEMS,
+  WEBVIEW_TOOLBAR_HEIGHT as TOOLBAR_HEIGHT,
+  innerViewBounds
 } from './webviewSniffUtils';
 import { log } from './logger';
 
 const PARTITION = 'persist:webview-sniff';
+/** Most-recent stable Chrome on macOS. Picked deliberately so the inner
+ *  view does not advertise itself as `Electron/...` (some Cloudflare /
+ *  hCaptcha challenges flag the default UA as a bot). */
+const CHROME_UA =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ' +
+  '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
 interface CapturedResource {
   url: string;
@@ -36,10 +50,9 @@ interface CapturedResource {
 }
 
 /**
- * Internal: subscribe to the partition's `webRequest.onCompleted` and push
- * every media-shaped response into `out`. The returned function detaches the
- * listener so the partition does not keep accumulating after the window is
- * closed.
+ * Subscribe the partition's `webRequest.onCompleted` and push every
+ * media-shaped response into `out`. Returns a detach handle so the
+ * partition does not keep accumulating after the window is closed.
  */
 function attachNetworkRecorder(out: Map<string, CapturedResource>, partition: string): () => void {
   const ses = session.fromPartition(partition);
@@ -49,7 +62,6 @@ function attachNetworkRecorder(out: Map<string, CapturedResource>, partition: st
     const url = details.url;
     if (!/^https?:/i.test(url)) return;
     const headers = details.responseHeaders || {};
-    // Header keys can be either casing; normalise once.
     let ct: string | undefined;
     for (const k of Object.keys(headers)) {
       if (k.toLowerCase() === 'content-type') {
@@ -62,12 +74,7 @@ function attachNetworkRecorder(out: Map<string, CapturedResource>, partition: st
     const byExt = classifyByExt(url);
     const kind = byMime || byExt;
     if (!kind) return;
-    if (kind === 'image' && byMime !== 'image') {
-      // Pure stills get noisy fast (icons, avatars). Only keep them when the
-      // server explicitly declares `image/*` (so a misnamed `.jpg` URL that
-      // is actually an HTML 404 page does not slip through).
-      return;
-    }
+    if (kind === 'image' && byMime !== 'image') return;
     const key = webviewDedupKey(url);
     if (out.has(key)) return;
     out.set(key, { url, kind, mime: ct });
@@ -104,7 +111,6 @@ const DOM_SCAN_SCRIPT = `(() => {
     push(el.poster);
   });
   document.querySelectorAll('source').forEach((el) => push(el.src));
-  // CSS background-image scan — covers Pinterest-style overlays.
   document.querySelectorAll('*').forEach((el) => {
     try {
       const bg = getComputedStyle(el).backgroundImage;
@@ -120,60 +126,100 @@ const DOM_SCAN_SCRIPT = `(() => {
   return Array.from(new Set(out)).slice(0, 500);
 })();`;
 
-/**
- * Toolbar HTML injected into the top of the user's webview. Keeps things
- * dead simple: two buttons, no framework. Buttons message the host via
- * `window.giftkWebview.<event>()`, which we wire up via a preload script.
- */
-const TOOLBAR_HTML = `
+/** R-47 — Chrome HTML loaded into the outer window's webContents.
+ *  We fold it into a `data:text/html;base64,...` URL so we do not need a
+ *  filesystem-resident html asset (keeps the build script untouched).
+ *  The toolbar talks to the main process exclusively through the preload-
+ *  exposed `window.giftkChrome` API. */
+function buildChromeHtml(): string {
+  return `<!doctype html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8" />
+<title>GIF Toolkit — 网页嗅探</title>
 <style>
-  #giftk-webview-bar {
-    position: fixed; top: 0; left: 0; right: 0; z-index: 2147483647;
-    display: flex; align-items: center; gap: 8px;
-    padding: 6px 12px;
-    background: rgba(20, 20, 24, 0.92); color: #fff;
-    font: 12px -apple-system, system-ui, sans-serif;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.4);
-  }
-  #giftk-webview-bar .label { opacity: 0.75; flex: 1; min-width: 0;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #giftk-webview-bar button {
-    border: 1px solid rgba(255,255,255,0.18);
-    background: rgba(255,255,255,0.08); color: #fff;
-    padding: 4px 10px; border-radius: 4px; cursor: pointer; font: inherit;
-  }
-  #giftk-webview-bar button.primary { background: #2a7; border-color: #2a7; }
-  #giftk-webview-bar button:hover { filter: brightness(1.15); }
-  body { padding-top: 32px !important; }
+  :root { --bg:#1a1b1f; --bg-2:#23252b; --line:rgba(255,255,255,0.08);
+    --fg:#e6e7eb; --muted:#9aa0aa; --accent:#2a7; --warn:#ef5b6e; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; padding:0; height:100%; background:var(--bg); color:var(--fg);
+    font: 13px -apple-system, system-ui, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+  #bar { height:${TOOLBAR_HEIGHT}px; display:flex; align-items:center; gap:6px; padding:0 8px;
+    background:var(--bg-2); border-bottom:1px solid var(--line); position:relative; z-index:2; }
+  #bar button { flex:0 0 auto; height:28px; min-width:28px; padding:0 8px; background:transparent;
+    color:var(--fg); border:1px solid var(--line); border-radius:4px; cursor:pointer; font:inherit;
+    line-height:1; white-space:nowrap; }
+  #bar button:hover:not(:disabled) { background:rgba(255,255,255,0.06); }
+  #bar button:disabled { opacity:0.4; cursor:not-allowed; }
+  #bar button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  #bar button.primary:hover:not(:disabled) { filter:brightness(1.1); }
+  #bar button.danger:hover:not(:disabled) { background:rgba(239,91,110,0.15);
+    border-color:var(--warn); color:var(--warn); }
+  #addr { flex:1; min-width:0; height:28px; padding:0 10px; background:var(--bg); color:var(--fg);
+    border:1px solid var(--line); border-radius:14px; font:inherit; outline:none; }
+  #addr:focus { border-color:var(--accent); }
+  #status { flex:0 0 auto; font-size:11px; color:var(--muted); max-width:240px; overflow:hidden;
+    text-overflow:ellipsis; white-space:nowrap; }
+  #progress { position:absolute; left:0; right:0; bottom:0; height:2px; pointer-events:none; }
+  #progress > div { height:100%; width:0%; background:var(--accent);
+    transition:width 200ms linear, opacity 200ms linear; opacity:0; }
+  #progress.loading > div { opacity:1; }
+  .sep { width:1px; height:18px; background:var(--line); margin:0 4px; }
 </style>
-<div id="giftk-webview-bar" role="toolbar" aria-label="webview sniff toolbar">
-  <span class="label">登录后点「完成嗅探」从当前页面收集媒体</span>
-  <button type="button" id="giftk-webview-confirm" class="primary">✅ 完成嗅探</button>
-  <button type="button" id="giftk-webview-cancel">✕ 关闭</button>
+</head><body>
+<div id="bar" role="toolbar" aria-label="嗅探浏览器顶栏">
+  <button id="b-back" title="后退" aria-label="后退" disabled>◀</button>
+  <button id="b-forward" title="前进" aria-label="前进" disabled>▶</button>
+  <button id="b-reload" title="刷新" aria-label="刷新">⟳</button>
+  <input id="addr" type="text" spellcheck="false" placeholder="https://..." />
+  <span id="status" aria-live="polite"></span>
+  <span class="sep" aria-hidden="true"></span>
+  <button id="b-finish" class="primary" title="从当前页面收集媒体">✅ 完成嗅探</button>
+  <button id="b-cancel" class="danger" title="取消并关闭">✕ 关闭</button>
+  <div id="progress"><div></div></div>
 </div>
 <script>
-(() => {
-  const fire = (name) => { try { window.postMessage({ __giftkWebview: name }, '*'); } catch (_) {} };
-  document.getElementById('giftk-webview-confirm').addEventListener('click', () => fire('confirm'));
-  document.getElementById('giftk-webview-cancel').addEventListener('click', () => fire('cancel'));
-})();
+  // The page CSP we ship is permissive on inline-script for this single
+  // chrome page; the outer window only ever loads this exact HTML, so
+  // there is no untrusted-input surface here.
+  const $ = (id) => document.getElementById(id);
+  const send = (cmd) => { try { window.giftkChrome.send(cmd); } catch (_) {} };
+  $('b-back').addEventListener('click', () => send({ kind: 'back' }));
+  $('b-forward').addEventListener('click', () => send({ kind: 'forward' }));
+  $('b-reload').addEventListener('click', () => send({ kind: 'reload' }));
+  $('b-finish').addEventListener('click', () => send({ kind: 'finish' }));
+  $('b-cancel').addEventListener('click', () => send({ kind: 'cancel' }));
+  $('addr').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      let v = $('addr').value.trim();
+      if (!v) return;
+      if (!/^https?:\\/\\//i.test(v)) v = 'https://' + v;
+      send({ kind: 'navigate', url: v });
+    }
+  });
+  let lastUrl = '';
+  window.giftkChrome.onState((s) => {
+    $('b-back').disabled = !s.canGoBack;
+    $('b-forward').disabled = !s.canGoForward;
+    if (s.url && s.url !== lastUrl && document.activeElement !== $('addr')) {
+      $('addr').value = s.url;
+      lastUrl = s.url;
+    }
+    $('status').textContent = s.message || s.title || '';
+    $('progress').classList.toggle('loading', !!s.isLoading);
+    $('progress').firstElementChild.style.width = (s.isLoading ? Math.max(8, Math.min(95, s.progress || 30)) : 100) + '%';
+  });
 </script>
-`;
+</body></html>`;
+}
 
-const INJECT_TOOLBAR_SCRIPT = `(() => {
-  if (document.getElementById('giftk-webview-bar')) return;
-  const wrap = document.createElement('div');
-  wrap.innerHTML = ${JSON.stringify(TOOLBAR_HTML)};
-  // Append children one by one so the inline <script> actually runs.
-  while (wrap.firstChild) document.body.appendChild(wrap.firstChild);
-})();`;
+function chromeDataUrl(): string {
+  const html = buildChromeHtml();
+  return 'data:text/html;charset=utf-8;base64,' + Buffer.from(html, 'utf8').toString('base64');
+}
 
 /**
- * Main entry: open a window pointed at `targetUrl`, wait for the user to
- * either confirm or close, then resolve with the deduped media list.
- *
- * The window is *not* modal — we want users to be able to alt-tab to a
- * password manager, paste a 2FA code, etc.
+ * Main entry: open a chrome-shell window pointed at `targetUrl`, wait for
+ * the user to either confirm or close, then resolve with the deduped
+ * media list.
  */
 export async function openWebviewSniff(
   targetUrl: string,
@@ -181,52 +227,97 @@ export async function openWebviewSniff(
 ): Promise<SniffResult> {
   const captured = new Map<string, CapturedResource>();
   const detach = attachNetworkRecorder(captured, PARTITION);
-  // Per-window correlation id for the message channel.
-  const channelId = `webview-sniff-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
+  // Outer window — hosts our chrome-shell HTML.
   const win = new BrowserWindow({
     width: 1100,
     height: 800,
     parent: parent || undefined,
-    title: 'GIF Toolkit — Webview 登录嗅探',
+    title: 'GIF Toolkit — 网页嗅探',
+    backgroundColor: '#1a1b1f',
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: resolveChromePreload()
+    }
+  });
+
+  // Inner view — actually loads the user's URL. Lives in the same window
+  // as a sibling content view, positioned just below the toolbar.
+  const view = new WebContentsView({
     webPreferences: {
       partition: PARTITION,
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true,
-      preload: path.join(__dirname, 'webviewSniffPreload.js'),
-      // The preload script reads this argv entry to know which IPC channel
-      // belongs to this specific window. We avoid mutating the loaded URL
-      // (some auth providers reject unexpected query params).
-      additionalArguments: [`--giftk-webview-channel=${channelId}`]
+      sandbox: true
     }
   });
+  view.webContents.setUserAgent(CHROME_UA);
+  win.contentView.addChildView(view);
 
-  // Inject the toolbar after every navigation so SPA route changes still keep
-  // the floating bar visible.
-  win.webContents.on('did-finish-load', () => {
-    win.webContents.executeJavaScript(INJECT_TOOLBAR_SCRIPT, true).catch(() => undefined);
-  });
+  const layout = (): void => {
+    const [w, h] = win.getContentSize();
+    view.setBounds(innerViewBounds(w, h));
+  };
+  layout();
+  win.on('resize', layout);
 
   return new Promise<SniffResult>((resolve) => {
     let settled = false;
     let pageUrl = targetUrl;
     let pageTitle: string | undefined;
 
-    const finish = async (mode: 'confirm' | 'cancel' | 'closed') => {
+    const pushState = (extra?: { message?: string; progress?: number; isLoading?: boolean }): void => {
+      if (win.isDestroyed()) return;
+      try {
+        const wc = view.webContents;
+        const nh = (wc as unknown as { navigationHistory?: { canGoBack(): boolean; canGoForward(): boolean } }).navigationHistory;
+        const state = {
+          url: wc.getURL() || pageUrl,
+          title: wc.getTitle() || '',
+          canGoBack: nh ? nh.canGoBack() : (wc as unknown as { canGoBack(): boolean }).canGoBack(),
+          canGoForward: nh ? nh.canGoForward() : (wc as unknown as { canGoForward(): boolean }).canGoForward(),
+          isLoading: extra?.isLoading ?? wc.isLoading(),
+          progress: extra?.progress ?? (wc.isLoading() ? 50 : 100),
+          message: extra?.message
+        };
+        win.webContents.send('webview-sniff:chrome', state);
+      } catch { /* ignore */ }
+    };
+
+    // Mirror inner-view navigation events back to the chrome.
+    view.webContents.on('did-start-loading', () => pushState({ isLoading: true, progress: 20 }));
+    view.webContents.on('did-stop-loading', () => pushState({ isLoading: false, progress: 100 }));
+    view.webContents.on('did-navigate', () => pushState());
+    view.webContents.on('did-navigate-in-page', () => pushState());
+    view.webContents.on('page-title-updated', () => pushState());
+    view.webContents.on('did-fail-load', (_e, code, desc, _url, isMainFrame) => {
+      // Sub-resource failures (Cloudflare CT pings, third-party trackers)
+      // are noisy and not actionable. Only surface main-frame failures.
+      if (!isMainFrame) return;
+      pushState({ message: `加载失败:${desc} (${code})`, isLoading: false, progress: 100 });
+    });
+
+    // Tolerant TLS for sub-resources (third-party widgets often have
+    // mismatched certs that would otherwise dump red into stderr without
+    // affecting functionality). Main-frame errors still surface above.
+    view.webContents.on('certificate-error', (event, _url, _err, _cert, callback) => {
+      event.preventDefault();
+      callback(false);
+    });
+
+    const finish = async (mode: 'confirm' | 'cancel' | 'closed'): Promise<void> => {
       if (settled) return;
       settled = true;
-      // Best-effort: capture the latest URL/title before tearing down so the
-      // returned SniffResult is anchored at where the user actually ended up.
       try {
-        if (!win.isDestroyed()) {
-          pageUrl = win.webContents.getURL() || pageUrl;
-          pageTitle = win.webContents.getTitle() || undefined;
+        if (!view.webContents.isDestroyed()) {
+          pageUrl = view.webContents.getURL() || pageUrl;
+          pageTitle = view.webContents.getTitle() || undefined;
         }
       } catch { /* ignore */ }
 
       const merged = new Map<string, SniffedMedia>();
-      // Phase A — webRequest captures.
       mergeWebviewMedia(
         merged,
         Array.from(captured.values()).map((r) => ({
@@ -234,12 +325,9 @@ export async function openWebviewSniff(
         }))
       );
 
-      // Phase B — DOM scan (only on confirm; if user cancelled we trust the
-      // network log alone to avoid running JS in a window that might already
-      // be in a weird half-navigated state).
-      if (mode === 'confirm' && !win.isDestroyed()) {
+      if (mode === 'confirm' && !view.webContents.isDestroyed()) {
         try {
-          const urls: string[] = await win.webContents.executeJavaScript(DOM_SCAN_SCRIPT, true);
+          const urls: string[] = await view.webContents.executeJavaScript(DOM_SCAN_SCRIPT, true);
           if (Array.isArray(urls)) {
             const dom: Array<{ url: string; kind: MediaKind; pageUrl: string }> = [];
             for (const u of urls) {
@@ -256,7 +344,7 @@ export async function openWebviewSniff(
       }
 
       detach();
-      ipcMain.removeAllListeners(channelId);
+      ipcMain.removeAllListeners('webview-sniff:chrome-cmd');
       try { if (!win.isDestroyed()) win.close(); } catch { /* ignore */ }
 
       const items = Array.from(merged.values());
@@ -269,19 +357,72 @@ export async function openWebviewSniff(
       });
     };
 
-    // The preload bridges window-side `postMessage({ __giftkWebview })` events
-    // into IPC so we can hear them in main without renderer indirection.
-    ipcMain.on(channelId, (_e, msg: unknown) => {
-      if (msg === 'confirm') void finish('confirm');
-      else if (msg === 'cancel') void finish('cancel');
-    });
+    // Drive inner view from the chrome.
+    const cmdHandler = (_e: Electron.IpcMainEvent, cmd: unknown): void => {
+      if (!cmd || typeof cmd !== 'object') return;
+      const c = cmd as { kind?: string; url?: string };
+      const wc = view.webContents;
+      const nh = (wc as unknown as { navigationHistory?: { canGoBack(): boolean; canGoForward(): boolean; goBack(): void; goForward(): void } }).navigationHistory;
+      const goBack = (): void => { if (nh) nh.goBack(); else (wc as unknown as { goBack(): void }).goBack(); };
+      const goForward = (): void => { if (nh) nh.goForward(); else (wc as unknown as { goForward(): void }).goForward(); };
+      const canBack = (): boolean => nh ? nh.canGoBack() : (wc as unknown as { canGoBack(): boolean }).canGoBack();
+      const canForward = (): boolean => nh ? nh.canGoForward() : (wc as unknown as { canGoForward(): boolean }).canGoForward();
+      switch (c.kind) {
+        case 'back':
+          if (canBack()) goBack();
+          break;
+        case 'forward':
+          if (canForward()) goForward();
+          break;
+        case 'reload':
+          wc.reload();
+          break;
+        case 'navigate':
+          if (typeof c.url === 'string' && /^https?:\/\//i.test(c.url)) {
+            void wc.loadURL(c.url).catch(() => undefined);
+          }
+          break;
+        case 'finish':
+          void finish('confirm');
+          break;
+        case 'cancel':
+          void finish('cancel');
+          break;
+      }
+    };
+    ipcMain.on('webview-sniff:chrome-cmd', cmdHandler);
 
-    // Load the user's URL untouched.
     win.on('closed', () => { void finish('closed'); });
 
-    win.loadURL(targetUrl).catch((e) => {
-      log(`[webview-sniff] load failed: ${(e as Error).message}`);
+    // Push initial state once the chrome HTML is ready, then load the
+    // user's URL into the inner view.
+    win.webContents.once('did-finish-load', () => {
+      pushState({ message: '正在加载…', isLoading: true, progress: 10 });
+    });
+
+    void win.loadURL(chromeDataUrl()).catch((e) => {
+      log(`[webview-sniff] chrome load failed: ${(e as Error).message}`);
       void finish('cancel');
     });
+
+    view.webContents.loadURL(targetUrl).catch((e) => {
+      log(`[webview-sniff] inner load failed: ${(e as Error).message}`);
+      // Don't fail the whole flow — user can type a different URL into
+      // the address bar.
+      pushState({ message: `加载失败:${(e as Error).message}`, isLoading: false, progress: 100 });
+    });
   });
+}
+
+/**
+ * Locate the compiled chrome preload. In dev (`tsc --watch`) it lives at
+ * `dist/main/webviewSniffChromePreload.js`; in production the same path
+ * applies because we ship the entire `dist/` tree via electron-builder.
+ */
+function resolveChromePreload(): string {
+  const candidate = path.join(__dirname, 'webviewSniffChromePreload.js');
+  if (fs.existsSync(candidate)) return candidate;
+  // Fallback — when running from an unbuilt source tree some tests stub
+  // the resolver. Don't crash; just return the candidate anyway.
+  return candidate;
 }
