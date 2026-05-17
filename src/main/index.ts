@@ -22,6 +22,7 @@ import type {
   ToolboxParams
 } from '../shared/types';
 import { isPrivateHost, safeName } from './helpers';
+import { RESOLVED_HEADER_ALLOWLIST, SNIFFED_MEDIA_SOURCES } from '../shared/headers';
 import {
   resolveEmbed,
   isResolvable,
@@ -90,15 +91,10 @@ function assertOutputDir(p: unknown): string {
 
 /* ----------------------- Input sanitisers ----------------------- */
 
-// Mirror src/main/resolver/ytdlp.ts HEADER_ALLOWLIST — IPC payloads coming
-// back from the renderer must be subject to the same strict allow-list as
-// what we synthesise inside the resolver, so a compromised renderer cannot
-// inject Authorization / Host / Set-Cookie headers into the downloader.
-const RESOLVED_HEADER_ALLOWLIST = new Set<string>([
-  'user-agent', 'referer', 'origin',
-  'accept', 'accept-language', 'accept-encoding',
-  'range', 'x-csrf-token', 'x-requested-with'
-]);
+// HEADER allow-list lifted to src/shared/headers.ts in R-53 so the resolver
+// (synthesise-headers path) and this IPC sanitiser (validate-headers path)
+// share one source of truth. A compromised renderer cannot inject
+// Authorization / Host / Set-Cookie headers into the downloader.
 
 function sanitizeResolved(r: unknown): ResolvedMedia | undefined {
   if (!r || typeof r !== 'object') return undefined;
@@ -151,7 +147,18 @@ function sanitizeMedia(m: unknown): SniffedMedia {
   const kind = obj.kind;
   if (kind !== 'video' && kind !== 'gif' && kind !== 'image') throw new Error('invalid media.kind');
   const pageUrl = obj.pageUrl ? assertHttpUrl(obj.pageUrl) : url;
-  const source = obj.source as SniffedMedia['source'];
+  // R-53 — strict source whitelist. A forged / future / typo-ed source
+  // would otherwise pass through unchecked and downstream dedup may
+  // double-count or mis-route the item. Reject the whole payload when
+  // the value is not a recognised tag — every legitimate sniffer
+  // (sniffer.ts / webviewSniff.ts / systemChromeSniff.ts /
+  // ytdlpDirectSniff.ts) populates this field, so a missing or wrong
+  // source means a stale or forged IPC.
+  const sourceRaw = typeof obj.source === 'string' ? obj.source : '';
+  if (!SNIFFED_MEDIA_SOURCES.has(sourceRaw)) {
+    throw new Error('invalid media.source');
+  }
+  const source = sourceRaw as SniffedMedia['source'];
   // Preserve embed-only flags so the main-process security boundary can refuse
   // a task even if a stale renderer payload slips them past the UI guard.
   const requiresExternalDownload = obj.requiresExternalDownload === true;
@@ -570,17 +577,30 @@ ipcMain.handle('sniff:cancel', async () => {
 
 // R-44 — webview-assisted sniff. Spawns a real Chromium window, lets the
 // user log in, then merges webRequest captures + DOM scan into a SniffResult.
+//
+// R-53 — Single-flight discipline is now unified across all four sniff
+// entries (sniff:url, sniff:webview, sniff:system-chrome, sniff:ytdlp-direct).
+// They share `currentSniffCtrl`, so kicking off any new mode aborts the
+// in-flight one in any other mode. This collapses the previous "race A":
+// switching from embedded webview to yt-dlp would orphan the embedded
+// window because the embedded path didn't even own a controller.
 let webviewSniffInFlight = false;
 ipcMain.handle('sniff:webview', async (_e, url: unknown) => {
   if (webviewSniffInFlight) {
     throw new Error('已经有一个 Webview 嗅探窗口在进行中,请先关闭它');
   }
   const safe = assertHttpUrl(url);
+  if (currentSniffCtrl) {
+    try { currentSniffCtrl.abort(); } catch { /* ignore */ }
+  }
+  const ctrl = new AbortController();
+  currentSniffCtrl = ctrl;
   webviewSniffInFlight = true;
   try {
-    return await openWebviewSniff(safe, mainWindow);
+    return await openWebviewSniff(safe, mainWindow, { signal: ctrl.signal });
   } finally {
     webviewSniffInFlight = false;
+    if (currentSniffCtrl === ctrl) currentSniffCtrl = null;
   }
 });
 

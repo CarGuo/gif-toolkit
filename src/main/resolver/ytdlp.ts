@@ -4,6 +4,7 @@ import { app } from 'electron';
 import { YtDlp, helpers, type VideoInfo, type VideoFormat } from 'ytdlp-nodejs';
 import { log } from '../logger';
 import { isPrivateHost } from '../helpers';
+import { sanitizeAllowlistedHeaders } from '../../shared/headers';
 import type { ResolvedMedia } from '../../shared/types';
 
 /**
@@ -266,38 +267,12 @@ function pickBestFormat(formats: VideoFormat[]): VideoFormat | undefined {
     .sort((a, b) => score(b) - score(a))[0];
 }
 
-// Allow only headers that are useful for fetching CDN content (UA, Referer,
-// Origin, Accept-*, Range). Reject everything else by default — yt-dlp's
-// extractor can return arbitrary headers and we MUST NOT forward authn /
-// proxy / host-overriding fields to the eventual axios/ffmpeg request.
-const HEADER_ALLOWLIST = new Set<string>([
-  'user-agent',
-  'referer',
-  'origin',
-  'accept',
-  'accept-language',
-  'accept-encoding',
-  'range',
-  'x-csrf-token',
-  'x-requested-with'
-]);
+// Allowed CDN headers + sanitiser are now sourced from src/shared/headers.ts
+// so renderer's IPC entry and this resolver share the same allow-list.
+// Lifted in R-53 — historically these two paths drifted.
+const sanitizeHeaders = sanitizeAllowlistedHeaders;
 
-function sanitizeHeaders(h: unknown): Record<string, string> {
-  const out: Record<string, string> = {};
-  if (!h || typeof h !== 'object') return out;
-  for (const [k, v] of Object.entries(h as Record<string, unknown>)) {
-    if (typeof k !== 'string') continue;
-    if (typeof v !== 'string') continue;
-    if (!/^[A-Za-z0-9-]+$/.test(k)) continue;
-    if (!HEADER_ALLOWLIST.has(k.toLowerCase())) continue;
-    if (v.length > 1024) continue;
-    if (/[\r\n]/.test(v) || v.indexOf('\u0000') !== -1) continue;
-    out[k] = v;
-  }
-  return out;
-}
-
-function ensurePublicHttp(u: string): string {
+export function ensurePublicHttp(u: string): string {
   let parsed: URL;
   try { parsed = new URL(u); } catch { throw new Error('invalid resolved URL'); }
   if (!/^https?:$/.test(parsed.protocol)) throw new Error('resolved URL must be http(s)');
@@ -307,7 +282,82 @@ function ensurePublicHttp(u: string): string {
   return parsed.toString();
 }
 
-export async function resolveDirectUrl(pageUrl: string): Promise<ResolvedMedia> {
+/**
+ * R-53 — Spawn yt-dlp with `--dump-single-json` (or `-J` / `--print-json`)
+ * so we get the same `VideoInfo`-shaped payload that `ytdlp-nodejs`
+ * produces, but with a real `child` handle we can kill on AbortSignal.
+ *
+ * The default `getInfoAsync()` from `ytdlp-nodejs` does not expose the
+ * underlying child process — calling `Promise.race(promise, abortPromise)`
+ * only lets the *outer* promise reject, while the actual yt-dlp
+ * subprocess keeps downloading the JSON metadata for many seconds.
+ * That's the high-priority bug R-52 review caught: "Promise.race fake
+ * cancel". This function fixes it by spawning the binary directly,
+ * tracking the child, and SIGKILL'ing it the moment the signal fires.
+ */
+function getInfoSpawn(bin: string, pageUrl: string, signal?: AbortSignal): Promise<VideoInfo> {
+  return new Promise<VideoInfo>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error('aborted'));
+      return;
+    }
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { spawn } = require('child_process') as typeof import('child_process');
+    const args = [
+      '--no-warnings',
+      '--no-progress',
+      '--no-playlist',
+      '--no-call-home',
+      '--socket-timeout', '15',
+      '--dump-single-json',
+      pageUrl
+    ];
+    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdoutBuf = '';
+    let stderrBuf = '';
+    let killed = false;
+    // Cap stdout / stderr so a malicious extractor cannot exhaust memory.
+    const STDOUT_CAP = 32 * 1024 * 1024; // 32 MB JSON ought to be enough
+    const STDERR_CAP = 256 * 1024;
+    child.stdout?.on('data', (c: Buffer) => {
+      if (stdoutBuf.length < STDOUT_CAP) stdoutBuf += c.toString();
+    });
+    child.stderr?.on('data', (c: Buffer) => {
+      if (stderrBuf.length < STDERR_CAP) stderrBuf += c.toString();
+    });
+    const onAbort = (): void => {
+      killed = true;
+      try { child.kill('SIGTERM'); } catch { /* ignore */ }
+      // Hard kill after 1 s if SIGTERM didn't take.
+      setTimeout(() => {
+        try { child.kill('SIGKILL'); } catch { /* ignore */ }
+      }, 1000).unref();
+      reject(new Error('aborted'));
+    };
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
+    child.on('error', (e: Error) => {
+      if (signal) signal.removeEventListener('abort', onAbort);
+      if (!killed) reject(e);
+    });
+    child.on('close', (code: number | null) => {
+      if (signal) signal.removeEventListener('abort', onAbort);
+      if (killed) return; // already rejected via abort path
+      if (code !== 0) {
+        const tail = stderrBuf.trim().slice(-500);
+        reject(new Error(`yt-dlp exited with code ${code}: ${tail}`));
+        return;
+      }
+      try {
+        const parsed = JSON.parse(stdoutBuf) as VideoInfo;
+        resolve(parsed);
+      } catch (e) {
+        reject(new Error(`yt-dlp JSON parse failed: ${(e as Error).message}`));
+      }
+    });
+  });
+}
+
+export async function resolveDirectUrl(pageUrl: string, signal?: AbortSignal): Promise<ResolvedMedia> {
   // Validate input so we never spawn yt-dlp with a non-http target.
   ensurePublicHttp(pageUrl);
   // ensureYtdlp() returns the actual binary path. In production this is
@@ -321,8 +371,18 @@ export async function resolveDirectUrl(pageUrl: string): Promise<ResolvedMedia> 
   } catch (e) {
     throw new YtDlpNotInstalledError(ytdlpBinaryPath(), (e as Error).message);
   }
-  const yt = getInstance(bin);
-  const info = (await yt.getInfoAsync(pageUrl)) as VideoInfo;
+  // R-53 — when a signal is provided, drive yt-dlp via spawn so abort
+  // actually kills the child. Otherwise fall back to the ytdlp-nodejs
+  // wrapper for the no-signal callers (resolveEmbed in the existing
+  // R-14 path keeps using getInstance() so its connection caching
+  // and diagnostics survive untouched).
+  let info: VideoInfo;
+  if (signal) {
+    info = await getInfoSpawn(bin, pageUrl, signal);
+  } else {
+    const yt = getInstance(bin);
+    info = (await yt.getInfoAsync(pageUrl)) as VideoInfo;
+  }
   if (!info || !info.formats) throw new Error('yt-dlp returned no formats');
   const best = pickBestFormat(info.formats);
   if (!best || !best.url) throw new Error('no playable format found');
@@ -332,9 +392,17 @@ export async function resolveDirectUrl(pageUrl: string): Promise<ResolvedMedia> 
   const formatHeaders = (best as unknown as { http_headers?: unknown }).http_headers;
   const infoHeaders = (info as unknown as { http_headers?: unknown }).http_headers;
   const headers = sanitizeHeaders(formatHeaders ?? infoHeaders);
+  // R-53 — best.ext can be missing or non-video (e.g. 'mhtml' filtered
+  // earlier; 'jpg' for storyboards). Build a more defensive mime so we
+  // don't end up advertising 'video/jpg' downstream.
+  const ext = (best.ext || '').toLowerCase();
+  const isVideoExt = /^(mp4|webm|mov|m4v|mkv|avi|flv|3gp|ts)$/.test(ext);
+  const mime = isVideoExt
+    ? (ext === 'mp4' ? 'video/mp4' : `video/${ext}`)
+    : 'video/mp4';
   return {
     url: directUrl,
-    mime: best.ext === 'mp4' ? 'video/mp4' : `video/${best.ext}`,
+    mime,
     headers: Object.keys(headers).length > 0 ? headers : undefined,
     qualityLabel: best.format_note || best.resolution || (best.height ? `${best.height}p` : undefined),
     width: typeof best.width === 'number' ? best.width : undefined,

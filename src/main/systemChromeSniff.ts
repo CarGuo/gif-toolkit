@@ -123,7 +123,13 @@ interface SniffOpts {
 /** Wait for Chrome to print/write the chosen debugger port. We poll the
  *  DevToolsActivePort file (written by Chrome the moment the WS server
  *  is listening) and ALSO listen on stdout/stderr for the banner — first
- *  one to fire wins. Times out after 8s. */
+ *  one to fire wins. Times out after 8s.
+ *
+ *  R-53 — exit listener is now passed through `child.once`, AND we
+ *  explicitly remove it via `child.off` in `cleanup()` so a long-lived
+ *  Chrome process whose `exit` fires AFTER the port was acquired does
+ *  not try to settle a Promise that has already resolved (which silently
+ *  rejected the wrong path before — see review comment #4). */
 async function waitForDevToolsPort(opts: {
   child: ChildProcess;
   userDataDir: string;
@@ -151,11 +157,12 @@ async function waitForDevToolsPort(opts: {
         if (p != null) { settle(p); return; }
       }
     };
+    const onExit = (code: number | null): void => {
+      settle(null, new Error(`Chrome 进程在握手前退出 (code=${code ?? 'unknown'})`));
+    };
     child.stdout?.on('data', onStd);
     child.stderr?.on('data', onStd);
-    child.once('exit', (code) => {
-      settle(null, new Error(`Chrome 进程在握手前退出 (code=${code ?? 'unknown'})`));
-    });
+    child.once('exit', onExit);
 
     const onAbort = (): void => settle(null, new Error('用户取消'));
     if (signal) {
@@ -183,6 +190,7 @@ async function waitForDevToolsPort(opts: {
       try { clearInterval(tick); } catch { /* ignore */ }
       try { child.stdout?.off('data', onStd); } catch { /* ignore */ }
       try { child.stderr?.off('data', onStd); } catch { /* ignore */ }
+      try { child.off('exit', onExit); } catch { /* ignore */ }
       if (signal) {
         try { signal.removeEventListener('abort', onAbort); } catch { /* ignore */ }
       }
@@ -222,7 +230,11 @@ export async function sniffViaSystemChrome(
   }
   // We MUST clear the previous DevToolsActivePort or our poll loop will
   // see a stale port from the prior run before Chrome rewrites it.
-  try { fs.unlinkSync(path.join(userDataDir, 'DevToolsActivePort')); } catch { /* ignore */ }
+  // R-53 — Same logic for SingletonLock / SingletonCookie / SingletonSocket
+  // so a previous hard-killed Chrome can't permanently brick the profile.
+  for (const name of ['DevToolsActivePort', 'SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
+    try { fs.unlinkSync(path.join(userDataDir, name)); } catch { /* ignore */ }
+  }
 
   const args = buildChromeArgs({ url, userDataDir, port: 0 });
   log(`[system-chrome-sniff] launching ${target.label} -> ${target.exePath}`);
@@ -241,7 +253,16 @@ export async function sniffViaSystemChrome(
   const port = await waitForDevToolsPort({
     child, userDataDir, signal: opts.signal
   }).catch((e) => {
-    try { child.kill(); } catch { /* ignore */ }
+    // R-53 — pre-CDP failure path: SIGKILL bound to a 1 s deadline so
+    // a wedged Chrome cannot keep the userDataDir locked, and clear
+    // singleton lock files so the next launch can reuse the profile.
+    try { child.kill('SIGTERM'); } catch { /* ignore */ }
+    setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch { /* ignore */ }
+    }, 1000).unref();
+    for (const name of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
+      try { fs.unlinkSync(path.join(userDataDir, name)); } catch { /* ignore */ }
+    }
     throw e;
   });
 
@@ -252,12 +273,39 @@ export async function sniffViaSystemChrome(
   let pageUrl = url;
   let pageTitle: string | undefined;
   let client: Awaited<ReturnType<typeof CDP>> | null = null;
+  // R-53 — Robust child teardown:
+  //   1. SIGTERM (graceful) — Chrome closes its windows + flushes profile
+  //   2. After 1.5 s, SIGKILL fallback if still alive (some platforms
+  //      where Chrome's signal handler is wedged by the renderer crash);
+  //   3. Always remove SingletonLock / SingletonCookie / SingletonSocket
+  //      from the isolated user-data-dir AFTER the process is gone, so
+  //      the next sniff against the same host won't refuse to launch
+  //      with "The profile appears to be in use by another Chrome
+  //      process". Without this, a hard-killed Chrome leaves stale
+  //      lock files around forever (Chrome itself only clears them on
+  //      a clean exit).
   const cleanup = async (): Promise<void> => {
     if (client) {
       try { await client.close(); } catch { /* ignore */ }
       client = null;
     }
-    try { child.kill(); } catch { /* ignore */ }
+    // Skip kill if Chrome already exited (user-closed window).
+    if (child && child.exitCode == null && !child.killed) {
+      try { child.kill('SIGTERM'); } catch { /* ignore */ }
+      const waitExit = new Promise<void>((resolve) => {
+        const t = setTimeout(() => {
+          try { child.kill('SIGKILL'); } catch { /* ignore */ }
+          resolve();
+        }, 1500);
+        child.once('exit', () => { clearTimeout(t); resolve(); });
+      });
+      try { await waitExit; } catch { /* ignore */ }
+    }
+    // Best-effort lock cleanup. We only delete files that are SymLinks
+    // or harmless ".Lock"-style markers; never rm-rf the whole dir.
+    for (const name of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
+      try { fs.unlinkSync(path.join(userDataDir, name)); } catch { /* ignore */ }
+    }
   };
 
   try {

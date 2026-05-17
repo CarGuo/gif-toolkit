@@ -136,6 +136,62 @@ const App: React.FC = () => {
     setPreferredWebviewMode(m);
     try { localStorage.setItem('giftk:preferredWebviewMode', m); } catch { /* ignore */ }
   }, []);
+  // R-53 — a11y wiring for the split-button menu:
+  //   * `webviewMenuRef` lets us detect mousedown outside the popup
+  //     so we can close on click-outside (mouseleave alone is unsafe
+  //     because focus may return without the cursor crossing it).
+  //   * `webviewMenuItemRefs` lets us forward ArrowUp/ArrowDown to
+  //     the radio item buttons inside the menu, mirroring native
+  //     menu role semantics.
+  const webviewMenuRef = useRef<HTMLDivElement | null>(null);
+  const webviewCaretRef = useRef<HTMLButtonElement | null>(null);
+  const webviewMenuItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  useEffect(() => {
+    if (!webviewMenuOpen) return;
+    // Move focus into the menu on open, defaulting to the currently
+    // selected mode for a "where am I?" anchor.
+    const idx = preferredWebviewMode === 'embed' ? 0
+      : preferredWebviewMode === 'system-chrome' ? 1 : 2;
+    queueMicrotask(() => { webviewMenuItemRefs.current[idx]?.focus(); });
+    const onDocMouseDown = (ev: MouseEvent): void => {
+      const t = ev.target as Node | null;
+      if (!t) return;
+      if (webviewMenuRef.current?.contains(t)) return;
+      if (webviewCaretRef.current?.contains(t)) return;
+      setWebviewMenuOpen(false);
+    };
+    const onDocKeyDown = (ev: KeyboardEvent): void => {
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        setWebviewMenuOpen(false);
+        webviewCaretRef.current?.focus();
+      }
+    };
+    document.addEventListener('mousedown', onDocMouseDown);
+    document.addEventListener('keydown', onDocKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onDocMouseDown);
+      document.removeEventListener('keydown', onDocKeyDown);
+    };
+  }, [webviewMenuOpen, preferredWebviewMode]);
+  const onWebviewMenuItemKeyDown = useCallback((ev: React.KeyboardEvent<HTMLButtonElement>, i: number) => {
+    if (ev.key === 'ArrowDown') {
+      ev.preventDefault();
+      const next = (i + 1) % webviewMenuItemRefs.current.length;
+      webviewMenuItemRefs.current[next]?.focus();
+    } else if (ev.key === 'ArrowUp') {
+      ev.preventDefault();
+      const len = webviewMenuItemRefs.current.length;
+      const prev = (i - 1 + len) % len;
+      webviewMenuItemRefs.current[prev]?.focus();
+    } else if (ev.key === 'Home') {
+      ev.preventDefault();
+      webviewMenuItemRefs.current[0]?.focus();
+    } else if (ev.key === 'End') {
+      ev.preventDefault();
+      webviewMenuItemRefs.current[webviewMenuItemRefs.current.length - 1]?.focus();
+    }
+  }, []);
   // R-33A — manual two-stage optimize modal state. Stores the row the user
   // clicked "手动优化" on so we can pass its current size + warning + the
   // first output path into ManualOptimizeModal. Cleared back to null on
@@ -1639,8 +1695,15 @@ const App: React.FC = () => {
                         : '🌐 网页嗅探'}
                 </button>
                 <button
+                  ref={webviewCaretRef}
                   className="ghost webview-sniff-caret"
                   onClick={() => setWebviewMenuOpen((v) => !v)}
+                  onKeyDown={(ev) => {
+                    if (ev.key === 'ArrowDown' || ev.key === 'Enter' || ev.key === ' ') {
+                      ev.preventDefault();
+                      setWebviewMenuOpen(true);
+                    }
+                  }}
                   disabled={sniffing}
                   aria-haspopup="menu"
                   aria-expanded={webviewMenuOpen}
@@ -1659,7 +1722,9 @@ const App: React.FC = () => {
                 </button>
                 {webviewMenuOpen ? (
                   <div
+                    ref={webviewMenuRef}
                     role="menu"
+                    aria-label="网页嗅探方式"
                     className="webview-sniff-menu"
                     style={{
                       position: 'absolute', top: 'calc(100% + 4px)', right: 0, zIndex: 60,
@@ -1668,11 +1733,14 @@ const App: React.FC = () => {
                       border: '1px solid rgba(255,255,255,0.12)',
                       boxShadow: '0 8px 24px rgba(0,0,0,0.35)'
                     }}
-                    onMouseLeave={() => setWebviewMenuOpen(false)}
                   >
                     <button
+                      ref={(el) => { webviewMenuItemRefs.current[0] = el; }}
                       className="ghost"
-                      role="menuitem"
+                      role="menuitemradio"
+                      aria-checked={preferredWebviewMode === 'embed'}
+                      tabIndex={preferredWebviewMode === 'embed' ? 0 : -1}
+                      onKeyDown={(ev) => onWebviewMenuItemKeyDown(ev, 0)}
                       onClick={() => {
                         setWebviewMenuOpen(false);
                         persistPreferredMode('embed');
@@ -1692,8 +1760,12 @@ const App: React.FC = () => {
                       </div>
                     </button>
                     <button
+                      ref={(el) => { webviewMenuItemRefs.current[1] = el; }}
                       className="ghost"
-                      role="menuitem"
+                      role="menuitemradio"
+                      aria-checked={preferredWebviewMode === 'system-chrome'}
+                      tabIndex={preferredWebviewMode === 'system-chrome' ? 0 : -1}
+                      onKeyDown={(ev) => onWebviewMenuItemKeyDown(ev, 1)}
                       onClick={() => {
                         setWebviewMenuOpen(false);
                         persistPreferredMode('system-chrome');
@@ -1713,8 +1785,12 @@ const App: React.FC = () => {
                       </div>
                     </button>
                     <button
+                      ref={(el) => { webviewMenuItemRefs.current[2] = el; }}
                       className="ghost"
-                      role="menuitem"
+                      role="menuitemradio"
+                      aria-checked={preferredWebviewMode === 'ytdlp-direct'}
+                      tabIndex={preferredWebviewMode === 'ytdlp-direct' ? 0 : -1}
+                      onKeyDown={(ev) => onWebviewMenuItemKeyDown(ev, 2)}
                       onClick={() => {
                         setWebviewMenuOpen(false);
                         persistPreferredMode('ytdlp-direct');

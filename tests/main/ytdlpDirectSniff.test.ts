@@ -1,20 +1,11 @@
 /**
  * R-52 — Tests for the yt-dlp direct sniff entry.
- *
- * Two surfaces are covered:
- *  1. `buildSniffedMediaFromResolved`: the pure ResolvedMedia → SniffedMedia
- *     adapter. We assert the SniffedMedia carries source='ytdlp-direct',
- *     `requiresExternalDownload=false`, and the original `resolved` payload
- *     so the renderer can dispatch into the processor without an extra
- *     resolve roundtrip.
- *  2. `sniffViaYtdlp`: the high-level wrapper. We mock `resolveDirectUrl`
- *     out of the `./resolver/ytdlp` module so the test never spawns a real
- *     yt-dlp binary, and assert:
- *      - happy path → SniffResult with 1 item + correct title
- *      - YtDlpNotInstalledError → friendly Chinese hint mentioning offline
- *      - "Unsupported URL" → friendly Chinese hint suggesting fallback
- *      - aborted signal → 用户取消
- *      - onProgress callbacks fire in order: fetching → parsing → done
+ * R-53 — Updated to reflect:
+ *  - id derived from pageUrl (so retries against the same page dedup
+ *    correctly even when the underlying CDN URL rotates a signed token);
+ *  - resolveDirectUrl now accepts an AbortSignal and is the only thing
+ *    the wrapper races against (no Promise.race fake-cancel anymore);
+ *  - ensurePublicHttp guards the entry against SSRF / private hosts.
  */
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
@@ -25,6 +16,7 @@ vi.mock('electron', () => ({
 }));
 
 const resolveDirectUrlMock = vi.fn();
+const ensurePublicHttpMock = vi.fn((u: string) => u);
 class FakeYtDlpNotInstalledError extends Error {
   binaryPath: string;
   constructor(binaryPath: string, reason?: string) {
@@ -35,7 +27,8 @@ class FakeYtDlpNotInstalledError extends Error {
 }
 vi.mock('../../src/main/resolver/ytdlp', () => ({
   resolveDirectUrl: (...args: unknown[]) => resolveDirectUrlMock(...args),
-  YtDlpNotInstalledError: FakeYtDlpNotInstalledError
+  YtDlpNotInstalledError: FakeYtDlpNotInstalledError,
+  ensurePublicHttp: (u: string) => ensurePublicHttpMock(u)
 }));
 
 const { buildSniffedMediaFromResolved, sniffViaYtdlp } = await import('../../src/main/ytdlpDirectSniff');
@@ -88,16 +81,25 @@ describe('buildSniffedMediaFromResolved', () => {
     expect(out.kind).toBe('video');
   });
 
-  it('produces stable ids for the same resolved url', () => {
-    const a = buildSniffedMediaFromResolved('https://e.com/p1', baseResolved);
-    const b = buildSniffedMediaFromResolved('https://e.com/p2', baseResolved);
+  it('produces stable ids derived from the page URL (R-53 dedup invariance under signed-URL rotation)', () => {
+    // Same page URL → same ID, even when the resolved direct URL changes.
+    const pageA = 'https://www.youtube.com/watch?v=abc';
+    const r1 = { ...baseResolved, url: 'https://cdn.example.com/sig=AAA/v.mp4' };
+    const r2 = { ...baseResolved, url: 'https://cdn.example.com/sig=BBB/v.mp4' };
+    const a = buildSniffedMediaFromResolved(pageA, r1);
+    const b = buildSniffedMediaFromResolved(pageA, r2);
     expect(a.id).toBe(b.id);
+    // Different page URLs → different IDs.
+    const c = buildSniffedMediaFromResolved('https://www.youtube.com/watch?v=zzz', r1);
+    expect(a.id).not.toBe(c.id);
   });
 });
 
 describe('sniffViaYtdlp', () => {
   beforeEach(() => {
     resolveDirectUrlMock.mockReset();
+    ensurePublicHttpMock.mockReset();
+    ensurePublicHttpMock.mockImplementation((u: string) => u);
   });
 
   it('returns a single-item SniffResult on the happy path with title carried through', async () => {
@@ -111,14 +113,29 @@ describe('sniffViaYtdlp', () => {
     expect(resolveDirectUrlMock).toHaveBeenCalledTimes(1);
   });
 
-  it('fires onProgress in fetching → parsing → probing → done order', async () => {
+  it('passes the abort signal through to resolveDirectUrl (R-53 real abort)', async () => {
+    resolveDirectUrlMock.mockResolvedValueOnce(baseResolved);
+    const ctrl = new AbortController();
+    await sniffViaYtdlp('https://www.youtube.com/watch?v=abc', { signal: ctrl.signal });
+    expect(resolveDirectUrlMock).toHaveBeenCalledWith('https://www.youtube.com/watch?v=abc', ctrl.signal);
+  });
+
+  it('rejects payloads that fail the SSRF gate (ensurePublicHttp throws)', async () => {
+    ensurePublicHttpMock.mockImplementationOnce(() => {
+      throw new Error('resolved URL points at a private host (refused)');
+    });
+    await expect(sniffViaYtdlp('http://127.0.0.1/')).rejects.toThrow(/URL 不可用/);
+    expect(resolveDirectUrlMock).not.toHaveBeenCalled();
+  });
+
+  it('fires onProgress in fetching → parsing → parsing → done order', async () => {
     resolveDirectUrlMock.mockResolvedValueOnce(baseResolved);
     const events: SniffProgress[] = [];
     await sniffViaYtdlp('https://www.youtube.com/watch?v=abc', {
       onProgress: (p) => events.push(p)
     });
     const stages = events.map((e) => e.stage);
-    expect(stages).toEqual(['fetching', 'parsing', 'probing', 'done']);
+    expect(stages).toEqual(['fetching', 'parsing', 'parsing', 'done']);
     const last = events[events.length - 1];
     expect(last.percent).toBe(100);
     expect(last.found).toBe(1);
@@ -139,9 +156,24 @@ describe('sniffViaYtdlp', () => {
     await expect(sniffViaYtdlp('https://www.youtube.com/watch?v=zzz')).rejects.toThrow(/yt-dlp 不支持该站点/);
   });
 
+  it('classifies "Sign in to confirm you\'re not a bot" as login-wall', async () => {
+    resolveDirectUrlMock.mockRejectedValueOnce(new Error("Sign in to confirm you're not a bot"));
+    await expect(sniffViaYtdlp('https://www.youtube.com/watch?v=abc')).rejects.toThrow(/需要登录|私密|地区限制/);
+  });
+
+  it('classifies HTTP 429 as rate-limit', async () => {
+    resolveDirectUrlMock.mockRejectedValueOnce(new Error('HTTP Error 429: Too Many Requests'));
+    await expect(sniffViaYtdlp('https://www.youtube.com/watch?v=abc')).rejects.toThrow(/限流|拒绝/);
+  });
+
+  it('classifies network failures with a "网络错误" prefix', async () => {
+    resolveDirectUrlMock.mockRejectedValueOnce(new Error('getaddrinfo ENOTFOUND something'));
+    await expect(sniffViaYtdlp('https://www.youtube.com/watch?v=abc')).rejects.toThrow(/网络错误/);
+  });
+
   it('wraps unrelated runtime errors with "yt-dlp 解析失败" prefix', async () => {
-    resolveDirectUrlMock.mockRejectedValueOnce(new Error('socket hang up'));
-    await expect(sniffViaYtdlp('https://www.youtube.com/watch?v=abc')).rejects.toThrow(/yt-dlp 解析失败: socket hang up/);
+    resolveDirectUrlMock.mockRejectedValueOnce(new Error('something weird'));
+    await expect(sniffViaYtdlp('https://www.youtube.com/watch?v=abc')).rejects.toThrow(/yt-dlp 解析失败: something weird/);
   });
 
   it('rejects immediately with 用户取消 when the signal is already aborted', async () => {
@@ -153,12 +185,10 @@ describe('sniffViaYtdlp', () => {
     expect(resolveDirectUrlMock).not.toHaveBeenCalled();
   });
 
-  it('aborts in-flight resolution when signal fires mid-flight', async () => {
-    // resolveDirectUrl never resolves so we can race the abort.
-    resolveDirectUrlMock.mockImplementationOnce(() => new Promise(() => { /* never */ }));
-    const ctrl = new AbortController();
-    const p = sniffViaYtdlp('https://www.youtube.com/watch?v=abc', { signal: ctrl.signal });
-    setTimeout(() => ctrl.abort(), 10);
-    await expect(p).rejects.toThrow('用户取消');
+  it('translates an "aborted" rejection from resolveDirectUrl into 用户取消', async () => {
+    resolveDirectUrlMock.mockRejectedValueOnce(new Error('aborted'));
+    await expect(
+      sniffViaYtdlp('https://www.youtube.com/watch?v=abc', { signal: new AbortController().signal })
+    ).rejects.toThrow('用户取消');
   });
 });

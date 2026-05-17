@@ -356,10 +356,18 @@ function chromeDataUrl(): string {
  * Main entry: open a chrome-shell window pointed at `targetUrl`, wait for
  * the user to either confirm or close, then resolve with the deduped
  * media list.
+ *
+ * R-53 — `signal` is now plumbed in so the caller (main IPC, which
+ * shares a single `currentSniffCtrl` across all four sniff entries)
+ * can force-close the embedded window when the user starts a new
+ * sniff in another mode. Without this, switching from "embedded
+ * webview" to "yt-dlp direct" would orphan the embedded window and
+ * leak its session partition until the app quit.
  */
 export async function openWebviewSniff(
   targetUrl: string,
-  parent?: BrowserWindow | null
+  parent?: BrowserWindow | null,
+  opts: { signal?: AbortSignal } = {}
 ): Promise<SniffResult> {
   const captured = new Map<string, CapturedResource>();
   const detachRecorder = attachNetworkRecorder(captured, PARTITION);
@@ -650,6 +658,19 @@ export async function openWebviewSniff(
     ipcMain.on('webview-sniff:chrome-cmd', cmdHandler);
 
     win.on('closed', () => { void finish('closed'); });
+
+    // R-53 — Plumb the optional AbortSignal: when main IPC's shared
+    // `currentSniffCtrl.abort()` fires (because the user started a
+    // different sniff mode), force-close this window so it doesn't
+    // orphan its session partition or DOM scan timer.
+    if (opts.signal) {
+      if (opts.signal.aborted) {
+        void finish('cancel');
+      } else {
+        const onAbort = (): void => { void finish('cancel'); };
+        opts.signal.addEventListener('abort', onAbort, { once: true });
+      }
+    }
 
     // R-48 — Critical ordering: load the chrome HTML *first*, wait for
     // its preload to register the `webview-sniff:chrome` listener, then
