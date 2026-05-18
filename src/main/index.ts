@@ -707,12 +707,20 @@ let systemChromeSniffInFlight = false;
 ipcMain.handle('sniff:system-chrome:detect', async () => {
   return findInstalledBrowsers();
 });
-ipcMain.handle('sniff:system-chrome', async (_e, url: unknown, maybeFilterOpts: unknown) => {
+ipcMain.handle('sniff:system-chrome', async (_e, url: unknown, maybeFilterOpts: unknown, maybeChromeOpts: unknown) => {
   if (systemChromeSniffInFlight) {
     throw new Error('已经有一个真 Chrome 嗅探窗口在进行中,请先关闭它');
   }
   const safe = assertHttpUrl(url);
   const filterOpts = readSniffFilterOpts(maybeFilterOpts);
+  // R-59 — Renderer can opt in to using the user's REAL Chrome profile
+  // (rather than our isolated per-host one). This is the highest-impact
+  // CF-Turnstile-loop fix because a clean-room profile is the #1 bot
+  // signal in 2026.
+  const useRealProfile =
+    !!maybeChromeOpts &&
+    typeof maybeChromeOpts === 'object' &&
+    (maybeChromeOpts as Record<string, unknown>).useRealProfile === true;
   // Sniff progress + cancellation share the same channel & controller as
   // headless sniff so the renderer's existing 嗅探中… spinner / cancel
   // button keeps working unchanged.
@@ -729,6 +737,7 @@ ipcMain.handle('sniff:system-chrome', async (_e, url: unknown, maybeFilterOpts: 
     const r = await sniffViaSystemChrome(safe, {
       signal: ctrl.signal,
       finalizeSignal: finalizeCtrl.signal,
+      useRealProfile,
       onProgress: (p) => {
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('sniff:progress', p);

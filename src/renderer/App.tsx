@@ -52,6 +52,20 @@ const App: React.FC = () => {
   // Drives whether the「✓ 完成嗅探」button shows up at the 60% stage
   // (only meaningful for system-chrome which waits for child exit).
   const [activeSniffMode, setActiveSniffMode] = useState<'embed' | 'system-chrome' | 'ytdlp-direct' | 'offline' | null>(null);
+  // R-59 — User preference: when真 Chrome 嗅探 is invoked, should we
+  // launch Chrome against the user's REAL default profile (full
+  // cookies / history / extensions, no Turnstile loop) or against
+  // our isolated per-host profile (safer, but CF flags as bot).
+  // Persisted across restarts because the trade-off is per-user
+  // (some users will always want isolation; others always want
+  // their real cookies). Renderer surfaces this as a checkbox under
+  // the 真 Chrome 入口 in the sniff menu.
+  const [useRealChromeProfile, setUseRealChromeProfile] = useState<boolean>(() => {
+    try { return localStorage.getItem('giftk.useRealChromeProfile') === '1'; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('giftk.useRealChromeProfile', useRealChromeProfile ? '1' : '0'); } catch { /* ignore */ }
+  }, [useRealChromeProfile]);
   const [result, setResult] = useState<SniffResult | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -611,7 +625,11 @@ const App: React.FC = () => {
     setLogs((prev) => [...prev, hint].slice(-300));
     try {
       // R-57 / R-58 — Static-image filter is always-on (no UI toggle).
-      const r = await api(trimmed);
+      // R-59 — system-chrome accepts a third arg (chrome opts) to
+      // request the real-profile branch. Other backends ignore extras.
+      const r = mode === 'system-chrome'
+        ? await (api as NonNullable<typeof giftk>['sniffWithSystemChrome'])(trimmed, undefined, { useRealProfile: useRealChromeProfile })
+        : await api(trimmed);
       if (myId !== sniffReqId.current) return;
       setResult(r);
       const auto = new Set(
@@ -645,7 +663,7 @@ const App: React.FC = () => {
         setActiveSniffMode(null);
       }
     }
-  }, [url, options, pushOrReplace, addSniffHistory]);
+  }, [url, options, pushOrReplace, addSniffHistory, useRealChromeProfile]);
   const onWebviewSniff = useCallback(() => runWebviewSniff('embed'), [runWebviewSniff]);
   const onSystemChromeSniff = useCallback(() => runWebviewSniff('system-chrome'), [runWebviewSniff]);
   const onYtdlpDirectSniff = useCallback(() => runWebviewSniff('ytdlp-direct'), [runWebviewSniff]);
@@ -2080,6 +2098,38 @@ const App: React.FC = () => {
                         启动你本机的 Chrome / Edge / Brave,真实浏览器握手,适合 OpenAI / Medium / Patreon 等高保护站点。
                       </div>
                     </button>
+                    {/* R-59 — Sub-toggle for the system-chrome menu item.
+                        The「真 Chrome」branch defaults to an isolated
+                        per-host profile, which is why CF still loops on
+                        Turnstile (clean-room profile = high bot score).
+                        Letting the user opt into their REAL profile
+                        (must close Chrome first) inherits all of CF's
+                        accumulated trust signals for this device.
+                        Click on the row stops propagation so it doesn't
+                        also re-trigger the parent system-chrome run. */}
+                    <label
+                      style={{
+                        display: 'flex', alignItems: 'flex-start', gap: 8,
+                        padding: '6px 10px 8px 28px',
+                        fontSize: 11, color: 'var(--muted, #9aa0aa)',
+                        cursor: 'pointer'
+                      }}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={useRealChromeProfile}
+                        onChange={(e) => setUseRealChromeProfile(e.target.checked)}
+                        style={{ marginTop: 2, flexShrink: 0 }}
+                      />
+                      <span>
+                        <span style={{ color: 'var(--text, #ddd)', fontWeight: 600 }}>使用我真实 Chrome profile</span>
+                        <span style={{ display: 'block', marginTop: 2 }}>
+                          继承登录态 / 历史 / 扩展 → CF 不再把你当机器人。<br />
+                          ⚠ 必须先完全退出 Chrome,否则会报错。
+                        </span>
+                      </span>
+                    </label>
                     <button
                       ref={(el) => { webviewMenuItemRefs.current[2] = el; }}
                       className="ghost"
@@ -2157,6 +2207,34 @@ const App: React.FC = () => {
                       : ''}
                   </span>
                   <span className="sniff-percent">{Math.round(sniffProgress.percent)}%</span>
+                  {/* R-59 — Always-visible cancel button. The user
+                      called out R-58's R-55 in-banner cancel as
+                      insufficient because the amber banner ONLY
+                      shows in system-chrome 55-90% mode; for any
+                      other backend (URL / webview / yt-dlp /
+                      offline) or for system-chrome before 55%
+                      there was no escape hatch on the main page.
+                      Mounting cancel in the progress bar means
+                      every sniff run, every backend, every
+                      percent has it visible without scrolling. */}
+                  <button
+                    onClick={onCancel}
+                    title="取消嗅探"
+                    style={{
+                      marginLeft: 8,
+                      background: 'transparent',
+                      color: 'var(--danger, #e76f51)',
+                      border: '1px solid var(--danger, #e76f51)',
+                      padding: '2px 8px',
+                      borderRadius: 4,
+                      fontSize: 11,
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      flexShrink: 0
+                    }}
+                  >
+                    ✕ 取消
+                  </button>
                 </div>
                 <div className="bar-wrap">
                   <div className="bar" style={{ width: `${Math.max(0, Math.min(100, sniffProgress.percent))}%` }} />
@@ -2200,13 +2278,11 @@ const App: React.FC = () => {
                         }}
                       />
                       <span style={{ flex: 1, minWidth: 0 }}>{sniffProgress.message}</span>
-                      {/* R-58 Fix — Inline action buttons so the user
-                          never has to scroll to find a way out. The
-                          previous design parked 取消 / 完成 in the
-                          bottom 「3. 处理参数」 section, but on tall
-                          windows the user couldn't see them while
-                          waiting on Chrome and reported "no way to
-                          cancel". */}
+                      {/* R-58 → R-59 — Banner only carries「✓ 完成嗅探」
+                          now (a system-chrome-specific action). The
+                          plain「取消」moved up into the progress-bar
+                          row so it's available for ALL backends in
+                          ALL phases, not just the 55-90% wait. */}
                       <button
                         onClick={onFinalizeSystemChromeSniff}
                         title="立即结束嗅探并返回到目前已抓到的媒体(无需关闭 Chrome 整个进程)"
@@ -2223,23 +2299,6 @@ const App: React.FC = () => {
                         }}
                       >
                         ✓ 完成嗅探
-                      </button>
-                      <button
-                        onClick={onCancel}
-                        title="取消嗅探,丢弃已捕获的媒体"
-                        style={{
-                          background: 'transparent',
-                          color: '#f1a140',
-                          border: '1px solid rgba(241, 161, 64, 0.5)',
-                          padding: '4px 10px',
-                          borderRadius: 4,
-                          fontSize: 12,
-                          fontWeight: 600,
-                          cursor: 'pointer',
-                          flexShrink: 0
-                        }}
-                      >
-                        取消
                       </button>
                     </div>
                   ) : (

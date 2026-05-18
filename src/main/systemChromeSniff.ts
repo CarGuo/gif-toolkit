@@ -55,6 +55,8 @@ import {
   deriveProfileDirName,
   buildChromeArgs,
   extractCdpCandidate,
+  resolveRealChromeProfileDir,
+  isChromeProfileLocked,
   type BrowserCandidate,
   type CdpResponseReceivedParams
 } from './systemChromeSniffUtils';
@@ -136,6 +138,31 @@ interface SniffOpts {
    * lifecycle to get their results out.
    */
   finalizeSignal?: AbortSignal;
+  /**
+   * R-59 — Use the user's REAL default Chrome profile instead of an
+   * isolated per-host profile. Why this matters:
+   *
+   *   Cloudflare Bot Management's #1 signal in 2026 is "is this a
+   *   clean-room automation profile?". Empty cookies, no history, no
+   *   extensions, default UA prefs — all of those score the session as
+   *   high-risk and trigger Turnstile loops even AFTER you click the
+   *   checkbox (CF re-fingerprints on every navigation and decides the
+   *   profile is too sterile to be human). Using the user's real
+   *   profile inherits all the trust signals CF has already accumulated
+   *   for this device.
+   *
+   * Trade-off: real Chrome MUST not be running concurrently. Chrome
+   * holds a SingletonLock on the profile dir; spawning a second
+   * instance with the same `--user-data-dir` will fail with
+   * "ProcessSingleton" and merge the new tab into the running window
+   * (which we can't attach CDP to because that window owns a different
+   * debugging port — usually none at all). When this flag is on we
+   * detect the lock up-front and surface a friendly error.
+   *
+   * Default `false` so existing behaviour is preserved; the renderer
+   * exposes this as a checkbox under the「真 Chrome」menu.
+   */
+  useRealProfile?: boolean;
 }
 
 /** Wait for Chrome to print/write the chosen debugger port. We poll the
@@ -242,14 +269,40 @@ export async function sniffViaSystemChrome(
     : browsers[0];
 
   const userDataRoot = path.join(app.getPath('userData'), 'system-chrome-profiles');
-  const userDataDir = path.join(userDataRoot, deriveProfileDirName(url));
+  const isolatedDir = path.join(userDataRoot, deriveProfileDirName(url));
+  // R-59 — When the user opts into "use real Chrome profile" we point
+  // `--user-data-dir` at the OS default Chrome profile path. Trusted
+  // profile = no Turnstile loop. We MUST first ensure no live Chrome
+  // owns the SingletonLock; otherwise Chrome will refuse to start a
+  // second instance and silently merge tabs into the running window
+  // (which doesn't have our debugging port and is unattachable).
+  let userDataDir = isolatedDir;
+  if (opts.useRealProfile) {
+    const realDir = resolveRealChromeProfileDir(target.exePath);
+    if (!realDir) {
+      throw new Error('未能定位真实 Chrome 用户目录(unsupported OS)。');
+    }
+    if (isChromeProfileLocked(realDir)) {
+      throw new Error(
+        '检测到 Chrome 正在运行 — 启用「使用我真实 Chrome profile」时必须先完全退出 Chrome,然后重试。\n' +
+        `(Profile dir: ${realDir})`
+      );
+    }
+    userDataDir = realDir;
+    log(`[system-chrome-sniff] using REAL profile -> ${realDir}`);
+  } else {
+    log(`[system-chrome-sniff] using isolated profile -> ${isolatedDir}`);
+  }
   try { fs.mkdirSync(userDataDir, { recursive: true }); } catch (e) {
-    throw new Error(`无法创建 Chrome 隔离用户目录: ${(e as Error).message}`);
+    throw new Error(`无法创建 Chrome 用户目录: ${(e as Error).message}`);
   }
   // We MUST clear the previous DevToolsActivePort or our poll loop will
   // see a stale port from the prior run before Chrome rewrites it.
   // R-53 — Same logic for SingletonLock / SingletonCookie / SingletonSocket
   // so a previous hard-killed Chrome can't permanently brick the profile.
+  // R-59 — Even on the real profile branch the SingletonLock is safe to
+  // delete *if and only if* isChromeProfileLocked returned false (no
+  // live Chrome). We've just confirmed that, so the unlink is fine.
   for (const name of ['DevToolsActivePort', 'SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
     try { fs.unlinkSync(path.join(userDataDir, name)); } catch { /* ignore */ }
   }
@@ -471,24 +524,59 @@ export async function sniffViaSystemChrome(
       // Path #4 — poll the CDP target list. When the user closes the
       // last Chrome window or the entire app, the page target goes
       // away and CDP.List either returns no `page` rows or the WS
-      // call rejects. This is the path that fixes the "stuck at 60%"
-      // bug on machines that already had Chrome running.
+      // call rejects.
+      //
+      // R-59 Fix — Cloudflare Turnstile / Medium / DataDome do a
+      // mid-flight redirect to challenges.cloudflare.com and back.
+      // During those ~1-3 s the `page` target is transiently
+      // missing or its `type` becomes `other`, NOT because the user
+      // closed Chrome but because the navigation hasn't committed
+      // yet. R-58's polling resolved on the FIRST miss and that's
+      // exactly what was causing the "CF 循环重复校验" symptom: we
+      // tore down CDP mid-challenge, the user finished Turnstile,
+      // CF redirected back, we were already detached so `cf_clearance`
+      // wasn't observed end-to-end, and Turnstile re-fired on the
+      // next request.
+      //
+      // The fix is a **3-strike debounce**: only resolve when we've
+      // seen "no page target" for 3 consecutive polls (~6 s). One
+      // transient miss is normal during navigation; three in a row
+      // genuinely means Chrome went away. We also log every state
+      // transition so the user can verify the link is healthy from
+      // the main-process console (this is the observability the
+      // user explicitly asked for after R-58 broke without warning).
+      let consecutiveMisses = 0;
+      const MISS_THRESHOLD = 3;
+      const POLL_MS = 2000;
       const pollHandle = setInterval(async () => {
         if (done) { clearInterval(pollHandle); return; }
         try {
           const list = await CDP.List({ port });
-          const stillAlive = list.some((t) => t.type === 'page');
-          if (!stillAlive) {
+          const pages = list.filter((t) => t.type === 'page');
+          if (pages.length === 0) {
+            consecutiveMisses += 1;
+            log(`[system-chrome-sniff] poll: no page target (${consecutiveMisses}/${MISS_THRESHOLD}); other=${list.length}`);
+            if (consecutiveMisses >= MISS_THRESHOLD) {
+              clearInterval(pollHandle);
+              log('[system-chrome-sniff] poll: confirmed window-closed; finishing');
+              finishOnce(true);
+            }
+          } else {
+            if (consecutiveMisses > 0) {
+              log(`[system-chrome-sniff] poll: page target back after ${consecutiveMisses} miss(es) — likely a CF challenge redirect`);
+            }
+            consecutiveMisses = 0;
+          }
+        } catch (err) {
+          consecutiveMisses += 1;
+          log(`[system-chrome-sniff] poll: CDP.List rejected (${consecutiveMisses}/${MISS_THRESHOLD}): ${(err as Error).message}`);
+          if (consecutiveMisses >= MISS_THRESHOLD) {
             clearInterval(pollHandle);
+            log('[system-chrome-sniff] poll: confirmed CDP gone; finishing');
             finishOnce(true);
           }
-        } catch {
-          // CDP HTTP endpoint went away → Chrome quit. Treat as
-          // user-closed.
-          clearInterval(pollHandle);
-          finishOnce(true);
         }
-      }, 1500);
+      }, POLL_MS);
       pollHandle.unref?.();
     });
     opts.onProgress?.({ stage: 'parsing', percent: 60, message: '在 Chrome 中浏览/登录,然后点「✓ 完成嗅探」或关闭整个 Chrome 即可结束' });

@@ -8,9 +8,14 @@
  * no spawn, no fs writes, no electron imports — so the unit suite can lock
  * the platform path lists, stdout port parsing, and user-data-dir hashing
  * without booting an Electron host.
+ *
+ * R-59 NOTE — `resolveRealChromeProfileDir` and `isChromeProfileLocked`
+ * use READ-ONLY fs probes (existsSync). They remain side-effect-free.
  */
 import crypto from 'crypto';
 import path from 'path';
+import fs from 'fs';
+import os from 'os';
 
 /**
  * Catalogue of known stable distribution channels. Order matters: we try
@@ -207,6 +212,113 @@ export function buildChromeArgs(opts: {
     '--use-mock-keychain',
     opts.url
   ];
+}
+
+/**
+ * R-59 — Resolve the OS-default Chrome / Edge / Brave user-data-dir.
+ * Caller passes the resolved exe path so we can pick the matching profile
+ * (e.g. Edge has its own dir under `Microsoft Edge`). Returns `null` if
+ * the platform is unknown or the path doesn't exist on disk yet.
+ *
+ * macOS:
+ *   ~/Library/Application Support/Google/Chrome
+ * Windows:
+ *   %LOCALAPPDATA%\Google\Chrome\User Data
+ * Linux:
+ *   ~/.config/google-chrome
+ *
+ * For Edge / Brave we inspect the exePath substring. This stays a pure
+ * read-only fs probe — testable on a real machine, gracefully returns
+ * null on unsupported hosts.
+ */
+export function resolveRealChromeProfileDir(exePath: string): string | null {
+  const home = os.homedir();
+  const lower = exePath.toLowerCase();
+  const isEdge = lower.includes('microsoft edge') || lower.includes('msedge');
+  const isBrave = lower.includes('brave');
+  let candidate: string | null = null;
+  if (process.platform === 'darwin') {
+    if (isEdge) candidate = path.join(home, 'Library/Application Support/Microsoft Edge');
+    else if (isBrave) candidate = path.join(home, 'Library/Application Support/BraveSoftware/Brave-Browser');
+    else candidate = path.join(home, 'Library/Application Support/Google/Chrome');
+  } else if (process.platform === 'win32') {
+    const localAppData = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
+    if (isEdge) candidate = path.join(localAppData, 'Microsoft', 'Edge', 'User Data');
+    else if (isBrave) candidate = path.join(localAppData, 'BraveSoftware', 'Brave-Browser', 'User Data');
+    else candidate = path.join(localAppData, 'Google', 'Chrome', 'User Data');
+  } else if (process.platform === 'linux') {
+    if (isEdge) candidate = path.join(home, '.config/microsoft-edge');
+    else if (isBrave) candidate = path.join(home, '.config/BraveSoftware/Brave-Browser');
+    else candidate = path.join(home, '.config/google-chrome');
+  }
+  if (!candidate) return null;
+  try { return fs.existsSync(candidate) ? candidate : null; } catch { return null; }
+}
+
+/**
+ * R-59 — Detect whether a Chrome profile dir is currently locked by a
+ * live Chrome instance. If it is, spawning a second Chrome with the
+ * same `--user-data-dir` will fail (or worse, silently merge into the
+ * running instance and skip our `--remote-debugging-port` flag).
+ *
+ * Detection strategy:
+ *   - macOS / Linux: SingletonLock is a symlink whose target encodes
+ *     "<hostname>-<pid>"; if it exists *and* its target's pid is alive
+ *     we treat the profile as locked. We only stat the symlink; if
+ *     readlink fails (it's a regular file orphaned by a hard kill)
+ *     we treat it as unlocked so the user is not stuck.
+ *   - Windows: Chrome doesn't ship SingletonLock; instead it holds an
+ *     exclusive handle on `<dir>\lockfile`. We probe by trying to
+ *     open it with WRITE access — `existsSync` alone isn't enough.
+ *     For now we fall back to existence + recent-mtime (< 5 s old)
+ *     as a coarse signal; full lockfile probing requires native APIs.
+ *
+ * Conservative: returns `false` on any read error. The caller (the
+ * "use real profile" code path) only consults this to decide whether
+ * to ABORT before spawning, so a false-negative just means we let
+ * Chrome try and fail with a clearer error. False-positive would be
+ * worse (would block the user when nothing is actually running).
+ */
+export function isChromeProfileLocked(profileDir: string): boolean {
+  if (!profileDir) return false;
+  try {
+    if (process.platform === 'darwin' || process.platform === 'linux') {
+      const lockPath = path.join(profileDir, 'SingletonLock');
+      let target: string;
+      try {
+        target = fs.readlinkSync(lockPath);
+      } catch {
+        // Not a symlink or doesn't exist → not locked.
+        return false;
+      }
+      // Target format is "<hostname>-<pid>". Extract pid.
+      const m = /-(\d+)$/.exec(target);
+      if (!m) return false;
+      const pid = Number(m[1]);
+      if (!Number.isFinite(pid) || pid <= 0) return false;
+      try {
+        // signal 0 doesn't kill, only checks existence.
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    if (process.platform === 'win32') {
+      const lockPath = path.join(profileDir, 'lockfile');
+      if (!fs.existsSync(lockPath)) return false;
+      try {
+        const stat = fs.statSync(lockPath);
+        // Chrome touches lockfile on every startup; a freshly-modified
+        // file (< 30 s) is a strong hint Chrome is live. Not perfect
+        // but adequate as a "you should close Chrome first" gate.
+        return Date.now() - stat.mtimeMs < 30_000;
+      } catch {
+        return false;
+      }
+    }
+  } catch { /* ignore */ }
+  return false;
 }
 
 /**

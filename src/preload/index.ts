@@ -58,9 +58,13 @@ const api = {
   // HTTP/2 fingerprints come from a real browser; the user manually
   // clears any Turnstile / login in that window, and we scrape via
   // CDP. Same `SniffResult` shape as the other two sniff entries.
-  async sniffWithSystemChrome(url: string, opts?: { includeStaticImages?: boolean }): Promise<SniffResult> {
+  async sniffWithSystemChrome(
+    url: string,
+    opts?: { includeStaticImages?: boolean },
+    chromeOpts?: { useRealProfile?: boolean }
+  ): Promise<SniffResult> {
     ensureString(url, 'url');
-    return ipcRenderer.invoke('sniff:system-chrome', url, opts ?? {});
+    return ipcRenderer.invoke('sniff:system-chrome', url, opts ?? {}, chromeOpts ?? {});
   },
   /**
    * Preflight: list installed system browsers (Chrome / Edge / Brave /

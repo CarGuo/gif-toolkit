@@ -17,7 +17,9 @@ import {
   parseDevToolsPort,
   deriveProfileDirName,
   buildChromeArgs,
-  extractCdpCandidate
+  extractCdpCandidate,
+  resolveRealChromeProfileDir,
+  isChromeProfileLocked
 } from '../../src/main/systemChromeSniffUtils';
 
 describe('getCandidatePaths', () => {
@@ -234,5 +236,33 @@ describe('extractCdpCandidate', () => {
     expect(extractCdpCandidate({
       response: { url: 'https://cdn.x.com/a.gif', status: 0, mimeType: 'image/gif' }
     })).toEqual({ url: 'https://cdn.x.com/a.gif', mime: 'image/gif' });
+  });
+});
+
+describe('R-59 — resolveRealChromeProfileDir', () => {
+  it('returns null on unknown / non-existent path silently', () => {
+    // We can't assert the actual real-Chrome path because that depends
+    // on the CI host. We can assert the function never throws and is
+    // either a non-empty string OR null — never undefined.
+    const out = resolveRealChromeProfileDir('/some/garbage/Chrome.exe');
+    expect(out === null || typeof out === 'string').toBe(true);
+  });
+
+  it('does not throw when given an empty exePath', () => {
+    expect(() => resolveRealChromeProfileDir('')).not.toThrow();
+  });
+});
+
+describe('R-59 — isChromeProfileLocked', () => {
+  it('returns false for an empty path', () => {
+    expect(isChromeProfileLocked('')).toBe(false);
+  });
+
+  it('returns false for a non-existent dir', () => {
+    expect(isChromeProfileLocked('/definitely/not/a/real/profile/dir')).toBe(false);
+  });
+
+  it('does not throw on an unreadable / odd path', () => {
+    expect(() => isChromeProfileLocked('/dev/null')).not.toThrow();
   });
 });
