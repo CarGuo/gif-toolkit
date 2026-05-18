@@ -1,8 +1,37 @@
 # Gif Toolkit
 
-> **本地跨平台(macOS / Windows)桌面 App** —— 一键嗅探、批量下载页面里的 GIF 与视频,**视频自动转 GIF**,再叠加一套自适应压缩管线,把成品压到 **公众号 / 知乎 / 微博 / Slack / Discord** 等平台单文件大小硬限内。
+> **本地跨平台桌面 App(macOS / Windows / Linux)** —— 一键嗅探、批量下载页面里的 GIF 与视频,**视频自动转 GIF / 动画 WebP**,叠加自适应压缩管线把成品压到 **公众号 / 知乎 / 微博 / Slack / Discord** 等平台单文件大小硬限内,再一键上传到 **GitHub / 七牛 / 阿里云 OSS / 腾讯云 COS / 自建 Web 图床**,得到现成的 Markdown 链接。
 >
-> **解决一个真实痛点**:平台普遍要求 GIF ≤ 5MB(公众号 ≤ 10MB,Slack ≤ 5MB,微博 ≤ 5MB),手工导出/裁剪反复试边长、帧率、调色板的过程枯燥又低效。Gif Toolkit 把"嗅 → 抓 → 转 → 压 → 落盘"整条链路自动化,让你**喂一个文章 URL 进去,拿一组刚好达标的 GIF 出来**。
+> **解决一个真实痛点**:平台普遍要求 GIF ≤ 5MB(公众号 ≤ 10MB,Slack ≤ 5MB,微博 ≤ 5MB),手工导出/裁剪反复试边长、帧率、调色板的过程枯燥又低效。Gif Toolkit 把"嗅 → 抓 → 转 → 压 → 上传"整条链路自动化,让你**喂一个文章 URL 进去,拿一组刚好达标的 GIF + 一份贴在文章里就能用的 Markdown 链接出来**。
+
+---
+
+## 🪜 它能做什么(全景一览 R-61)
+
+| 板块 | 你会用到 | 入口 |
+|---|---|---|
+| **抓取入口**(R-44 → R-60) | URL 嗅探、内嵌 webview 嗅探、**真实 Chrome 反爬嗅探**、yt-dlp 直接抓、`.mhtml` / `.html+_files` 离线导入、拖拽文件 | 顶部 URL 栏 + split-button + 离线导入按钮 |
+| **视频→GIF/WebP**(双层目标自适应) | palette 两遍、Lanczos、Bayer 抖动、自适应 lossy 二分搜索、几何缩边、长视频自动分段 | 主页 |
+| **GIF / WebP 工具箱**(R-43 / R-48 / R-50) | 修剪 trim、缩放 resize、变速、反向、旋转、可视化裁剪 crop、GIF↔WebP 互转、单纯 GIF 优化、视频→WebP | 顶部「工具箱」Tab |
+| **批处理 + 历史**(R-27 / R-28) | 主页一键批跑、运行中追加排队、长视频分段确认、**历史记录单条/批量重跑**、产物文件清单 | 主页 + 「历史记录」Tab |
+| **图床上传**(R-45 / R-46 / R-54) | 5 种后端、文件 hash 复用 (♻️ 复用)、上传历史全保存 + 翻页、**嗅探历史 ↔ 上传记录联动** | 「上传历史」Tab + 任意产物的 📤 上传 |
+| **跨平台**(R-61) | macOS · Windows · Linux(deb / AppImage / tar.gz),全程数组 spawn 免命令注入,Snap / Flatpak / 真实 Chrome profile 探测 | 见下方「跨平台支持矩阵」 |
+
+---
+
+## 🌍 跨平台支持矩阵(R-61)
+
+| 能力 | macOS | Windows | Linux |
+|---|---|---|---|
+| 桌面打包 | ✅ dmg / zip(Intel + Apple Silicon) | ✅ NSIS x64 | ✅ AppImage / deb / tar.gz(x64 + arm64) |
+| FFmpeg / FFprobe / Sharp / yt-dlp | ✅ 预编译二进制 | ✅ 预编译二进制 | ✅ 预编译二进制 |
+| Gifsicle 优化 | ✅ | ✅ | ✅ x64 / arm64;arm32 / 老 musl 自动跳过 |
+| 真 Chrome 嗅探探测 | Google Chrome / Chrome Canary / Edge / Brave / Chromium(系统级 + `~/Applications`) | Program Files / `LOCALAPPDATA` 各 Chrome / Edge / Brave 包括 per-user 路径 | `/usr/bin`、`/opt`、`/snap/bin`(Snap)、`~/.local/share/flatpak/exports/bin`(Flatpak)、`/usr/local/bin`,**Snap / Flatpak / .deb / .rpm 全覆盖** |
+| 真实 Chrome profile(`useRealProfile`) | `~/Library/Application Support/Google/Chrome` 等 | `%LOCALAPPDATA%\Google\Chrome\User Data` 等 | `~/.config/google-chrome`、`~/snap/chromium/common/chromium`、`~/.var/app/<app-id>/config/...`(Flatpak) |
+| Chrome 占用检测(SingletonLock) | ✅ symlink readlink + `kill -0` 探活 | ✅ `Local State` lockfile mtime <30s 兜底 | ✅ symlink readlink + `kill -0` 探活 |
+
+> **打包命令**:`npm run package:mac` · `npm run package:win` · `npm run package:linux`(R-61 新加)。
+> **Apple 签名 / 公证 + Linux Code Signing 暂未配置**,首次运行需要 Gatekeeper / `chmod +x` 手动放行。
 
 ---
 
@@ -34,6 +63,12 @@
 - **错误分类**(R-53 Fix #6):yt-dlp 失败被分到 `not-installed / aborted / login-wall / rate-limit / unsupported / network / generic` 6 档,UI 给的是中文人话提示,而不是甩一行 stderr。
 - **a11y 菜单**(R-53 Fix #3):split menu 用 `role="menuitemradio"` + `aria-checked` + ArrowUp/Down/Home/End 键盘导航 + Esc 关闭 + 点击外部关闭 + 打开时焦点跳到当前选中项;窄 URL 栏下自适应宽度 + 智能左右翻转(R-55 Fix #1)。
 - **离线导入**(R-55 Fix #3):支持 `.mhtml` 多 part 解析(把每个 part 落到 `os.tmpdir()` 后改写主 html 引用)、`.html + _files/` 完整目录、单图/单视频/单 GIF 直接合成 `SniffedMedia`;`resolveOfflineRef` 拒绝 `../` 与绝对系统路径,只在 baseDir 子树内开放;支持点按钮选 + 直接拖文件入窗。
+- **R-58 真 Chrome 反爬硬化**:`--disable-blink-features=AutomationControlled` + `--disable-features=AutomationControlled,Translate,ChromeWhatsNewUI,WelcomeTour` + `--password-store=basic` + `--use-mock-keychain`,**永不传 `--enable-automation`**(Cloudflare / DataDome 主要 detection signal);`navigator.webdriver` 不再返回 true。
+- **R-59 真实 Chrome profile 选项**:勾选「使用我真实 Chrome profile」后,`--user-data-dir` 指向你日常的 OS 默认 Chrome profile,**带着所有 cookie / 历史 / 扩展**,Cloudflare / OpenAI 等不再把你视为 clean-room 自动化设备。前置 `isChromeProfileLocked` 探测:Chrome 还在跑就直接抛错让你先 ⌘Q 退出。 **CDP 轮询 3-strike debounce**(连续 3×2s 都见不到 page target 才结束嗅探),修掉 R-58 引入的"Cloudflare Turnstile 重定向期间 page target transient 消失 → 误判关窗 → cf_clearance 抓不到 → 循环校验"race condition。
+- **R-60 跨域 iframe 抓取 + 单 tab 保证 + 嗅探入口共享**:三个修复合并:
+  - **跨域 iframe 直链**:`Target.setAutoAttach({ flatten: true })` 订阅所有子 frame target,通过 sessionId 路由 `Network.responseReceived`,**OpenAI / YouTube embed 内部的 .mp4 / .m3u8 直链现在能抓到了**(顶层 session 之前完全看不到 OOPIF 进程的 network)。
+  - **真 profile 单 tab 保证**:Chrome 启动改用 `about:blank`(不再把 url 作为位置参数,避开"用户日常 profile 的 chrome://settings 启动页 + 我们的位置 url 同时打开 = 双 tab"问题);CDP attach 后枚举所有 page target 并 `closeTarget` 关掉非主 tab,然后 `Page.navigate(url)` 跳转主 tab。
+  - **iframe-embed 共享**:离线 mhtml/html 的 [collectFromDom](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/offlineImport.ts) 现在 import 在线 sniffer.ts 的 `matchEmbedProvider`,**离线导入也能识别 YouTube / Vimeo / Bilibili 等 13 个 iframe-embed provider**(原本只走 `<video>` / og:video 缩水版)。
 
 
 
@@ -98,6 +133,23 @@ Phase D  兜底              finalSide=longSideFloor,目标 maxBytes(默认 4MB)
 - **上传历史全保存 + 翻页**(R-54):`giftk.uploadHistory.v1` 取消 30 条 LRU 上限改全量持久化,`UploadHistoryPanel` 加分页 nav(默认 20/页 + 跳转输入)([UploadHistoryPanel.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/UploadHistoryPanel.tsx))
 - **嗅探历史 ↔ 上传记录联动**(R-54):每次上传透传 `recordId`,完成态时 `mergeUploadIntoRecord` 把 `{ url, markdown, status, backend, fileHash, reused, uploadedAt }` 折回到嗅探 `HistoryRecord.uploadsByOutputPath`,在 `HistoryDetailModal` 里多了 「📤 上传记录」 区块,可以「复制 url」「复制 md」「重传」「一键上传未传产物」([HistoryDetailModal.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/HistoryDetailModal.tsx))
 
+### 9. 工具箱 Tab(R-43 / R-48 / R-50)
+
+> 顶部「工具箱」Tab,10 种独立工具,**完全脱离嗅探流程**,可以直接拖本地 GIF / WebP / 视频文件进来批量处理。详见 [ToolboxPanel.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/ToolboxPanel.tsx)。
+
+| 工具 | 用途 | 输入 → 输出 |
+|---|---|---|
+| Video → GIF | 视频转 GIF + 压缩 | `.mp4 / .mov / .webm / ...` → `.gif` |
+| Video → WebP | 视频转动画 WebP(libwebp_anim,通常更小更清晰) | 视频 → `.webp` |
+| GIF Resize | 等比缩放 GIF 宽度 | `.gif` → `.gif` |
+| GIF Optimize | gifsicle `-O3` / lossy / colors / dither 任选 | `.gif` → `.gif` |
+| Trim | 裁剪 GIF / WebP 时间区间(无损切片) | 任意动画 → 同格式 |
+| Speed | 调整播放速度 0.25× ~ 4× | 任意动画 → 同格式 |
+| Reverse | GIF / WebP 倒放 | 任意动画 → 同格式 |
+| Rotate | 旋转 0/90/180/270° + 可选水平/垂直翻转 | 任意动画 → 同格式 |
+| Crop | 可视化框选裁剪区域(单文件) | 任意动画 → 同格式 |
+| GIF ↔ WebP | 两种动画格式互转 | `.gif` ↔ `.webp` |
+
 ---
 
 ## 🚀 快速开始
@@ -110,14 +162,28 @@ npm run dev            # 开发模式(主+渲热更)
 
 npm run typecheck      # 主+渲分别 tsc --noEmit
 npm run lint           # eslint 0 warning
-npm test               # vitest 单元测试(150 用例,覆盖压缩管线 / sniffer / UI)
+npm test               # vitest 单元测试(442 用例,覆盖压缩管线 / sniffer / iframe-embed / 跨平台 helper / UI)
 npm run build          # 编译 main + renderer
 npm start              # 跑生产构建
-npm run package:mac    # 打包 dmg
-npm run package:win    # 打包 nsis
+npm run package:mac    # 打包 dmg + zip(Intel + Apple Silicon)
+npm run package:win    # 打包 NSIS x64
+npm run package:linux  # 打包 AppImage / deb / tar.gz(R-61 新加,x64 + arm64)
 ```
 
-> Mac 第一次跑可能要等 sharp 预编译;Windows 上不需要 VS Build Tools(预编译二进制)。
+> macOS 第一次跑可能要等 sharp 预编译;Windows 上不需要 VS Build Tools(预编译二进制);Linux 上 `sharp` / `ffmpeg-static` 在 musl 系(Alpine)需要额外手动安装 glibc 兼容层,推荐 glibc 系(Ubuntu / Debian / Fedora / Arch)。
+
+---
+
+## ⚠️ 已知限制(R-61 审核结果)
+
+| 类别 | 现状 | 后续路线 |
+|---|---|---|
+| Apple 签名 / 公证 | ❌ 未配置,首次启动需要 `右键 → 打开` | 计划接 `electron-builder` 的 `notarize` |
+| Windows 签名 | ❌ 未配置 | 计划接 EV 证书或 SmartScreen 上报 |
+| Linux Code Signing | ❌ 未配置 | AppImage 可以走 `gpg` 签名,deb 走 `dpkg-sig` |
+| macOS 图标 | ⚠️ 临时复用 `.ico`,菜单栏分辨率不够 | 等 1024×1024 PNG 源图后用 `iconutil` 生成 `.icns` |
+| `axios` / `electron` / `eslint` 版本 | ⚠️ 处于 EOL 边缘(Electron 31, eslint 8, axios 1.7.7) | 计划下个迭代统一升级 |
+| Linux Snap / Flatpak Chrome | ✅ 路径已识别;`useRealProfile` 模式下沙箱可能限制访问 `--user-data-dir` 路径 | 已选 Snap 的 `home` interface + Flatpak 的 `--filesystem=host:ro` 默认即可,极少数自定义 confinement 不能用 |
 
 ---
 

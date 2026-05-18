@@ -89,6 +89,9 @@ export function getCandidatePaths(
         exePath: path.join(programFiles, 'Microsoft\\Edge\\Application\\msedge.exe') },
       { id: 'edge', label: 'Microsoft Edge (x86)',
         exePath: path.join(programFilesX86, 'Microsoft\\Edge\\Application\\msedge.exe') },
+      // R-61 — per-user Edge install (no admin-prompt path) was missing.
+      { id: 'edge', label: 'Microsoft Edge (User)',
+        exePath: path.join(localAppData, 'Microsoft\\Edge\\Application\\msedge.exe') },
       { id: 'brave', label: 'Brave Browser',
         exePath: path.join(programFiles, 'BraveSoftware\\Brave-Browser\\Application\\brave.exe') },
       { id: 'brave', label: 'Brave Browser (x86)',
@@ -97,22 +100,63 @@ export function getCandidatePaths(
         exePath: path.join(localAppData, 'BraveSoftware\\Brave-Browser\\Application\\brave.exe') }
     ];
   }
-  // linux + others
+  // linux + others — R-61 reworked. The previous list missed almost every
+  // mainstream Linux distribution channel:
+  //   * Snap (default Chromium on Ubuntu 22.04+) → /snap/bin/chromium
+  //   * Flatpak (default on Fedora Silverblue / many distros)
+  //     → ~/.local/share/flatpak/exports/bin/com.google.Chrome
+  //   * Google's official .deb / .rpm install lays out under
+  //     /opt/google/chrome/google-chrome, NOT /usr/bin (only a wrapper
+  //     symlink lands in /usr/bin).
+  //   * Some users compile to /usr/local/bin.
+  // We probe in order; first existing exe wins. Snap/Flatpak shells
+  // are command-line wrappers that internally exec the real binary
+  // inside the sandbox — they accept normal --remote-debugging-port and
+  // --user-data-dir flags as long as user-data-dir lives inside the
+  // sandbox-permitted XDG paths (we already use app userData which
+  // satisfies this for Snap "home" interface).
   return [
     { id: 'chrome', label: 'Google Chrome',
       exePath: '/usr/bin/google-chrome' },
     { id: 'chrome', label: 'Google Chrome',
       exePath: '/usr/bin/google-chrome-stable' },
+    { id: 'chrome', label: 'Google Chrome (deb/rpm)',
+      exePath: '/opt/google/chrome/google-chrome' },
+    { id: 'chrome', label: 'Google Chrome (local)',
+      exePath: '/usr/local/bin/google-chrome' },
     { id: 'chromium', label: 'Chromium',
       exePath: '/usr/bin/chromium' },
     { id: 'chromium', label: 'Chromium',
       exePath: '/usr/bin/chromium-browser' },
+    { id: 'chromium', label: 'Chromium (Snap)',
+      exePath: '/snap/bin/chromium' },
+    { id: 'chromium', label: 'Chromium (local)',
+      exePath: '/usr/local/bin/chromium' },
     { id: 'edge', label: 'Microsoft Edge',
       exePath: '/usr/bin/microsoft-edge' },
     { id: 'edge', label: 'Microsoft Edge',
       exePath: '/usr/bin/microsoft-edge-stable' },
+    { id: 'edge', label: 'Microsoft Edge (deb/rpm)',
+      exePath: '/opt/microsoft/msedge/msedge' },
     { id: 'brave', label: 'Brave Browser',
-      exePath: '/usr/bin/brave-browser' }
+      exePath: '/usr/bin/brave-browser' },
+    { id: 'brave', label: 'Brave Browser (Snap)',
+      exePath: '/snap/bin/brave' },
+    { id: 'brave', label: 'Brave Browser (deb/rpm)',
+      exePath: '/opt/brave.com/brave/brave-browser' },
+    // Flatpak per-user installs. Flatpak ships a wrapper script in
+    // ~/.local/share/flatpak/exports/bin/<app-id>; we deliberately do
+    // NOT include the system-wide /var/lib/flatpak/exports/bin/ path
+    // because Electron app sandboxing on some distros forbids spawning
+    // out of /var/lib at runtime — per-user is reliably accessible.
+    { id: 'chrome', label: 'Google Chrome (Flatpak)',
+      exePath: path.join(homeDir, '.local/share/flatpak/exports/bin/com.google.Chrome') },
+    { id: 'chromium', label: 'Chromium (Flatpak)',
+      exePath: path.join(homeDir, '.local/share/flatpak/exports/bin/org.chromium.Chromium') },
+    { id: 'edge', label: 'Microsoft Edge (Flatpak)',
+      exePath: path.join(homeDir, '.local/share/flatpak/exports/bin/com.microsoft.Edge') },
+    { id: 'brave', label: 'Brave Browser (Flatpak)',
+      exePath: path.join(homeDir, '.local/share/flatpak/exports/bin/com.brave.Browser') }
   ];
 }
 
@@ -245,6 +289,11 @@ export function resolveRealChromeProfileDir(exePath: string): string | null {
   const lower = exePath.toLowerCase();
   const isEdge = lower.includes('microsoft edge') || lower.includes('msedge');
   const isBrave = lower.includes('brave');
+  // R-61 — sandboxed package managers stash the profile in a different
+  // place and we need to honour that for `useRealProfile` mode to make
+  // sense on Snap/Flatpak users (which is most of Ubuntu 22.04+).
+  const isSnap = lower.startsWith('/snap/');
+  const isFlatpak = lower.includes('/flatpak/exports/bin/');
   let candidate: string | null = null;
   if (process.platform === 'darwin') {
     if (isEdge) candidate = path.join(home, 'Library/Application Support/Microsoft Edge');
@@ -256,7 +305,18 @@ export function resolveRealChromeProfileDir(exePath: string): string | null {
     else if (isBrave) candidate = path.join(localAppData, 'BraveSoftware', 'Brave-Browser', 'User Data');
     else candidate = path.join(localAppData, 'Google', 'Chrome', 'User Data');
   } else if (process.platform === 'linux') {
-    if (isEdge) candidate = path.join(home, '.config/microsoft-edge');
+    if (isSnap) {
+      // Snap confinement remaps $HOME to ~/snap/<pkg>/current — the
+      // canonical Chromium-Snap profile dir is ~/snap/chromium/common
+      // /chromium (Snap's "common" exposes a stable per-revision path).
+      if (isBrave) candidate = path.join(home, 'snap/brave/common/.config/BraveSoftware/Brave-Browser');
+      else candidate = path.join(home, 'snap/chromium/common/chromium');
+    } else if (isFlatpak) {
+      // Flatpak per-app data lives under ~/.var/app/<app-id>/config.
+      if (isEdge) candidate = path.join(home, '.var/app/com.microsoft.Edge/config/microsoft-edge');
+      else if (isBrave) candidate = path.join(home, '.var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser');
+      else candidate = path.join(home, '.var/app/com.google.Chrome/config/google-chrome');
+    } else if (isEdge) candidate = path.join(home, '.config/microsoft-edge');
     else if (isBrave) candidate = path.join(home, '.config/BraveSoftware/Brave-Browser');
     else candidate = path.join(home, '.config/google-chrome');
   }

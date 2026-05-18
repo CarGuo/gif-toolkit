@@ -1864,7 +1864,7 @@ const App: React.FC = () => {
   return (
     <div className={`app${view !== 'home' ? ' app-no-bottom' : ''}`} style={{ ['--bottom-h' as string]: `${bottomH}px` } as React.CSSProperties}>
       <div className="titlebar">
-        <h1>Gif Toolkit · 网页媒体一站式抓取与转换</h1>
+        <h1>Gif Toolkit · 网页媒体抓取 · 转换 · 上传</h1>
         <div className="tabs">
           <button
             type="button"

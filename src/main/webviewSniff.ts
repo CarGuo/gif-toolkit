@@ -220,7 +220,7 @@ function buildChromeHtml(): string {
   return `<!doctype html>
 <html lang="zh-CN"><head>
 <meta charset="utf-8" />
-<title>GIF Toolkit — 网页嗅探</title>
+<title>Gif Toolkit — 网页嗅探</title>
 <style>
   :root { --bg:#1a1b1f; --bg-2:#23252b; --line:rgba(255,255,255,0.08);
     --fg:#e6e7eb; --muted:#9aa0aa; --accent:#2a7; --accent-2:#5cf;
@@ -381,7 +381,7 @@ export async function openWebviewSniff(
     width: 1100,
     height: 800,
     parent: parent || undefined,
-    title: 'GIF Toolkit — 网页嗅探',
+    title: 'Gif Toolkit — 网页嗅探',
     backgroundColor: '#1a1b1f',
     webPreferences: {
       contextIsolation: true,

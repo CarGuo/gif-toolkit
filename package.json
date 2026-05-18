@@ -1,7 +1,7 @@
 {
   "name": "gif-toolkit",
   "version": "0.1.0",
-  "description": "Local cross-platform app to sniff video/gif from a URL and convert/compress to optimized GIFs (FFmpeg + Gifsicle + Sharp).",
+  "description": "Gif Toolkit — 网页媒体一站式抓取、转换、优化与上传桌面工具:四档嗅探链路(URL / WebContentsView / 真实 Chrome 反爬 / yt-dlp)+ 离线 .mhtml 导入,视频→GIF/WebP 双层目标自适应压缩,GIF/WebP 修剪/缩放/速度/反向/旋转/裁剪/互转工具箱,内置批处理 + 嗅探/产物历史 + 五种图床上传(自建 Web、GitHub、七牛、阿里云 OSS、腾讯云 COS)。FFmpeg + Gifsicle + Sharp + yt-dlp,跨 macOS / Windows / Linux。",
   "main": "dist/main/index.js",
   "author": "gif-toolkit",
   "license": "MIT",
@@ -15,6 +15,7 @@
     "start": "cross-env NODE_ENV=production electron .",
     "package:mac": "npm run build && electron-builder --mac",
     "package:win": "npm run build && electron-builder --win",
+    "package:linux": "npm run build && electron-builder --linux",
     "lint": "eslint \"src/**/*.{ts,tsx}\" --max-warnings 0",
     "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
     "test": "vitest run",
@@ -120,7 +121,31 @@
       ]
     },
     "linux": {
-      "icon": "build/icon.ico"
+      "icon": "build/icon.ico",
+      "category": "Graphics",
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "tar.gz",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ]
     }
   }
 }
