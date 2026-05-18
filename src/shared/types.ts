@@ -64,6 +64,35 @@ export interface SniffResult {
   infoNotices?: string[];
 }
 
+/**
+ * R-74 — Pre-flight dim probe IPC contract.
+ *
+ * Renderer sends this to main BEFORE dispatching a batch so the size
+ * guard can flag aspect-ratio violations up front instead of N
+ * separate runtime failures. Main ffprobes the URL with the (optional)
+ * resolver headers attached, swallowing failures into `{ ok: false }`
+ * so the renderer's per-task verdict can downgrade to `unknown`
+ * (which is then fed to the runtime guard at processing time).
+ *
+ * `input` is intentionally just a URL or local path string; we do NOT
+ * pass the whole `SniffedMedia` to keep the IPC surface small and
+ * stable. The renderer is responsible for picking the right URL
+ * (resolved.url first, then media.url) and the right headers
+ * (resolved.headers).
+ */
+export interface ProbeDimsInput {
+  /** URL or local path. ffprobe handles both. */
+  input: string;
+  /** Optional headers (Referer / User-Agent) for CDNs that gate via
+   *  `headers`. Sourced from `ResolvedMedia.headers`. */
+  headers?: Record<string, string>;
+  /** Soft timeout in ms. Default 10000. Capped server-side at 30s. */
+  timeoutMs?: number;
+}
+export type ProbeDimsResult =
+  | { ok: true; width: number; height: number; durationSec: number }
+  | { ok: false; error: string };
+
 export interface ProcessOptions {
   /** Hard target: must reach (or best-effort) before giving up. Default 4MB. */
   maxBytes: number;

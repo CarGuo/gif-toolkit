@@ -8,7 +8,7 @@ import { openWebviewSniff } from './webviewSniff';
 import { sniffViaSystemChrome, findInstalledBrowsers } from './systemChromeSniff';
 import { sniffViaYtdlp } from './ytdlpDirectSniff';
 import { previewMedia, startBatch, cancelAllTasks, cancelTask, prefetchThumbnail, startToolbox } from './processor';
-import { killAllProcs, probe as probeMedia, extractFrameDataUrl } from './ffmpeg';
+import { killAllProcs, probe as probeMedia, probeUrl, extractFrameDataUrl } from './ffmpeg';
 import { log } from './logger';
 import { printPathsAsync } from './binaries';
 import { getCapabilityReport } from './capabilities';
@@ -1111,6 +1111,74 @@ ipcMain.handle('system:capabilities', async () => {
  */
 ipcMain.handle('app:buildInfo', async () => {
   return BUILD_INFO;
+});
+
+/**
+ * R-74 — Pre-flight dim probe.
+ *
+ * Renderer calls this once per task BEFORE dispatching the real batch
+ * so the size guard can flag aspect-ratio violations (longest > maxSide
+ * AND projected short < minSide) up front. Without this the renderer
+ * had to optimistically dispatch and react to per-task
+ * AspectRatioConstraintError failures, which forced the user to click
+ * 「强制允许」 once per offender. The pre-flight phase folds those N
+ * failures into a single 「批量强制允许」 click on the progress banner.
+ *
+ * Failures (network / non-zero exit / timeout / malformed URL) are
+ * returned as `{ ok: false, error }` rather than thrown, so a single
+ * unprobeable URL doesn't poison the whole batch's pre-flight phase.
+ * The renderer downgrades those to `unknown` and lets them through —
+ * the runtime guard inside processor.ts remains the source of truth.
+ */
+ipcMain.handle('app:probeMediaDims', async (_e, raw: unknown) => {
+  const result: import('../shared/types').ProbeDimsResult = await (async (): Promise<import('../shared/types').ProbeDimsResult> => {
+    try {
+      if (!raw || typeof raw !== 'object') {
+        return { ok: false, error: 'probe:invalidInput' };
+      }
+      const p = raw as { input?: unknown; headers?: unknown; timeoutMs?: unknown };
+      if (typeof p.input !== 'string' || !p.input) {
+        return { ok: false, error: 'probe:inputRequired' };
+      }
+      if (p.input.length > 4096) {
+        return { ok: false, error: 'probe:inputTooLong' };
+      }
+      // Reject control chars in the URL itself — ffprobe is lenient
+      // but we'd rather not let a sniffed page leak weird bytes into
+      // a child process arg vector.
+      // eslint-disable-next-line no-control-regex
+      if (/[\u0000-\u001f\u007f]/.test(p.input)) {
+        return { ok: false, error: 'probe:invalidInput' };
+      }
+      let headers: Record<string, string> | undefined;
+      if (p.headers && typeof p.headers === 'object') {
+        const out: Record<string, string> = {};
+        for (const [k, v] of Object.entries(p.headers as Record<string, unknown>)) {
+          if (typeof k === 'string' && typeof v === 'string') out[k] = v;
+        }
+        if (Object.keys(out).length > 0) headers = out;
+      }
+      // Cap the renderer's timeout request: never let a misconfigured
+      // call park ffprobe for more than 30s on the main process.
+      let timeoutMs = 10000;
+      if (typeof p.timeoutMs === 'number' && Number.isFinite(p.timeoutMs)) {
+        timeoutMs = Math.max(500, Math.min(30000, Math.round(p.timeoutMs)));
+      }
+      const info = await probeUrl(p.input, { headers, timeoutMs });
+      return {
+        ok: true,
+        width: info.width,
+        height: info.height,
+        durationSec: info.durationSec
+      };
+    } catch (e) {
+      const msg = (e as Error)?.message || String(e);
+      // Trim the failure detail so a chatty CDN response doesn't blow
+      // up renderer logs / localStorage.
+      return { ok: false, error: msg.length > 240 ? `${msg.slice(0, 240)}…` : msg };
+    }
+  })();
+  return result;
 });
 
 /**

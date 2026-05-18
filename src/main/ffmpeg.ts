@@ -103,7 +103,7 @@ function run(cmd: string, args: string[], opts: RunOpts = {}): Promise<void> {
   });
 }
 
-function runJson<T>(cmd: string, args: string[]): Promise<T> {
+function runJson<T>(cmd: string, args: string[], opts: { timeoutMs?: number } = {}): Promise<T> {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     liveProcs.add(child);
@@ -124,7 +124,11 @@ function runJson<T>(cmd: string, args: string[]): Promise<T> {
 
     let out = '';
     let err = '';
-    const timer = setTimeout(() => settleReject(new Error('ffprobe timeout')), 30000);
+    // R-74 — timeout is now caller-tunable so the pre-flight probe can
+    // pick a shorter deadline (10s) than the default 30s used by the
+    // post-download probe path. Defaults preserved for back-compat.
+    const timeoutMs = opts.timeoutMs ?? 30000;
+    const timer = setTimeout(() => settleReject(new Error('ffprobe timeout')), timeoutMs);
     child.stdout.on('error', () => undefined);
     child.stderr.on('error', () => undefined);
     child.stdout.on('data', (b: Buffer) => {
@@ -196,6 +200,75 @@ export async function probe(file: string): Promise<ProbeInfo> {
   const dur = Number(v?.duration ?? data.format?.duration ?? 0) || 0;
   // Prefer r_frame_rate (real / container) over avg_frame_rate (which is
   // often a noisy estimate for VFR sources). Fall back to avg if r is 0/0.
+  const fps = parseRational(v?.r_frame_rate) || parseRational(v?.avg_frame_rate);
+  const nbFromTag = Number(v?.nb_frames ?? 0);
+  const nbFrames = Number.isFinite(nbFromTag) && nbFromTag > 0
+    ? nbFromTag
+    : (dur > 0 && fps > 0 ? Math.round(dur * fps) : 0);
+  return {
+    durationSec: dur,
+    width: v?.width ?? 0,
+    height: v?.height ?? 0,
+    hasVideo: !!v,
+    frameRate: fps,
+    nbFrames
+  };
+}
+
+/**
+ * R-74 — Lightweight ffprobe that accepts a URL (or local path) and an
+ * optional header map (for CDNs that need a Referer / User-Agent, e.g.
+ * Bilibili). The internal `probe()` does not forward headers because all
+ * existing call sites pass it a local file. This wrapper is used by the
+ * pre-flight size-evaluation pipeline that runs in the renderer BEFORE
+ * dispatching the real batch — getting a cheap ffprobe answer so the
+ * size guard can flag aspect-ratio violations up front.
+ *
+ * Behavioural contract:
+ *  - Returns the same `ProbeInfo` shape as `probe()` on success.
+ *  - Throws on error (timeout / non-zero exit / network failure). The
+ *    caller (the IPC handler) catches and translates to `{ok:false}`
+ *    so the renderer's per-task verdict can downgrade to `unknown`.
+ *  - Headers are passed via ffprobe's `-headers` flag, joined with
+ *    `\r\n` per the ffprobe option syntax. We deliberately reject
+ *    header values containing `\r` / `\n` / `\0` to prevent CRLF
+ *    injection — only the values we ourselves persisted via the
+ *    yt-dlp resolver should reach this path, but defence-in-depth.
+ *  - Timeout defaults to 10000 ms — short enough that a hung CDN
+ *    doesn't block the whole batch dispatch, long enough that a
+ *    typical mp4 HEAD-then-moov-box round trip succeeds.
+ */
+export async function probeUrl(
+  input: string,
+  options: { headers?: Record<string, string>; timeoutMs?: number } = {}
+): Promise<ProbeInfo> {
+  const ffprobe = getFfprobePath();
+  const headers = options.headers ?? {};
+  const headerParts: string[] = [];
+  for (const [k, v] of Object.entries(headers)) {
+    if (typeof k !== 'string' || typeof v !== 'string') continue;
+    if (!k || !v) continue;
+    if (/[\r\n\0]/.test(k) || /[\r\n\0]/.test(v)) {
+      throw new Error('probeUrl: invalid header value (CRLF / NUL not allowed)');
+    }
+    headerParts.push(`${k}: ${v}`);
+  }
+  const args: string[] = ['-v', 'error'];
+  if (headerParts.length > 0) {
+    // ffprobe expects ALL custom headers as a single -headers argument,
+    // separated by \r\n; trailing \r\n is required so the last header
+    // is properly terminated when ffprobe appends its own internal ones.
+    args.push('-headers', `${headerParts.join('\r\n')}\r\n`);
+  }
+  args.push(
+    '-print_format', 'json',
+    '-show_format',
+    '-show_streams',
+    input
+  );
+  const data = await runJson<FfprobeOutput>(ffprobe, args, { timeoutMs: options.timeoutMs ?? 10000 });
+  const v = data.streams.find((s) => s.codec_type === 'video');
+  const dur = Number(v?.duration ?? data.format?.duration ?? 0) || 0;
   const fps = parseRational(v?.r_frame_rate) || parseRational(v?.avg_frame_rate);
   const nbFromTag = Number(v?.nb_frames ?? 0);
   const nbFrames = Number.isFinite(nbFromTag) && nbFromTag > 0

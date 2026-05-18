@@ -21,10 +21,10 @@ import { TaskTable } from './components/TaskTable';
 import { LogBox } from './components/LogBox';
 import { BatchSegmentModal, type BatchSegmentEntry } from './components/BatchSegmentModal';
 import {
-  BatchSizeGuardModal,
   type BatchSizeGuardEntry
 } from './components/BatchSizeGuardModal';
-import { evaluateSizeGuard } from '../shared/sizeGuard';
+import { PreflightBanner } from './components/PreflightBanner';
+import { pickProbeInput, bucketVerdicts } from '../shared/preflight';
 import { HistoryPanel } from './components/HistoryPanel';
 import { HistoryDetailModal } from './components/HistoryDetailModal';
 import { ToolboxPanel } from './components/ToolboxPanel';
@@ -143,22 +143,41 @@ const App: React.FC = () => {
     mode: 'fresh' | 'append';
   } | null>(null);
   /**
-   * R-72 — pre-flight size-guard modal. Populated by dispatchBatch
-   * when at least one task in the dispatch list would be rejected by
-   * processor.ts' AspectRatioConstraintError check (longest > maxSide
-   * AND projected short side < minSide). The modal lets the user
-   * one-shot 「全部强制允许」 instead of clicking 强制允许 N times in
-   * the task table after the batch fails.
+   * R-74 — Pre-flight banner state. Replaces the R-72 size-guard modal.
    *
-   * `pending` carries the tasks already prepared by dispatchBatch so
-   * we can resume the dispatch with the user's verdict without
-   * re-deriving anything (avoids race conditions if `processable`
-   * shifted while the modal was open).
+   * State machine:
+   *   `null`               → no batch is being dispatched / no banner.
+   *   `phase: 'probing'`   → main is ffprobing every URL in the
+   *                          prepared task list (concurrency 3).
+   *                          `done` ticks up as results stream back;
+   *                          `total` is fixed at the start. The banner
+   *                          renders a progress bar + a 「取消整批」 escape.
+   *   `phase: 'awaiting'`  → probing is complete and at least one task
+   *                          would fail the size guard. Banner now
+   *                          surfaces 「批量强制允许 K 项」 / 「跳过这些项」 /
+   *                          「取消整批」 buttons. `pendingTasks` carries
+   *                          the prepared tasks so we can resume
+   *                          dispatch with whichever verdict the user
+   *                          picks without re-deriving anything.
+   *
+   * `cancelToken` is a monotonic counter; whenever the user clicks 取消
+   * we bump it, and the in-flight probe loop checks the ref before
+   * applying a partial result so a late-arriving response can't
+   * resurrect a cancelled banner.
    */
-  const [sizeGuardModal, setSizeGuardModal] = useState<{
-    entries: BatchSizeGuardEntry[];
+  const [preflight, setPreflight] = useState<{
+    phase: 'probing';
+    total: number;
+    done: number;
+    pendingTasks: ProcessTask[];
+  } | {
+    phase: 'awaiting';
+    total: number;
+    willFail: BatchSizeGuardEntry[];
+    unknownCount: number;
     pendingTasks: ProcessTask[];
   } | null>(null);
+  const preflightCancelRef = useRef(0);
   // R-28 #2: which history record (if any) is currently shown in the
   // detail modal. A non-null value mounts <HistoryDetailModal /> over
   // the rest of the app. We only hold the record reference here — all
@@ -979,44 +998,134 @@ const App: React.FC = () => {
       return { id: m.id, media: m, options: opt };
     });
     if (tasks.length === 0) return;
-    // R-72 — Pre-flight aspect-ratio guard. For every task that has
-    // sniffed dims, evaluate whether the processor would reject it
-    // (longest > maxSide AND projected short < minSide). Skip the
-    // check entirely when the user has globally pre-set
-    // forceAllowSmallSide on options (an explicit "I know" override
-    // that should not be re-asked). Tasks where dims are unknown
-    // simply pass through — the runtime guard remains the source of
-    // truth and the modal would only be guessing.
-    if (!options.forceAllowSmallSide) {
-      const guardEntries: BatchSizeGuardEntry[] = [];
-      for (const t of tasks) {
-        // Prefer resolved dims (HEAD/probe-confirmed) over sniffed
-        // ones. Either may be missing depending on source.
-        const w = t.media.resolved?.width ?? t.media.width;
-        const h = t.media.resolved?.height ?? t.media.height;
-        const verdict = evaluateSizeGuard({ width: w, height: h }, options);
-        if (verdict.state === 'will-fail') {
-          guardEntries.push({
-            media: t.media,
-            origW: verdict.origW,
-            origH: verdict.origH,
-            maxSide: verdict.maxSide,
-            minSide: verdict.minSide,
-            shortSideAtMax: verdict.shortSideAtMax
-          });
+    // R-74 — Pre-flight ffprobe phase. Replaces the passive R-72
+    // sniff-dim approach (which silently no-op'd on the >90% of
+    // SniffedMedia that didn't carry width/height). We now actively
+    // ffprobe every task BEFORE dispatching so the size guard runs on
+    // authoritative dims and the user sees a single inline banner
+    // with a 「批量强制允许 K 项」 button instead of N per-row ones.
+    //
+    // Layout:
+    //   1. Bump cancel token, mount banner in `probing` phase.
+    //   2. Fan out probeMediaDims with concurrency=3 (matches the
+    //      processor's batch concurrency so we don't melt down ffprobe).
+    //   3. Each completion tick increments `preflight.done`.
+    //   4. If the user hits 「取消整批」 during this phase we bail out
+    //      via cancelTokenRef; in-flight probes are allowed to settle
+    //      but their results are discarded.
+    //   5. Once all probes settle, run `bucketVerdicts` to split the
+    //      task list into ok / will-fail / unknown buckets.
+    //   6. No will-fail → dispatch immediately.
+    //      Will-fail present → switch banner to `awaiting` phase and
+    //      let the user click one of the three primary actions.
+    //
+    // When `options.forceAllowSmallSide` is globally on we skip the
+    // banner entirely (the user already opted in for the whole batch);
+    // we still probe so progress is visible but dispatch fires as soon
+    // as the loop completes.
+    const myToken = ++preflightCancelRef.current;
+    setPreflight({
+      phase: 'probing',
+      total: tasks.length,
+      done: 0,
+      pendingTasks: tasks
+    });
+    const probeResults = new Array<import('../shared/types').ProbeDimsResult | null>(tasks.length).fill(null);
+    const probeFailed = new Array<boolean>(tasks.length).fill(false);
+    const concurrency = 3;
+    let cursor = 0;
+    let completedCount = 0;
+    const runOne = async (): Promise<void> => {
+      for (;;) {
+        const idx = cursor++;
+        if (idx >= tasks.length) return;
+        // Re-check cancel before each ffprobe — short-circuit so we
+        // don't kick off probes the user already gave up on.
+        if (preflightCancelRef.current !== myToken) return;
+        const t = tasks[idx];
+        const probeInput = pickProbeInput(t.media);
+        if (!probeInput) {
+          probeFailed[idx] = true;
+        } else {
+          try {
+            const r = await giftk.probeMediaDims({
+              input: probeInput.input,
+              headers: probeInput.headers,
+              timeoutMs: 10000
+            });
+            if (preflightCancelRef.current !== myToken) return;
+            probeResults[idx] = r;
+            if (!r.ok) probeFailed[idx] = true;
+          } catch {
+            if (preflightCancelRef.current !== myToken) return;
+            probeFailed[idx] = true;
+          }
         }
-      }
-      if (guardEntries.length > 0) {
-        // Park the prepared tasks; user verdict from the modal
-        // resumes via setSizeGuardModal(null) + runDispatch.
-        setSizeGuardModal({
-          entries: guardEntries,
-          pendingTasks: tasks
+        if (preflightCancelRef.current !== myToken) return;
+        completedCount++;
+        const snapshot = completedCount;
+        setPreflight((prev) => {
+          if (!prev || prev.phase !== 'probing') return prev;
+          return { ...prev, done: snapshot };
         });
-        return;
       }
+    };
+    const workers: Promise<void>[] = [];
+    for (let i = 0; i < Math.min(concurrency, tasks.length); i++) {
+      workers.push(runOne());
     }
-    await runDispatch(tasks, new Set(), new Set());
+    await Promise.all(workers);
+    if (preflightCancelRef.current !== myToken) {
+      // User cancelled mid-probe; the banner is already gone (set to
+      // null by the cancel handler) so just bail.
+      return;
+    }
+    const buckets = bucketVerdicts(
+      tasks.map((t, i) => ({ task: t, probe: probeResults[i], probeFailed: probeFailed[i] })),
+      options
+    );
+    const willFailEntries: BatchSizeGuardEntry[] = buckets.willFail.map((row) => {
+      const v = row.verdict;
+      // Narrowing: bucketVerdicts only puts 'will-fail' verdicts into
+      // willFail; the runtime cast is sound. We still defend with a
+      // type-check so a future refactor can't silently corrupt the
+      // banner payload.
+      if (v.state !== 'will-fail') {
+        return {
+          media: row.media,
+          origW: row.width,
+          origH: row.height,
+          maxSide: 0,
+          minSide: 0,
+          shortSideAtMax: 0
+        };
+      }
+      return {
+        media: row.media,
+        origW: v.origW,
+        origH: v.origH,
+        maxSide: v.maxSide,
+        minSide: v.minSide,
+        shortSideAtMax: v.shortSideAtMax
+      };
+    });
+    if (willFailEntries.length === 0) {
+      // No bad sizes — clear the banner and dispatch directly. We
+      // don't surface the unknown count here; the runtime guard will
+      // catch the rare case where an unprobeable URL really was bad.
+      setPreflight(null);
+      await runDispatch(tasks, new Set(), new Set());
+      return;
+    }
+    // At least one will-fail. Park the prepared tasks on the banner
+    // and wait for the user verdict.
+    setPreflight({
+      phase: 'awaiting',
+      total: tasks.length,
+      willFail: willFailEntries,
+      unknownCount: buckets.unknown.length,
+      pendingTasks: tasks
+    });
   }, [processable, options, baseOutputDir, outputDir, runDispatch]);
 
   const onStart = useCallback(async () => {
@@ -2655,6 +2764,43 @@ const App: React.FC = () => {
                 📤 上传设置
               </button>
             </div>
+            {/* R-74 — Pre-flight banner. Sits between the task-table
+                header row and the table itself so the user sees both
+                the running progress and the pre-flight verdict in one
+                visual band. Self-unmounts when `preflight === null`. */}
+            <PreflightBanner
+              probing={preflight && preflight.phase === 'probing' ? {
+                total: preflight.total,
+                done: preflight.done
+              } : null}
+              awaiting={preflight && preflight.phase === 'awaiting' ? {
+                total: preflight.total,
+                willFail: preflight.willFail,
+                unknownCount: preflight.unknownCount,
+                onForceAllowAll: () => {
+                  if (!preflight || preflight.phase !== 'awaiting') return;
+                  const pending = preflight.pendingTasks;
+                  const forceIds = new Set(preflight.willFail.map((e) => e.media.id));
+                  setPreflight(null);
+                  void runDispatch(pending, forceIds, new Set());
+                },
+                onSkipAll: () => {
+                  if (!preflight || preflight.phase !== 'awaiting') return;
+                  const pending = preflight.pendingTasks;
+                  const dropIds = new Set(preflight.willFail.map((e) => e.media.id));
+                  setPreflight(null);
+                  void runDispatch(pending, new Set(), dropIds);
+                }
+              } : null}
+              onCancel={() => {
+                // Bump the cancel token first so any in-flight probe
+                // workers short-circuit before applying their next
+                // setPreflight tick. Then drop the banner state.
+                preflightCancelRef.current++;
+                setPreflight(null);
+                setLogs((prev) => [...prev, `[batch-preflight] 用户取消了整批派发`].slice(-300));
+              }}
+            />
             <TaskTable
               items={items}
               progress={progress}
@@ -2744,38 +2890,13 @@ const App: React.FC = () => {
         />
       ) : null}
 
-      {/* R-72 — Pre-flight aspect-ratio modal. Mounted by dispatchBatch
-          when one or more tasks would be rejected by the processor's
-          short-side-after-cap < minSize check. Lets the user one-shot
-          the「全部强制允许」flow instead of clicking 强制允许 N times
-          on individual rows after the batch fails. The modal owns its
-          own selection state; on confirm we receive the set of media
-          ids that opted in to forceAllowSmallSide. Ids in pendingTasks
-          but absent from forceAllowIds are dropped from the dispatch
-          (the user explicitly opted out of those items). */}
-      {sizeGuardModal ? (
-        <BatchSizeGuardModal
-          entries={sizeGuardModal.entries}
-          totalTasks={sizeGuardModal.pendingTasks.length}
-          onCancel={() => setSizeGuardModal(null)}
-          onConfirm={(forceAllowIds) => {
-            const pending = sizeGuardModal.pendingTasks;
-            const flaggedIds = new Set(
-              sizeGuardModal.entries.map((e) => e.media.id)
-            );
-            // Drop set = "tasks that the modal flagged as will-fail
-            // AND the user did NOT tick force-allow for". Tasks not
-            // in flaggedIds (the size-compliant majority) always
-            // proceed regardless of the modal verdict.
-            const dropIds = new Set<string>();
-            for (const id of flaggedIds) {
-              if (!forceAllowIds.has(id)) dropIds.add(id);
-            }
-            setSizeGuardModal(null);
-            void runDispatch(pending, forceAllowIds, dropIds);
-          }}
-        />
-      ) : null}
+      {/* R-72 / R-74 — The pre-flight size-guard modal block from R-72
+          was removed in R-74. The new inline `<PreflightBanner>` (mounted
+          above the TaskTable) covers the same job: showing K offending
+          items + a 「批量强制允许 K 项」 button that the user requested
+          to live in the progress band rather than in a modal. The
+          BatchSizeGuardModal component file is kept for the
+          `BatchSizeGuardEntry` type only. */}
 
       {historyDetail ? (
         <HistoryDetailModal
