@@ -1,8 +1,124 @@
 import path from 'path';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'fs';
 import { spawn, spawnSync } from 'child_process';
 import { app } from 'electron';
 import { log } from './logger';
+
+/**
+ * R-69 — Platform-aware probe timeout policy.
+ *
+ * Background: the user reported `ffprobe 不可用` and `cap probe ytdlp:
+ * timeout` toasts on macOS even though both binaries were installed.
+ * Manual timing on the user's box revealed the root cause:
+ *   - ffprobe-static/.../arm64/ffprobe is actually a x86_64 Mach-O
+ *     (ffprobe-static packaging quirk), so it runs through Rosetta 2.
+ *     First-launch Rosetta translation + Gatekeeper verification +
+ *     `com.apple.provenance` quarantine check =  6.7 s on the user's
+ *     M-series Mac. Second invocation: 0.035 s.
+ *   - yt-dlp_macos is a PyInstaller bundle. First launch self-extracts
+ *     a Python distribution into ~/.cache and validates signatures —
+ *     measured 26.7 s cold, < 0.1 s warm.
+ *
+ * Pre-R-69 every probe used a flat 5 s timeout, identical across all
+ * three platforms. That's wildly insufficient for macOS cold launches
+ * and produced false-positive "binary missing" toasts on every fresh
+ * install / update of the app. The capability subsystem's spec says
+ * issues should only mark "this feature is genuinely unusable in this
+ * session", so a slow first launch must NOT be reported as an error.
+ *
+ * Per-platform cold-start budget (only used the first time we probe
+ * after the binary's mtime changes — see `binariesWarmCache`):
+ *   - darwin : 30 s (Rosetta JIT + Gatekeeper + quarantine)
+ *   - win32  : 15 s (Defender first-scan + SmartScreen)
+ *   - linux  :  8 s (no translation layer; mostly disk + ld.so cost)
+ *
+ * Warm-path budget (every subsequent probe across the app's lifetime
+ * once we've seen the binary report a real version once):
+ *   - all platforms : 5 s (matches pre-R-69 baseline)
+ *
+ * The warm marker is keyed by `<absolutePath>|<mtimeMs>` and kept
+ * in `<userData>/binaries-warm.json`. Touching / replacing the binary
+ * resets the marker and we go through the cold budget again.
+ */
+function coldProbeTimeoutMs(): number {
+  switch (process.platform) {
+    case 'darwin': return 30_000;
+    case 'win32':  return 15_000;
+    default:       return 8_000;
+  }
+}
+function warmProbeTimeoutMs(): number {
+  return 5_000;
+}
+
+interface WarmEntry {
+  path: string;
+  mtimeMs: number;
+  version: string;
+}
+let warmCache: Record<string, WarmEntry> | null = null;
+function warmCachePath(): string | null {
+  // app may be undefined under unit-test imports — gracefully degrade
+  // to in-memory only in that case.
+  if (!app || typeof app.getPath !== 'function') return null;
+  try {
+    const dir = app.getPath('userData');
+    return path.join(dir, 'binaries-warm.json');
+  } catch {
+    return null;
+  }
+}
+function loadWarmCache(): Record<string, WarmEntry> {
+  if (warmCache) return warmCache;
+  const p = warmCachePath();
+  if (!p) { warmCache = {}; return warmCache; }
+  try {
+    const raw = readFileSync(p, 'utf8');
+    const j = JSON.parse(raw) as Record<string, WarmEntry>;
+    warmCache = j && typeof j === 'object' ? j : {};
+  } catch {
+    warmCache = {};
+  }
+  return warmCache;
+}
+function saveWarmCache(): void {
+  const p = warmCachePath();
+  if (!p || !warmCache) return;
+  try {
+    mkdirSync(path.dirname(p), { recursive: true });
+    writeFileSync(p, JSON.stringify(warmCache));
+  } catch (e) {
+    log(`warmCache: write failed ${(e as Error).message}`);
+  }
+}
+function fileMtimeMs(bin: string): number | null {
+  try {
+    return statSync(bin).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+function isWarm(label: string, bin: string): boolean {
+  const cache = loadWarmCache();
+  const entry = cache[label];
+  if (!entry) return false;
+  if (entry.path !== bin) return false;
+  const m = fileMtimeMs(bin);
+  if (m === null) return false;
+  return Math.abs(entry.mtimeMs - m) < 1; // mtimeMs has float precision noise
+}
+function markWarm(label: string, bin: string, version: string): void {
+  const cache = loadWarmCache();
+  const m = fileMtimeMs(bin);
+  if (m === null) return;
+  cache[label] = { path: bin, mtimeMs: m, version };
+  saveWarmCache();
+}
+
+/** Test-only — drop the in-memory warm cache so each test starts clean. */
+export function _resetWarmCacheForTest(): void {
+  warmCache = null;
+}
 
 function resolveBin(staticPath: string | null | undefined, fallbackName: string): string {
   if (!staticPath) return fallbackName;
@@ -183,13 +299,27 @@ function probeBinary(label: string, bin: string, args: string[]): { ok: boolean;
  * binaries (e.g. macOS arm64 ffprobe on first launch) burn through
  * their 5s timeout — that synchronous wait was what produced the
  * "彩虹 loading 卡 5 秒" symptom in R-66.
+ *
+ * R-69 — Now returns a `timedOut` flag so callers can distinguish
+ * "definitely failed" (spawn ENOENT / non-zero exit) from "still
+ * warming up" (Rosetta translation / Defender first-scan / yt-dlp
+ * PyInstaller self-extract). Pre-R-69 every probe used a flat 5 s
+ * budget which produced false-positive "binary missing" toasts on
+ * macOS first launch — measured 6.7 s for ffprobe (Rosetta) and
+ * 26.7 s for yt-dlp (PyInstaller). Use `probeBinaryWarmAware` below
+ * to pick the right budget per platform / warm-cache state.
  */
-function probeBinaryAsync(label: string, bin: string, args: string[]): Promise<{ ok: boolean; version: string }> {
+export interface AsyncProbeResult {
+  ok: boolean;
+  version: string;
+  timedOut: boolean;
+}
+function probeBinaryAsync(label: string, bin: string, args: string[], timeoutMs: number = 5000): Promise<AsyncProbeResult> {
   return new Promise((resolve) => {
     let stdout = '';
     let stderr = '';
     let settled = false;
-    const finish = (res: { ok: boolean; version: string }): void => {
+    const finish = (res: AsyncProbeResult): void => {
       if (settled) return;
       settled = true;
       resolve(res);
@@ -198,32 +328,67 @@ function probeBinaryAsync(label: string, bin: string, args: string[]): Promise<{
       const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
       const t = setTimeout(() => {
         try { child.kill('SIGKILL'); } catch { /* ignore */ }
-        log(`probe ${label}: timeout (path=${bin})`);
-        finish({ ok: false, version: '' });
-      }, 5000);
+        log(`probe ${label}: timeout (path=${bin}, budget=${timeoutMs}ms)`);
+        finish({ ok: false, version: '', timedOut: true });
+      }, timeoutMs);
       child.stdout?.on('data', (d) => { stdout += d.toString('utf8'); });
       child.stderr?.on('data', (d) => { stderr += d.toString('utf8'); });
       child.on('error', (e) => {
         clearTimeout(t);
         log(`probe ${label}: spawn error ${e.message} (path=${bin})`);
-        finish({ ok: false, version: '' });
+        finish({ ok: false, version: '', timedOut: false });
       });
       child.on('close', (code) => {
         clearTimeout(t);
         const out = `${stdout}\n${stderr}`;
         const firstLine = out.split(/\r?\n/).find((s) => s.trim().length > 0) || '';
         if (code === 0 || /version/i.test(firstLine)) {
-          finish({ ok: true, version: firstLine.trim() });
+          finish({ ok: true, version: firstLine.trim(), timedOut: false });
           return;
         }
         log(`probe ${label}: exit ${code} (path=${bin})`);
-        finish({ ok: false, version: firstLine.trim() });
+        finish({ ok: false, version: firstLine.trim(), timedOut: false });
       });
     } catch (e) {
       log(`probe ${label}: throw ${(e as Error).message}`);
-      finish({ ok: false, version: '' });
+      finish({ ok: false, version: '', timedOut: false });
     }
   });
+}
+
+/**
+ * R-69 — High-level probe wrapper: picks platform-aware timeout from
+ * the warm cache and, on cold-cache timeout, retries once with the
+ * extended cold budget. Used by both `printPathsAsync` and
+ * `capabilities.ts` so the policy lives in one place.
+ *
+ * Cold budget by platform: darwin 30s / win32 15s / linux 8s.
+ * Warm budget: 5s everywhere. The warm marker is keyed by
+ * `<absolutePath>|<mtimeMs>`; updating the binary invalidates it.
+ */
+export async function probeBinaryWarmAware(
+  label: string,
+  bin: string,
+  args: string[]
+): Promise<AsyncProbeResult> {
+  const warm = isWarm(label, bin);
+  const timeoutMs = warm ? warmProbeTimeoutMs() : coldProbeTimeoutMs();
+  const r = await probeBinaryAsync(label, bin, args, timeoutMs);
+  if (r.ok) {
+    markWarm(label, bin, r.version);
+    return r;
+  }
+  // If we used the warm budget and it timed out, retry ONCE with the
+  // cold budget — the warm marker may be stale (binary updated since).
+  // We don't retry when the cold budget itself timed out; that's a
+  // genuine failure regardless of platform.
+  if (r.timedOut && warm) {
+    log(`probe ${label}: warm budget timed out, retrying with cold budget`);
+    const r2 = await probeBinaryAsync(label, bin, args, coldProbeTimeoutMs());
+    if (r2.ok) markWarm(label, bin, r2.version);
+    return r2;
+  }
+  return r;
 }
 
 export function printPaths(): { ffmpeg: { path: string; ok: boolean; version: string }; ffprobe: { path: string; ok: boolean; version: string }; gifsicle: { path: string; ok: boolean; version: string } } {
@@ -249,22 +414,27 @@ export function printPaths(): { ffmpeg: { path: string; ok: boolean; version: st
  * by ETIMEDOUT-prone `--version` probes (the user-reported "彩虹
  * loading 卡 5 秒" symptom). The synchronous `printPaths` is kept
  * for tests that want a deterministic snapshot.
+ *
+ * R-69 — Routes through `probeBinaryWarmAware` so the timeout budget
+ * matches platform reality (macOS first launch needs > 5 s for
+ * Rosetta-translated binaries) and successful probes persist a warm
+ * marker for faster subsequent boots.
  */
 export async function printPathsAsync(): Promise<{ ffmpeg: { path: string; ok: boolean; version: string }; ffprobe: { path: string; ok: boolean; version: string }; gifsicle: { path: string; ok: boolean; version: string } }> {
   const ffmpegPath = getFfmpegPath();
   const ffprobePath = getFfprobePath();
   const gifsiclePath = getGifsiclePath();
   const [ffmpeg, ffprobe, gifsicle] = await Promise.all([
-    probeBinaryAsync('ffmpeg', ffmpegPath, ['-version']),
-    probeBinaryAsync('ffprobe', ffprobePath, ['-version']),
-    probeBinaryAsync('gifsicle', gifsiclePath, ['--version'])
+    probeBinaryWarmAware('ffmpeg', ffmpegPath, ['-version']),
+    probeBinaryWarmAware('ffprobe', ffprobePath, ['-version']),
+    probeBinaryWarmAware('gifsicle', gifsiclePath, ['--version'])
   ]);
   log(`binaries: ffmpeg=${ffmpegPath} ok=${ffmpeg.ok} ${ffmpeg.version}`);
   log(`binaries: ffprobe=${ffprobePath} ok=${ffprobe.ok} ${ffprobe.version}`);
   log(`binaries: gifsicle=${gifsiclePath} ok=${gifsicle.ok} ${gifsicle.version}`);
   return {
-    ffmpeg: { path: ffmpegPath, ...ffmpeg },
-    ffprobe: { path: ffprobePath, ...ffprobe },
-    gifsicle: { path: gifsiclePath, ...gifsicle }
+    ffmpeg: { path: ffmpegPath, ok: ffmpeg.ok, version: ffmpeg.version },
+    ffprobe: { path: ffprobePath, ok: ffprobe.ok, version: ffprobe.version },
+    gifsicle: { path: gifsiclePath, ok: gifsicle.ok, version: gifsicle.version }
   };
 }
