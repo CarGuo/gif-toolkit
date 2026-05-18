@@ -40,6 +40,7 @@ import * as os from 'os';
 import * as path from 'path';
 import type { SniffResult, SniffedMedia, MediaKind, SniffProgress } from '../shared/types';
 import { log } from './logger';
+import { matchEmbedProvider } from './sniffer';
 
 /**
  * R-56 — Convert an absolute on-disk path into the renderer-displayable
@@ -238,6 +239,52 @@ function collectFromDom(
     }
   }
 
+  // R-60 — <iframe> sweep for known video-embed providers (YouTube,
+  // Vimeo, Bilibili, Dailymotion, Wistia, Brightcove, Streamable, TED).
+  // The user's R-60 feedback was: "为什么 mhtml 里面有 iframe 视频会
+  // 识别不到,你底层嗅探逻辑难道不是多个入口公用吗?" — and they were
+  // right.  The online sniffer in sniffer.ts has had iframe-embed
+  // extraction since R-50, but the offline / mhtml path was carrying
+  // its own hand-written DOM walker that only knew <video>/<source>/
+  // <img>/og:*. We now reuse `matchEmbedProvider` from sniffer.ts so
+  // the recognition rules can never drift between the two entry points
+  // (online live page sniff and offline mhtml import).
+  //
+  // Important: iframe URLs are absolute (the embed always points at
+  // youtube.com / vimeo.com / etc.), so we deliberately do NOT pipe
+  // them through resolveOfflineRef — that helper rewrites to local
+  // file:// for siblings inside the saved bundle, which would break
+  // the embed.  We just normalise relative-to-absolute via URL().
+  $('iframe').each((_, el) => {
+    const $el = $(el);
+    const rawSrc =
+      $el.attr('src') || $el.attr('data-src') || $el.attr('data-lazy-src') || '';
+    if (!rawSrc) return;
+    let absUrl: string;
+    try {
+      absUrl = new URL(rawSrc, pageUrl).toString();
+    } catch {
+      return;
+    }
+    let host: string;
+    try {
+      host = new URL(absUrl).hostname.toLowerCase();
+    } catch {
+      return;
+    }
+    const provider = matchEmbedProvider(host, absUrl);
+    if (!provider) return;
+    push({
+      id: shortId(absUrl),
+      url: absUrl,
+      kind: 'video',
+      source: 'iframe-embed',
+      pageUrl,
+      requiresExternalDownload: true,
+      embedHost: provider
+    });
+  });
+
   return title;
 }
 
@@ -288,7 +335,7 @@ function importHtmlFile(absHtmlPath: string, opts: OfflineImportOptions): SniffR
   const warnings: string[] = [];
   if (map.size === 0) {
     warnings.push(
-      '页面里没有找到 <video>/og:video/og:image(GIF)引用,' +
+      '页面里没有找到 <video>/og:video/og:image(GIF)/已知第三方 embed iframe(YouTube/Vimeo/Bilibili 等)引用,' +
       '或者引用的本地文件不存在。如果你保存的是 SPA(微博、Twitter 等),' +
       '请改用 .mhtml 或在浏览器里点击「另存为 → 网页,完整」获得完整的 _files 目录。' +
       ' 默认会过滤静态图像(png/jpg/webp);如果你希望也包含它们,请使用「包含静态图像」选项。'
@@ -444,7 +491,7 @@ function importMhtmlFile(absPath: string, opts: OfflineImportOptions): SniffResu
   const warnings: string[] = [];
   if (map.size === 0) {
     warnings.push(
-      'mhtml 解析成功,但里面没有找到 <video>/og:video/og:image(GIF)。' +
+      'mhtml 解析成功,但里面没有找到 <video>/og:video/og:image(GIF)/已知第三方 embed iframe(YouTube/Vimeo/Bilibili 等)。' +
       ' 默认会过滤静态图像(png/jpg/webp);如果你希望也包含它们,请使用「包含静态图像」选项。'
     );
   }

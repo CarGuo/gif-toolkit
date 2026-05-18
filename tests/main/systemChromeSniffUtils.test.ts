@@ -170,13 +170,18 @@ describe('buildChromeArgs', () => {
       '--disable-features=AutomationControlled,Translate,ChromeWhatsNewUI,WelcomeTour',
       '--password-store=basic',
       '--use-mock-keychain',
-      'https://chat.openai.com/'
+      // R-60 — boot into about:blank instead of the target URL so the
+      // user's daily-profile "On startup → open specific pages" setting
+      // does not produce a second tab.  We Page.navigate(url) over CDP
+      // after attach.
+      'about:blank'
     ]);
   });
 
-  it('puts the URL last so Chrome treats it as the initial tab target', () => {
+  it('R-60 — boots into about:blank, never the target URL as positional arg', () => {
     const args = buildChromeArgs({ url: 'https://medium.com/x', userDataDir: '/d', port: 9222 });
-    expect(args[args.length - 1]).toBe('https://medium.com/x');
+    expect(args[args.length - 1]).toBe('about:blank');
+    expect(args).not.toContain('https://medium.com/x');
   });
 
   it('R-58 — never passes --enable-automation (CF / DataDome key off it)', () => {

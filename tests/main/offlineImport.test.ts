@@ -200,6 +200,53 @@ describe('importOfflinePath — html + sibling _files/', () => {
     const r = await importOfflinePath(path.join(tmp, 'page.html'), { includeStaticImages: true });
     expect(r.items).toHaveLength(0);
   });
+
+  // R-60 — User explicitly asked: "为什么 mhtml 里面有 iframe 视频会
+  // 识别不到,你底层嗅探逻辑难道不是多个入口公用吗?"  These tests
+  // pin the contract that the offline DOM walker now honours the same
+  // iframe-embed providers that the online sniffer (sniffer.ts) does.
+  it('R-60 — recognises a YouTube embed iframe as a video item with iframe-embed source', async () => {
+    fs.writeFileSync(
+      path.join(tmp, 'page.html'),
+      `<!doctype html><html><body>
+        <iframe src="https://www.youtube.com/embed/dQw4w9WgXcQ"
+          frameborder="0" allowfullscreen></iframe>
+      </body></html>`
+    );
+    const r = await importOfflinePath(path.join(tmp, 'page.html'));
+    expect(r.items).toHaveLength(1);
+    expect(r.items[0].kind).toBe('video');
+    expect(r.items[0].source).toBe('iframe-embed');
+    expect(r.items[0].embedHost).toBe('youtube.com');
+    expect(r.items[0].requiresExternalDownload).toBe(true);
+    expect(r.items[0].url).toBe('https://www.youtube.com/embed/dQw4w9WgXcQ');
+  });
+
+  it('R-60 — recognises a Vimeo player iframe', async () => {
+    fs.writeFileSync(
+      path.join(tmp, 'page.html'),
+      `<!doctype html><html><body>
+        <iframe src="https://player.vimeo.com/video/123456789?h=abc"></iframe>
+      </body></html>`
+    );
+    const r = await importOfflinePath(path.join(tmp, 'page.html'));
+    expect(r.items.length).toBeGreaterThanOrEqual(1);
+    const v = r.items.find((it) => it.embedHost === 'vimeo.com');
+    expect(v).toBeDefined();
+    expect(v!.kind).toBe('video');
+    expect(v!.source).toBe('iframe-embed');
+  });
+
+  it('R-60 — drops random non-video iframes (e.g. ads / analytics) instead of polluting results', async () => {
+    fs.writeFileSync(
+      path.join(tmp, 'page.html'),
+      `<!doctype html><html><body>
+        <iframe src="https://example.com/random-ad-server"></iframe>
+      </body></html>`
+    );
+    const r = await importOfflinePath(path.join(tmp, 'page.html'));
+    expect(r.items).toHaveLength(0);
+  });
 });
 
 describe('importOfflinePath — directory input', () => {

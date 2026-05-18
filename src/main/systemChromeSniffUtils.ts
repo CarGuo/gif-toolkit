@@ -210,7 +210,16 @@ export function buildChromeArgs(opts: {
     '--disable-features=AutomationControlled,Translate,ChromeWhatsNewUI,WelcomeTour',
     '--password-store=basic',
     '--use-mock-keychain',
-    opts.url
+    // R-60 — Do NOT pass the target URL as a positional argument. When
+    // useRealProfile=true, the user's daily Chrome profile usually has
+    // chrome://settings → "On startup" set to "Open a specific page or
+    // set of pages" or "Continue where you left off". --restore-last-
+    // session=false only suppresses the latter; the former is honoured
+    // independently and Chrome will open BOTH the configured startup
+    // pages AND our positional URL = two tabs. Instead we boot Chrome
+    // into about:blank (single empty tab, ignored by every startup
+    // mode) and then drive Page.navigate(url) over CDP after attach.
+    'about:blank'
   ];
 }
 

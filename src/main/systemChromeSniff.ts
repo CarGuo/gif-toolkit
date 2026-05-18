@@ -401,10 +401,81 @@ export async function sniffViaSystemChrome(
     client = await CDP({ port, target: pageTargetId });
     opts.onProgress?.({ stage: 'parsing', percent: 40 });
 
-    const { Network, Page, Runtime } = client;
+    const { Network, Page, Runtime, Target } = client;
     await Network.enable();
     await Page.enable();
     await Runtime.enable();
+
+    // R-60 — The shared response-handler. Hoisted so we can register it
+    // both on the top-level page session AND on every auto-attached
+    // sub-frame target session below. Without this the cross-origin
+    // iframes that real video sites use (YouTube embed, Vimeo, OpenAI's
+    // verification iframe, Patreon embed, ...) dump their .mp4 / .m3u8
+    // responses to a different OOPIF process whose Network domain we
+    // never enabled, so `responseReceived` simply never fires for them
+    // → the iframe's direct stream URL is invisible to us.
+    const onResponse = (params: CdpResponseReceivedParams): void => {
+      if (captured.size >= MAX_ITEMS) return;
+      const t = typeof params.type === 'string' ? params.type : '';
+      if (t && !SUPPORTED_EVENT_TYPES.has(t)) return;
+      const cand = extractCdpCandidate(params);
+      if (!cand) return;
+      const byMime = classifyByContentType(cand.mime);
+      const byExt = classifyByExt(cand.url);
+      const accepted = acceptWebviewMedia(byMime || byExt, cand.mime);
+      if (!accepted) return;
+      const key = webviewDedupKey(cand.url);
+      if (captured.has(key)) return;
+      captured.set(key, { url: cand.url, kind: accepted, mime: cand.mime ?? undefined });
+    };
+
+    // R-60 — auto-attach to all child targets (cross-origin iframes,
+    // workers, popups). flatten:true means each child's events flow
+    // through the SAME WebSocket on this client, multiplexed by
+    // sessionId; we route per-session via the `(sessionId, handler)`
+    // signature exposed by chrome-remote-interface's generated API.
+    // Without setAutoAttach we only saw top-frame network — the entire
+    // reason "openai iframe 直链" was invisible.
+    try {
+      await Target.setAutoAttach({
+        autoAttach: true,
+        waitForDebuggerOnStart: false,
+        flatten: true
+      });
+    } catch (e) {
+      log(`[system-chrome-sniff] setAutoAttach failed: ${(e as Error).message}`);
+    }
+
+    Target.attachedToTarget(async (params) => {
+      const ti = (params as { sessionId?: unknown; targetInfo?: { type?: unknown; targetId?: unknown } }) ?? {};
+      const sessionId = typeof ti.sessionId === 'string' ? ti.sessionId : undefined;
+      const childType = typeof ti.targetInfo?.type === 'string' ? ti.targetInfo.type : '';
+      if (!sessionId) return;
+      // We only care about iframe / page-style child targets (which is
+      // where cross-origin video iframes live). Workers / service
+      // workers also fire here but their network rarely matters for
+      // sniffing media.
+      if (childType !== 'iframe' && childType !== 'page') return;
+      try {
+        await Network.enable(undefined, sessionId);
+      } catch (e) {
+        log(`[system-chrome-sniff] sub-session Network.enable failed (${childType}): ${(e as Error).message}`);
+        return;
+      }
+      try {
+        // The generated event API accepts (sessionId, handler) and
+        // dispatches only events whose envelope sessionId matches.
+        // chrome-remote-interface's TypeScript declarations only
+        // expose the (handler) overload, so we cast to bypass the
+        // overload mismatch — the runtime impl is documented in
+        // node_modules/chrome-remote-interface/lib/api.js#addEvent.
+        (Network.responseReceived as unknown as (
+          sid: string, h: (p: CdpResponseReceivedParams) => void
+        ) => void)(sessionId, onResponse);
+      } catch (e) {
+        log(`[system-chrome-sniff] sub-session listener bind failed: ${(e as Error).message}`);
+      }
+    });
 
     // R-58 — Belt-and-suspenders to the `--disable-blink-features=
     // AutomationControlled` launch flag. Even with that flag, some
@@ -444,23 +515,31 @@ export async function sniffViaSystemChrome(
       log(`[system-chrome-sniff] webdriver-mask injection failed: ${(e as Error).message}`);
     }
 
-    Network.responseReceived((params: CdpResponseReceivedParams) => {
-      if (captured.size >= MAX_ITEMS) return;
-      // Cheap pre-filter: skip resource types CDP marks as definitely
-      // not-media (Document, Stylesheet, Script, Manifest, Ping, ...).
-      const t = typeof params.type === 'string' ? params.type : '';
-      if (t && !SUPPORTED_EVENT_TYPES.has(t)) return;
+    Network.responseReceived(onResponse);
 
-      const cand = extractCdpCandidate(params);
-      if (!cand) return;
-      const byMime = classifyByContentType(cand.mime);
-      const byExt = classifyByExt(cand.url);
-      const accepted = acceptWebviewMedia(byMime || byExt, cand.mime);
-      if (!accepted) return;
-      const key = webviewDedupKey(cand.url);
-      if (captured.has(key)) return;
-      captured.set(key, { url: cand.url, kind: accepted, mime: cand.mime ?? undefined });
-    });
+    // R-60 — Drive the navigation over CDP instead of via the launch
+    // arg. buildChromeArgs now boots Chrome into about:blank to avoid
+    // the "two-tab" bug on real-profile mode (user's chrome://settings
+    // "On startup → open a specific page" would race our positional URL
+    // and produce two tabs). Closing all OTHER page targets first
+    // guarantees the user lands on a single tab regardless of how their
+    // daily profile is configured.
+    try {
+      const all = await CDP.List({ port });
+      for (const t of all) {
+        if (t.type === 'page' && t.id !== pageTargetId) {
+          try { await Target.closeTarget({ targetId: t.id }); } catch { /* ignore */ }
+        }
+      }
+    } catch (e) {
+      log(`[system-chrome-sniff] could not enumerate / close extra startup tabs: ${(e as Error).message}`);
+    }
+    try {
+      await Page.navigate({ url });
+      log(`[system-chrome-sniff] Page.navigate -> ${url}`);
+    } catch (e) {
+      log(`[system-chrome-sniff] Page.navigate failed: ${(e as Error).message}`);
+    }
 
     // Track the user's navigation so when they finish, we know the real
     // landing URL (e.g. after CF challenge redirect).
