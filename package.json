@@ -1,9 +1,12 @@
 {
   "name": "gif-toolkit",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Gif Toolkit — 网页媒体一站式抓取、转换、优化与上传桌面工具:四档嗅探链路(URL / WebContentsView / 真实 Chrome 反爬 / yt-dlp)+ 离线 .mhtml 导入,视频→GIF/WebP 双层目标自适应压缩,GIF/WebP 修剪/缩放/速度/反向/旋转/裁剪/互转工具箱,内置批处理 + 嗅探/产物历史 + 五种图床上传(自建 Web、GitHub、七牛、阿里云 OSS、腾讯云 COS)。FFmpeg + Gifsicle + Sharp + yt-dlp,跨 macOS / Windows / Linux。",
   "main": "dist/main/index.js",
-  "author": "gif-toolkit",
+  "author": {
+    "name": "gif-toolkit",
+    "email": "gif-toolkit@users.noreply.github.com"
+  },
   "license": "MIT",
   "scripts": {
     "dev": "concurrently -k -n RENDERER,MAIN -c blue,green \"npm:dev:renderer\" \"npm:dev:main\"",
@@ -135,6 +138,7 @@
     "linux": {
       "icon": "build/icon.png",
       "category": "Graphics",
+      "maintainer": "gif-toolkit <gif-toolkit@users.noreply.github.com>",
       "target": [
         {
           "target": "AppImage",

@@ -53,6 +53,13 @@ export function getCandidatePaths(
   platform: NodeJS.Platform,
   homeDir: string
 ): BrowserCandidate[] {
+  // R-78 — Path joining must follow the *target* platform, NOT the host.
+  // Otherwise running the unit suite on a Windows CI runner against
+  // `platform === 'darwin'` would emit `\Users\alice\Applications\...` and
+  // the macOS-shaped candidate would silently disappear from the list,
+  // breaking real probing once the binary actually ships to a Mac.
+  // We pick the right joiner per requested platform up-front.
+  const join = platform === 'win32' ? path.win32.join : path.posix.join;
   if (platform === 'darwin') {
     return [
       { id: 'chrome', label: 'Google Chrome',
@@ -68,36 +75,36 @@ export function getCandidatePaths(
       // Per-user installs (macOS users often install browsers to
       // `~/Applications/` to avoid the admin-password prompt at install).
       { id: 'chrome', label: 'Google Chrome (User)',
-        exePath: path.join(homeDir, 'Applications/Google Chrome.app/Contents/MacOS/Google Chrome') },
+        exePath: join(homeDir, 'Applications/Google Chrome.app/Contents/MacOS/Google Chrome') },
       { id: 'edge', label: 'Microsoft Edge (User)',
-        exePath: path.join(homeDir, 'Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge') }
+        exePath: join(homeDir, 'Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge') }
     ];
   }
   if (platform === 'win32') {
     const programFiles = process.env['ProgramFiles'] || 'C:\\Program Files';
     const programFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
     const localAppData = process.env['LOCALAPPDATA'] ||
-      path.join(homeDir, 'AppData', 'Local');
+      join(homeDir, 'AppData', 'Local');
     return [
       { id: 'chrome', label: 'Google Chrome',
-        exePath: path.join(programFiles, 'Google\\Chrome\\Application\\chrome.exe') },
+        exePath: join(programFiles, 'Google\\Chrome\\Application\\chrome.exe') },
       { id: 'chrome', label: 'Google Chrome (x86)',
-        exePath: path.join(programFilesX86, 'Google\\Chrome\\Application\\chrome.exe') },
+        exePath: join(programFilesX86, 'Google\\Chrome\\Application\\chrome.exe') },
       { id: 'chrome', label: 'Google Chrome (User)',
-        exePath: path.join(localAppData, 'Google\\Chrome\\Application\\chrome.exe') },
+        exePath: join(localAppData, 'Google\\Chrome\\Application\\chrome.exe') },
       { id: 'edge', label: 'Microsoft Edge',
-        exePath: path.join(programFiles, 'Microsoft\\Edge\\Application\\msedge.exe') },
+        exePath: join(programFiles, 'Microsoft\\Edge\\Application\\msedge.exe') },
       { id: 'edge', label: 'Microsoft Edge (x86)',
-        exePath: path.join(programFilesX86, 'Microsoft\\Edge\\Application\\msedge.exe') },
+        exePath: join(programFilesX86, 'Microsoft\\Edge\\Application\\msedge.exe') },
       // R-61 — per-user Edge install (no admin-prompt path) was missing.
       { id: 'edge', label: 'Microsoft Edge (User)',
-        exePath: path.join(localAppData, 'Microsoft\\Edge\\Application\\msedge.exe') },
+        exePath: join(localAppData, 'Microsoft\\Edge\\Application\\msedge.exe') },
       { id: 'brave', label: 'Brave Browser',
-        exePath: path.join(programFiles, 'BraveSoftware\\Brave-Browser\\Application\\brave.exe') },
+        exePath: join(programFiles, 'BraveSoftware\\Brave-Browser\\Application\\brave.exe') },
       { id: 'brave', label: 'Brave Browser (x86)',
-        exePath: path.join(programFilesX86, 'BraveSoftware\\Brave-Browser\\Application\\brave.exe') },
+        exePath: join(programFilesX86, 'BraveSoftware\\Brave-Browser\\Application\\brave.exe') },
       { id: 'brave', label: 'Brave Browser (User)',
-        exePath: path.join(localAppData, 'BraveSoftware\\Brave-Browser\\Application\\brave.exe') }
+        exePath: join(localAppData, 'BraveSoftware\\Brave-Browser\\Application\\brave.exe') }
     ];
   }
   // linux + others — R-61 reworked. The previous list missed almost every
@@ -150,13 +157,13 @@ export function getCandidatePaths(
     // because Electron app sandboxing on some distros forbids spawning
     // out of /var/lib at runtime — per-user is reliably accessible.
     { id: 'chrome', label: 'Google Chrome (Flatpak)',
-      exePath: path.join(homeDir, '.local/share/flatpak/exports/bin/com.google.Chrome') },
+      exePath: join(homeDir, '.local/share/flatpak/exports/bin/com.google.Chrome') },
     { id: 'chromium', label: 'Chromium (Flatpak)',
-      exePath: path.join(homeDir, '.local/share/flatpak/exports/bin/org.chromium.Chromium') },
+      exePath: join(homeDir, '.local/share/flatpak/exports/bin/org.chromium.Chromium') },
     { id: 'edge', label: 'Microsoft Edge (Flatpak)',
-      exePath: path.join(homeDir, '.local/share/flatpak/exports/bin/com.microsoft.Edge') },
+      exePath: join(homeDir, '.local/share/flatpak/exports/bin/com.microsoft.Edge') },
     { id: 'brave', label: 'Brave Browser (Flatpak)',
-      exePath: path.join(homeDir, '.local/share/flatpak/exports/bin/com.brave.Browser') }
+      exePath: join(homeDir, '.local/share/flatpak/exports/bin/com.brave.Browser') }
   ];
 }
 
