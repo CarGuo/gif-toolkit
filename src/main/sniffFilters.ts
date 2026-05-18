@@ -125,9 +125,16 @@ export function applySniffFilters(
   // upstream identity-equality checks (e.g. memoisation) remain valid.
   if (survivors.length === beforeCount) return result;
 
-  const warnings = [...result.warnings];
+  // R-67 — The static-image filter is a *by-design* drop, not a failure.
+  // Pre-R-67 we pushed this into `warnings`, which the renderer renders
+  // red — making a perfectly normal sniff look like an error. The
+  // message now goes to `infoNotices` (rendered in muted/info style)
+  // so the user can see WHY counts went down without panicking. Real
+  // failures (timeout, no media at all, fetch error) still go to
+  // `warnings` and stay red.
+  const infoNotices = [...(result.infoNotices ?? [])];
   if (droppedStatic > 0) {
-    warnings.push(
+    infoNotices.push(
       `已自动过滤 ${droppedStatic} 个静态图像(.png/.jpg/.webp/.bmp/.avif/.ico/.svg);` +
       ' 如果你需要它们,请勾选「含静态图」后重试。GIF 与 <video> 不受此过滤影响。'
     );
@@ -136,6 +143,6 @@ export function applySniffFilters(
   return {
     ...result,
     items: survivors,
-    warnings
+    infoNotices
   };
 }

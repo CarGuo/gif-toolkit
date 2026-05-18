@@ -82,6 +82,87 @@ const HTML_EXTS = new Set(['.html', '.htm']);
 const MHTML_EXTS = new Set(['.mhtml', '.mht']);
 
 /**
+ * R-67 — Hosts whose iframes are *never* candidate video embeds. We
+ * deliberately collect EVERY iframe (regardless of whether
+ * matchEmbedProvider recognises it) so users with mhtml archives from
+ * less-common video sites still get a clickable row that yt-dlp can
+ * resolve at download time. The trade-off is that ad / analytics
+ * iframes would otherwise pollute the result; this denylist prunes
+ * the loud offenders found on real-world saved pages. Suffix match
+ * on hostname (so `tpc.googlesyndication.com` is caught by
+ * `googlesyndication.com`).
+ */
+const IFRAME_HOST_DENYLIST: readonly string[] = [
+  'doubleclick.net',
+  'googlesyndication.com',
+  'googletagmanager.com',
+  'googletagservices.com',
+  'google-analytics.com',
+  'googleadservices.com',
+  'g.doubleclick.net',
+  'adservice.google.com',
+  'adsystem.com',
+  'adnxs.com',
+  'rubiconproject.com',
+  'pubmatic.com',
+  'criteo.com',
+  'taboola.com',
+  'outbrain.com',
+  'scorecardresearch.com',
+  'quantserve.com',
+  'bing.com/maps/embed',
+  'recaptcha.net',
+  'gstatic.com/recaptcha',
+  'fundingchoicesmessages.google.com',
+  'facebook.com/plugins',
+  'connect.facebook.net',
+  'static.ads-twitter.com',
+  'analytics.twitter.com',
+  'hotjar.com',
+  'clarity.ms',
+  'addthis.com',
+  'sharethis.com',
+  'disqus.com/embed/comments',
+  'consent.cookiebot.com',
+  'js-agent.newrelic.com',
+  'segment.com',
+  'segment.io'
+];
+
+function isDenylistedIframeHost(host: string, fullUrl: string): boolean {
+  const h = host.toLowerCase();
+  const u = fullUrl.toLowerCase();
+  for (const rule of IFRAME_HOST_DENYLIST) {
+    if (rule.includes('/')) {
+      // Path-fragment rule (e.g. "facebook.com/plugins") — match by URL substring.
+      if (u.includes(rule)) return true;
+    } else if (h === rule || h.endsWith('.' + rule)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * R-67 — Recursive iframe-document resolver for mhtml. mhtml archives
+ * save EVERY frame's HTML body as its own multipart part; an iframe
+ * `src` that points at a part's `Content-Location` should be parsed
+ * as a sub-document so we can recurse into nested `<video>` /
+ * `<source>` / `<iframe>` tags. The caller supplies this resolver
+ * because:
+ *   1. The single-page `.html` path doesn't have a frame archive at
+ *      all — it just returns null.
+ *   2. The mhtml path wires up `Map<originalUrl, stagedHtmlPath>` so
+ *      the resolver can short-circuit to the same staged tmp dir.
+ * Returns null when the iframe cannot be resolved locally; the caller
+ * then falls back to either matchEmbedProvider or the broaden-to-yt-dlp
+ * pathway.
+ */
+type FrameResolver = (frameUrl: string) => { absHtmlPath: string; baseDir: string; origin: string } | null;
+
+const MAX_FRAME_RECURSION_DEPTH = 4;
+
+/**
  * R-56 — Offline import options. The pre-R-56 entry point only
  * received an absolute path; this is now wrapped in an options
  * object so the IPC layer can pipe progress + cancel through.
@@ -165,15 +246,28 @@ function resolveOfflineRef(baseDir: string, raw: string): string | null {
  * Walk a parsed offline DOM and collect candidate media. Mirrors the
  * five most-useful selectors from sniffer.extractFromHtml but with
  * the offline URL resolver above.
+ *
+ * R-67 — `frameResolver` (optional) lets the caller register a hook
+ * that maps an iframe absolute URL → a staged HTML file inside the
+ * same archive. When supplied, this function recurses into matching
+ * iframe documents up to MAX_FRAME_RECURSION_DEPTH levels deep,
+ * tracking the visited set to prevent loops. The single-page `.html`
+ * import path doesn't need this and passes `undefined`. The mhtml
+ * path supplies a real resolver that consults the
+ * `Content-Location → tmpFile` map built by `importMhtmlFile`.
  */
 function collectFromDom(
   $: cheerio.CheerioAPI,
   baseDir: string,
   pageUrl: string,
   map: Map<string, SniffedMedia>,
-  includeStaticImages: boolean
+  includeStaticImages: boolean,
+  frameResolver?: FrameResolver,
+  visitedFrames?: Set<string>,
+  depth: number = 0
 ): string | undefined {
   const title = $('title').first().text().trim() || undefined;
+  const visited = visitedFrames ?? new Set<string>();
 
   const push = (m: SniffedMedia): void => {
     if (!map.has(m.url)) map.set(m.url, m);
@@ -244,22 +338,31 @@ function collectFromDom(
     }
   }
 
-  // R-60 — <iframe> sweep for known video-embed providers (YouTube,
-  // Vimeo, Bilibili, Dailymotion, Wistia, Brightcove, Streamable, TED).
-  // The user's R-60 feedback was: "为什么 mhtml 里面有 iframe 视频会
-  // 识别不到,你底层嗅探逻辑难道不是多个入口公用吗?" — and they were
-  // right.  The online sniffer in sniffer.ts has had iframe-embed
-  // extraction since R-50, but the offline / mhtml path was carrying
-  // its own hand-written DOM walker that only knew <video>/<source>/
-  // <img>/og:*. We now reuse `matchEmbedProvider` from sniffer.ts so
-  // the recognition rules can never drift between the two entry points
-  // (online live page sniff and offline mhtml import).
+  // R-67 — Unified <iframe> sweep across THREE recognition tiers:
   //
-  // Important: iframe URLs are absolute (the embed always points at
-  // youtube.com / vimeo.com / etc.), so we deliberately do NOT pipe
-  // them through resolveOfflineRef — that helper rewrites to local
-  // file:// for siblings inside the saved bundle, which would break
-  // the embed.  We just normalise relative-to-absolute via URL().
+  //   1. Known embed provider (matchEmbedProvider) — same as R-60.
+  //      Marks the row video + requiresExternalDownload + embedHost
+  //      so the renderer surfaces the「解析直链」button (yt-dlp).
+  //   2. Frame resolver hit — the iframe URL maps to a staged HTML
+  //      part inside the same mhtml archive. We recurse into that
+  //      sub-document with the same collector so nested <video>
+  //      tags / nested iframes / og:* meta surface as real items.
+  //      Bounded by MAX_FRAME_RECURSION_DEPTH and a visited-set so a
+  //      pathological mhtml that points an iframe back at the
+  //      primary frame can't deadlock us.
+  //   3. Generic broaden-to-yt-dlp — any other http(s) iframe whose
+  //      host is NOT in IFRAME_HOST_DENYLIST is still collected as a
+  //      video candidate. yt-dlp supports 1900+ sites; pre-R-67 we
+  //      silently dropped iframes from anything not in our hand
+  //      written allowlist, even though many of them resolve fine
+  //      via yt-dlp. Denylist filters out the analytics / ads
+  //      iframes that would otherwise pollute the result.
+  //
+  // Iframe URLs are absolute (the embed always points at the third
+  // party host), so we deliberately do NOT pipe them through
+  // resolveOfflineRef — that helper rewrites to giftk-local:// for
+  // siblings inside the saved bundle, which would break the embed
+  // for tier 1 / tier 3.
   $('iframe').each((_, el) => {
     const $el = $(el);
     const rawSrc =
@@ -277,8 +380,54 @@ function collectFromDom(
     } catch {
       return;
     }
+
+    // Tier 1 — known provider. Highest signal: yt-dlp will resolve.
     const provider = matchEmbedProvider(host, absUrl);
-    if (!provider) return;
+    if (provider) {
+      push({
+        id: shortId(absUrl),
+        url: absUrl,
+        kind: 'video',
+        source: 'iframe-embed',
+        pageUrl,
+        requiresExternalDownload: true,
+        embedHost: provider
+      });
+      return;
+    }
+
+    // Tier 2 — staged sub-frame inside the same mhtml archive. Recurse
+    // into the sub-document for nested videos / og:video / nested
+    // iframes. Bounded by depth + visited set.
+    if (frameResolver && depth < MAX_FRAME_RECURSION_DEPTH && !visited.has(absUrl)) {
+      const staged = frameResolver(absUrl);
+      if (staged) {
+        visited.add(absUrl);
+        try {
+          const subHtml = fs.readFileSync(staged.absHtmlPath, 'utf8');
+          const $$ = cheerio.load(subHtml);
+          collectFromDom(
+            $$,
+            staged.baseDir,
+            staged.origin,
+            map,
+            includeStaticImages,
+            frameResolver,
+            visited,
+            depth + 1
+          );
+          return;
+        } catch (e) {
+          log(`mhtml sub-frame parse failed for ${absUrl}: ${(e as Error).message}`);
+          // Fall through to tier 3 — at least surface the URL so the
+          // user can try yt-dlp manually.
+        }
+      }
+    }
+
+    // Tier 3 — broaden to yt-dlp. Any non-denylisted http(s) iframe.
+    if (!/^https?:$/i.test(new URL(absUrl).protocol)) return;
+    if (isDenylistedIframeHost(host, absUrl)) return;
     push({
       id: shortId(absUrl),
       url: absUrl,
@@ -286,7 +435,7 @@ function collectFromDom(
       source: 'iframe-embed',
       pageUrl,
       requiresExternalDownload: true,
-      embedHost: provider
+      embedHost: host
     });
   });
 
@@ -398,6 +547,12 @@ function importMhtmlFile(absPath: string, opts: OfflineImportOptions): SniffResu
   let primaryHtmlPath: string | null = null;
   let primaryHtmlOrigin: string | undefined;
   const locToFile = new Map<string, string>();
+  // R-67 — Track every text/html part keyed by Content-Location so the
+  // frame resolver can recurse into nested iframe documents archived
+  // inside the same mhtml. Chrome's mhtml saver writes one part per
+  // frame; without this index we'd ignore them and lose any video the
+  // sub-frame contained.
+  const htmlParts = new Map<string, string>();
 
   for (let i = 0; i < partOffsets.length - 1; i += 1) {
     if (opts.signal?.aborted) throw new Error('已取消离线导入');
@@ -430,6 +585,12 @@ function importMhtmlFile(absPath: string, opts: OfflineImportOptions): SniffResu
     const destPath = path.join(stagedDir, fileName);
     fs.writeFileSync(destPath, decoded);
     if (cloc) locToFile.set(cloc, destPath);
+    if (ctype.startsWith('text/html') && cloc) {
+      // R-67 — register every html-typed part for sub-frame recursion;
+      // primary frame is registered too so a sub-iframe that points
+      // back at it short-circuits via the visited-set in collectFromDom.
+      htmlParts.set(cloc, destPath);
+    }
     if (!primaryHtmlPath && ctype.startsWith('text/html')) {
       primaryHtmlPath = destPath;
       primaryHtmlOrigin = cloc || undefined;
@@ -490,9 +651,33 @@ function importMhtmlFile(absPath: string, opts: OfflineImportOptions): SniffResu
   opts.onProgress?.({ stage: 'parsing', percent: 85, message: '抽取媒体引用…' });
   const map = new Map<string, SniffedMedia>();
   const pageUrl = primaryHtmlOrigin || pathToGiftkLocalURL(absPath);
+  // R-67 — Build the recursive frame resolver from the htmlParts map.
+  // Returns null when the iframe URL is not archived inside the mhtml
+  // (collectFromDom then falls through to tier-3 broaden-to-yt-dlp).
+  const frameResolver: FrameResolver = (frameUrl: string) => {
+    const staged = htmlParts.get(frameUrl);
+    if (!staged) return null;
+    return {
+      absHtmlPath: staged,
+      // baseDir stays the staged tmp dir for sub-frames too — sibling
+      // resources (img/video) are addressed relative to the same flat
+      // dir because the mhtml stager wrote everything there.
+      baseDir: stagedDir,
+      // origin is the sub-frame's own Content-Location so relative
+      // hrefs inside the sub-document resolve correctly.
+      origin: frameUrl
+    };
+  };
   // baseDir is stagedDir because we rewrote relative refs to absolute
   // file:// URLs above; the resolver will short-circuit on those.
-  const title = collectFromDom($, stagedDir, pageUrl, map, opts.includeStaticImages ?? false);
+  const title = collectFromDom(
+    $,
+    stagedDir,
+    pageUrl,
+    map,
+    opts.includeStaticImages ?? false,
+    frameResolver
+  );
   const warnings: string[] = [];
   if (map.size === 0) {
     warnings.push(

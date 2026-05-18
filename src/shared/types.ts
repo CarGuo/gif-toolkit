@@ -48,7 +48,20 @@ export interface SniffResult {
   pageUrl: string;
   title?: string;
   items: SniffedMedia[];
+  /**
+   * R-67 — Reserved for *real* failures the user needs to act on
+   * (timeout, fetch error, headless crash, "no media found"). Renderer
+   * shows these in red. New informational messages should go to
+   * `infoNotices` instead so they don't masquerade as errors.
+   */
   warnings: string[];
+  /**
+   * R-67 — Soft, by-design notices that are NOT failures. Examples:
+   * "已自动过滤 N 个静态图像", "命中已知 embed,跳过 HEAD probe". Renderer
+   * shows these in muted/info style. Optional for back-compat — older
+   * call sites that emit only `warnings` continue to work unchanged.
+   */
+  infoNotices?: string[];
 }
 
 export interface ProcessOptions {

@@ -1192,12 +1192,106 @@ export async function toolboxSpeed(
 }
 
 /**
- * R-37 Reverse — play the input back-to-front. Video uses ffmpeg's
- * `reverse` (frame buffer in RAM, expensive on long clips!) plus an
- * audio mode toggle. Gif goes through gifsicle's negative frame index
- * trick: `gifsicle -U input.gif #-1-#0 -o out.gif` rewrites frames in
- * descending order.
+ * R-67 — Native sharp-based reverse for animated WebP.
+ *
+ * Why this exists. Pre-R-67 every webp toolbox helper went through
+ * `withWebpAsGif` which round-trips via a tmp gif. For most operations
+ * (resize / rotate / trim) that's fine — gifsicle handles them with
+ * the source's existing palette. *Reverse*, however, was producing
+ * heavy mosaic / banding on the user's screenshot because the gif
+ * intermediate is hard-capped at 256 colours per frame: a high-bit
+ * webp full-colour clip got dithered down on the way in, and re-
+ * encoding the dithered tmp.gif back to webp simply preserved the
+ * damage. Reverse is a pure frame-order swap — the pixels never
+ * change — so we can avoid the lossy detour entirely by reading the
+ * webp as raw frames via sharp, swapping the frame array, and writing
+ * the result back as webp.
+ *
+ * Sharp's animated-WebP representation is a "vertically tiled" sprite:
+ * a single image whose height equals `pages * pageHeight`. Frame i
+ * lives at vertical offset `i * pageHeight`. Reverse therefore boils
+ * down to:
+ *   1. Read meta.pages, meta.pageHeight, meta.delay[], meta.loop,
+ *      meta.width.
+ *   2. Pull the raw RGBA buffer of the tile.
+ *   3. Build a new buffer with the per-page slices written in
+ *      descending order.
+ *   4. Reverse meta.delay[] (frame 0's delay becomes the last frame's
+ *      delay so timing matches the new order).
+ *   5. Re-encode via sharp(...).webp({...}) with quality preserved
+ *      from a sensible default (lossless when input was lossless).
  */
+async function webpReverseNative(
+  input: string,
+  output: string,
+  signal?: AbortSignal
+): Promise<void> {
+  if (signal?.aborted) throw new Error('已取消处理');
+  const meta = await sharp(input, { animated: true, limitInputPixels: false }).metadata();
+  if (signal?.aborted) throw new Error('已取消处理');
+  const pages = meta.pages ?? 1;
+  const pageHeight = meta.pageHeight ?? meta.height ?? 0;
+  const width = meta.width ?? 0;
+  const channels = 4; // ensureAlpha below guarantees RGBA.
+  if (pages <= 1 || pageHeight <= 0 || width <= 0) {
+    // Single-frame webp — nothing to reverse, just copy through.
+    await fsp.copyFile(input, output);
+    return;
+  }
+  // Pull the full RGBA tile in one pass. ensureAlpha() makes the layout
+  // predictable across photos / lossless / palette webps.
+  const { data, info } = await sharp(input, { animated: true, limitInputPixels: false })
+    .ensureAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  if (signal?.aborted) throw new Error('已取消处理');
+  if (info.channels !== channels || info.width !== width) {
+    // Sharp surprised us — fall back to the lossy path so the user
+    // still gets *some* output.
+    throw new Error(`sharp returned unexpected raw layout (${info.width}x${info.height} ch=${info.channels})`);
+  }
+  const stride = width * channels;
+  const pageBytes = stride * pageHeight;
+  const expected = pageBytes * pages;
+  if (data.byteLength < expected) {
+    throw new Error(`sharp raw buffer truncated (${data.byteLength} < ${expected})`);
+  }
+  // Build the reversed tile: copy frame (pages-1-i) into position i.
+  const out = Buffer.alloc(expected);
+  for (let i = 0; i < pages; i += 1) {
+    const srcStart = (pages - 1 - i) * pageBytes;
+    data.copy(out, i * pageBytes, srcStart, srcStart + pageBytes);
+  }
+  // Reverse the delay array so timing matches the swapped frame order.
+  // Older webps don't always carry meta.delay; default to a uniform
+  // 100ms cadence (a sensible web baseline) when missing.
+  const delaysIn = Array.isArray(meta.delay) && meta.delay.length === pages
+    ? meta.delay.slice()
+    : Array.from({ length: pages }, () => 100);
+  const delaysOut = delaysIn.reverse();
+  if (signal?.aborted) throw new Error('已取消处理');
+  await sharp(out, {
+    raw: { width, height: pageHeight * pages, channels },
+    animated: true,
+    limitInputPixels: false,
+    pages,
+    pageHeight
+  } as Parameters<typeof sharp>[1])
+    .webp({
+      // Preserve full colour fidelity. Pre-R-67 the gif round-trip
+      // capped at 256 colours and produced banding; we now stay in
+      // RGBA all the way through. quality: 90 is sharp's sweet spot
+      // for animated webp (smaller than 100, indistinguishable from
+      // the source on photos and screen grabs).
+      quality: 90,
+      effort: 4,
+      loop: typeof meta.loop === 'number' ? meta.loop : 0,
+      delay: delaysOut
+    })
+    .toFile(output);
+}
+
+
 export async function toolboxReverse(
   input: string,
   output: string,
@@ -1206,12 +1300,25 @@ export async function toolboxReverse(
 ): Promise<void> {
   if (!REVERSE_AUDIO_MODES.has(audioMode)) audioMode = 'mute';
 
-  // R-65 — see toolboxTrim for rationale.
+  // R-67 — Animated webp gets the native sharp path. The previous
+  // `withWebpAsGif` round-trip via gifsicle quantised down to 256
+  // colours and produced visible mosaic / banding on screen-cap webps
+  // (see user screenshot, frame 2). Reverse is purely a frame-order
+  // operation, so we can stay in the source pixel format the whole way
+  // through. If anything fails (corrupt input, sharp build mismatch),
+  // fall back to the legacy gif round-trip so the user still gets some
+  // output rather than a hard error.
   if (isWebpPath(input)) {
-    await withWebpAsGif(input, output, (gifIn, gifOut) =>
-      toolboxReverse(gifIn, gifOut, audioMode, opts)
-    );
-    return;
+    try {
+      await webpReverseNative(input, output, opts.signal);
+      return;
+    } catch (e) {
+      if ((e as Error).name === 'CancelledError' || (e as Error).message === '已取消处理') throw e;
+      await withWebpAsGif(input, output, (gifIn, gifOut) =>
+        toolboxReverse(gifIn, gifOut, audioMode, opts)
+      );
+      return;
+    }
   }
 
   if (isGifPath(input)) {

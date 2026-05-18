@@ -237,15 +237,41 @@ describe('importOfflinePath — html + sibling _files/', () => {
     expect(v!.source).toBe('iframe-embed');
   });
 
-  it('R-60 — drops random non-video iframes (e.g. ads / analytics) instead of polluting results', async () => {
+  it('R-67 — drops ad / analytics iframes via the host denylist', async () => {
+    // R-60 used `example.com` here and asserted all unknown iframes
+    // were dropped. R-67 broadens iframe collection: any non-denylist
+    // http(s) iframe is now kept as a `requiresExternalDownload`
+    // candidate so yt-dlp can try (yt-dlp recognises 1900+ sites; an
+    // overly tight allowlist was making us miss perfectly valid
+    // sources). The denylist still filters the obvious ad / tracker
+    // / widget hosts so we don't pollute results with background
+    // beacons. We pick `doubleclick.net` because it lives in
+    // IFRAME_HOST_DENYLIST.
     fs.writeFileSync(
       path.join(tmp, 'page.html'),
       `<!doctype html><html><body>
-        <iframe src="https://example.com/random-ad-server"></iframe>
+        <iframe src="https://googleads.g.doubleclick.net/pagead/ads"></iframe>
       </body></html>`
     );
     const r = await importOfflinePath(path.join(tmp, 'page.html'));
     expect(r.items).toHaveLength(0);
+  });
+
+  it('R-67 — keeps unknown iframes as yt-dlp candidates (not on denylist)', async () => {
+    // Non-allowlisted, non-denylisted iframe → tier-3 broaden so the
+    // URL flows through to yt-dlp at download time. The user can then
+    // actually save the embed if yt-dlp supports the source.
+    fs.writeFileSync(
+      path.join(tmp, 'page.html'),
+      `<!doctype html><html><body>
+        <iframe src="https://niche-video-host.example/embed/abc123"></iframe>
+      </body></html>`
+    );
+    const r = await importOfflinePath(path.join(tmp, 'page.html'));
+    expect(r.items).toHaveLength(1);
+    expect(r.items[0].kind).toBe('video');
+    expect(r.items[0].requiresExternalDownload).toBe(true);
+    expect(r.items[0].embedHost).toBe('niche-video-host.example');
   });
 });
 

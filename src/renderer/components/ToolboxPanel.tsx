@@ -122,6 +122,12 @@ const KIND_LABELS: Record<ToolboxKind, string> = {
 };
 
 function statusLabel(p?: TaskProgress): string {
+  // R-67 — Status badge text is now strictly short (≤ 4 zh chars). The
+  // long detail (e.g. `reverse (audio=mute)` for the reverse tool) is
+  // surfaced via `statusDetail` below and rendered on its own line so
+  // it can't push the fixed 160px badge column past its bounds. Pre
+  // R-67 the badge held `执行中 · reverse (audio=mute)` and the right
+  // half got clipped by `overflow: hidden` on the status cell.
   if (!p) return '排队中';
   switch (p.status) {
     case 'pending': return '排队中';
@@ -130,12 +136,34 @@ function statusLabel(p?: TaskProgress): string {
     case 'segmenting':
     case 'converting':
     case 'compressing':
-      return p.message ? `执行中 · ${p.message}` : '执行中';
+      return '执行中';
     case 'done': return '完成';
-    case 'failed': return p.error ? `失败 · ${p.error}` : '失败';
+    case 'failed': return '失败';
     case 'cancelled': return '已取消';
     case 'skipped': return '已跳过';
     default: return p.status;
+  }
+}
+
+/**
+ * R-67 — Long secondary detail for the running / failed states. We
+ * render this as a tiny line under the file name so the badge column
+ * can stay narrow without ever clipping. Returns null for states that
+ * have no useful sub-text (pending / done / cancelled / skipped).
+ */
+function statusDetail(p?: TaskProgress): string | null {
+  if (!p) return null;
+  switch (p.status) {
+    case 'downloading':
+    case 'probing':
+    case 'segmenting':
+    case 'converting':
+    case 'compressing':
+      return p.message || null;
+    case 'failed':
+      return p.error || null;
+    default:
+      return null;
   }
 }
 
@@ -1023,6 +1051,16 @@ export function ToolboxPanel(): JSX.Element {
                       <div className="tb-job-meta" title={metaParts.join(', ')}>
                         {metaParts.join(' · ')}
                       </div>
+                      {/* R-67 — Long status detail (e.g. `reverse (audio=mute)`,
+                          per-failure error string) lives here under the meta
+                          line so the fixed-width status badge column never
+                          clips. We hide this row entirely when the substep
+                          carries no useful detail. */}
+                      {statusDetail(p) ? (
+                        <div className="tb-job-detail" title={statusDetail(p) ?? undefined}>
+                          {statusDetail(p)}
+                        </div>
+                      ) : null}
                     </div>
                     <div className="tb-job-status">
                       <span className={statusBadgeClass(p)}>{statusLabel(p)}</span>

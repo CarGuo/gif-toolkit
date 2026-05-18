@@ -2337,6 +2337,9 @@ const App: React.FC = () => {
             {!sniffing && result?.warnings.length ? (
               <div className="notice danger">{result.warnings.join('; ')}</div>
             ) : null}
+            {!sniffing && result?.infoNotices?.length ? (
+              <div className="notice notice-info">{result.infoNotices.join('; ')}</div>
+            ) : null}
             {!sniffing && result?.title ? <div className="notice">{result.title}</div> : null}
           </div>
 
