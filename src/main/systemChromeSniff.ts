@@ -42,7 +42,6 @@ import type { SniffResult, SniffedMedia, MediaKind, SniffProgress } from '../sha
 import { classifyByExt, matchEmbedProvider } from './sniffer';
 import {
   acceptWebviewMedia,
-  classifyByContentType,
   mergeWebviewMedia,
   webviewDedupKey,
   WEBVIEW_MAX_ITEMS as MAX_ITEMS,
@@ -420,12 +419,18 @@ export async function sniffViaSystemChrome(
       if (t && !SUPPORTED_EVENT_TYPES.has(t)) return;
       const cand = extractCdpCandidate(params);
       if (!cand) return;
-      const byMime = classifyByContentType(cand.mime);
-      const byExt = classifyByExt(cand.url);
-      // R-63 — Pass the URL so `acceptWebviewMedia` can let the
-      // extension override a transcoding-CDN mime header (a `.png`
-      // resource with `Content-Type: image/webp` is image, not gif).
-      const accepted = acceptWebviewMedia(byMime || byExt, cand.mime, cand.url);
+      // R-70 — Funnel through the unified decideAcceptedKind decider
+      // (via acceptWebviewMedia(null, ...)) so the URL extension is
+      // ALWAYS authoritative when it disagrees with the Content-Type
+      // header. Pre-R-70 this site computed `byMime || byExt` and
+      // passed the result as `kind` — short-circuit `||` meant a CDN
+      // returning `image/webp` for a `.png` URL silently became
+      // `kind = 'gif'`, which `acceptWebviewMedia` then accepted
+      // without re-checking the URL. That was the real-Chrome path
+      // through which static PNGs slipped past `applySniffFilters`
+      // and showed up in the grid (and in the batch queue) wearing a
+      // `gif` badge.
+      const accepted = acceptWebviewMedia(null, cand.mime, cand.url);
       if (!accepted) return;
       const key = webviewDedupKey(cand.url);
       if (captured.has(key)) return;

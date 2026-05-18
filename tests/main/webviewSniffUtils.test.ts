@@ -374,4 +374,26 @@ describe('acceptWebviewMedia (R-50 strict gate)', () => {
     expect(acceptWebviewMedia(null, '  IMAGE/GIF ; charset=binary')).toBe('gif');
     expect(acceptWebviewMedia(null, 'IMAGE/PNG; charset=binary')).toBeNull();
   });
+
+  // R-70 — Regression lock for the real-Chrome png-leak.
+  // The user reported that `.png` thumbnails were entering the grid
+  // wearing a `gif` badge when sniffed via the system-Chrome CDP
+  // backend. Root cause: that backend computed
+  //     const accepted = acceptWebviewMedia(byMime || byExt, mime, url);
+  // where `byMime = 'gif'` for `image/webp` short-circuited past the
+  // `.png` extension. We've since removed that pre-resolution and
+  // always pass `kind=null` so the unified `decideAcceptedKind` runs.
+  // This test makes sure that when callers honour the new contract
+  // (`kind=null` + url + mime), a `.png` URL with a transcoding-CDN
+  // `image/webp` Content-Type is dropped, NOT promoted to gif.
+  it('R-70: drops .png URL even when mime is image/webp (CDN transcode)', () => {
+    expect(acceptWebviewMedia(null, 'image/webp', 'https://cdn.example.com/foo.png')).toBeNull();
+    expect(acceptWebviewMedia(null, 'image/webp', 'https://cdn.example.com/foo.PNG?v=1')).toBeNull();
+    // and the inverse: a real `.gif` URL must still pass even if the
+    // CDN reports an unusual mime.
+    expect(acceptWebviewMedia(null, 'application/octet-stream', 'https://cdn.example.com/foo.gif')).toBe('gif');
+    // a bare CDN URL with no recognisable extension is the only place
+    // where the mime header decides — `image/webp` correctly upgrades.
+    expect(acceptWebviewMedia(null, 'image/webp', 'https://cdn.example.com/asset/abcd1234')).toBe('gif');
+  });
 });
