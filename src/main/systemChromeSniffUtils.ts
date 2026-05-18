@@ -177,14 +177,34 @@ export function buildChromeArgs(opts: {
     // we spawn Chrome with a brand-new profile dir.
     '--no-first-run',
     '--no-default-browser-check',
-    // Suppress the new-tab page ad surface and the "what's new" tab so the
-    // sniff window opens directly on the user's target URL.
-    '--disable-features=ChromeWhatsNewUI,WelcomeTour',
     // Suppress restore-pages-after-crash banner. Sniff sessions are
     // short-lived; a banner here would push the target page down and
     // confuse the user.
     '--disable-session-crashed-bubble',
     '--restore-last-session=false',
+    // R-58 — anti-bot hardening for Cloudflare Turnstile / DataDome /
+    // PerimeterX. Without these, simply attaching CDP via
+    // `--remote-debugging-port` flips three bot-detection signals:
+    //   1. `navigator.webdriver === true` — set by Blink whenever the
+    //      AutomationControlled feature is on (and that feature is on
+    //      whenever a remote debugger is attached).
+    //   2. The default --enable-automation UA banner.
+    //   3. Notification.permission auto-flipping to "denied" on a CDP
+    //      target, which CF cross-checks against navigator.permissions.
+    // Disabling AutomationControlled clears (1) — the cheapest, highest
+    // ROI Turnstile-bypass flag in 2026. The combined --disable-features
+    // also turns off the new-tab "What's New" surface and the welcome
+    // tour (replaces what the earlier ChromeWhatsNewUI/WelcomeTour line
+    // did, just folded into the anti-bot list to avoid Chrome merging
+    // duplicate --disable-features into one and dropping our entries).
+    //
+    // NB: we INTENTIONALLY do NOT pass `--enable-automation`. Older
+    // chrome-launcher templates include it; Chrome treats its presence
+    // as an explicit "I am a robot" hint and CF / DataDome key off it.
+    '--disable-blink-features=AutomationControlled',
+    '--disable-features=AutomationControlled,Translate,ChromeWhatsNewUI,WelcomeTour',
+    '--password-store=basic',
+    '--use-mock-keychain',
     opts.url
   ];
 }

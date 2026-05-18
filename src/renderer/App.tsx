@@ -444,12 +444,12 @@ const App: React.FC = () => {
     [items, activeId]
   );
 
-  // R-57 — Hoisted from later in the file. The「含静态图」toggle now
-  // governs every sniff backend (URL / webview / system-chrome /
-  // ytdlp-direct / offline-import), so we declare the state ahead of
-  // every sniff useCallback that needs to read it. Default `false`
-  // matches the previous offline-import-only behaviour.
-  const [offlineIncludeImages, setOfflineIncludeImages] = useState(false);
+  // R-57 / R-58 — The static-image filter is always-on. We previously
+  // surfaced an「含静态图」toggle in the toolbar, but R-58 removed it
+  // (the checkbox cluttered the URL bar and surfacing avatars / sprite
+  // sheets defeats the project's GIF-focus). Renderer no longer needs
+  // any state for it; the unified sniffFilters layer in the main
+  // process applies the filter unconditionally for every backend.
 
   const onSniff = useCallback(async () => {
     if (!giftk) return;
@@ -499,9 +499,8 @@ const App: React.FC = () => {
     }, SNIFF_TIMEOUT_MS);
 
     try {
-      // R-57 — Forward「含静态图」to the unified sniffFilters layer so
-      // the toggle governs every sniff backend, not just offline-import.
-      const r = await giftk.sniff(trimmed, { includeStaticImages: offlineIncludeImages });
+      // R-57 / R-58 — Static-image filter is always-on (no UI toggle).
+      const r = await giftk.sniff(trimmed);
       if (myId !== sniffReqId.current || finished) return;
       finished = true;
       clearTimeout(timeout);
@@ -558,7 +557,7 @@ const App: React.FC = () => {
         setSniffProgress(null);
       }
     }
-  }, [url, result, options, pushOrReplace, addSniffHistory, offlineIncludeImages]);
+  }, [url, result, options, pushOrReplace, addSniffHistory]);
 
   // R-44 — webview-assisted sniff. Opens a real Chromium window in the
   // main process so the user can sign in to gated sites. Resolves with a
@@ -611,9 +610,8 @@ const App: React.FC = () => {
           : `[webview] 打开 ${trimmed} — 浏览到目标页面后,点击顶部「✅ 完成嗅探」`;
     setLogs((prev) => [...prev, hint].slice(-300));
     try {
-      // R-57 — Pass the global「含静态图」toggle so the unified
-      // sniffFilters layer applies the same rule to every backend.
-      const r = await api(trimmed, { includeStaticImages: offlineIncludeImages });
+      // R-57 / R-58 — Static-image filter is always-on (no UI toggle).
+      const r = await api(trimmed);
       if (myId !== sniffReqId.current) return;
       setResult(r);
       const auto = new Set(
@@ -647,7 +645,7 @@ const App: React.FC = () => {
         setActiveSniffMode(null);
       }
     }
-  }, [url, options, pushOrReplace, addSniffHistory, offlineIncludeImages]);
+  }, [url, options, pushOrReplace, addSniffHistory]);
   const onWebviewSniff = useCallback(() => runWebviewSniff('embed'), [runWebviewSniff]);
   const onSystemChromeSniff = useCallback(() => runWebviewSniff('system-chrome'), [runWebviewSniff]);
   const onYtdlpDirectSniff = useCallback(() => runWebviewSniff('ytdlp-direct'), [runWebviewSniff]);
@@ -1018,15 +1016,14 @@ const App: React.FC = () => {
     }
   }, [options, pushOrReplace]);
 
-  // R-56 / R-57 — `offlineIncludeImages` was previously declared right
-  // here as the toggle for offline-import only. R-57 promoted it to a
-  // global "含静态图" toggle that flows through every sniff backend
-  // (see hoisted useState above near `onSniff`). Keep the comment as
-  // a sign-post for future readers.
+  // R-58 — Static-image filter is now always-on at the unified
+  // sniffFilters layer. Renderer no longer carries an
+  // `offlineIncludeImages` state nor passes it through the offline
+  // import path; it always defaults to `false`.
 
   const onOfflineImport = useCallback(() => {
-    void runOfflineImport(undefined, { includeStaticImages: offlineIncludeImages });
-  }, [runOfflineImport, offlineIncludeImages]);
+    void runOfflineImport(undefined, { includeStaticImages: false });
+  }, [runOfflineImport]);
 
   // R-55 Fix #3 — Global drag-and-drop bridge for the offline import.
   // Attached to `window` instead of a specific div so the user can
@@ -1050,7 +1047,7 @@ const App: React.FC = () => {
       // Electron exposes a non-standard `path` on File when the file
       // came from the OS (vs. a renderer-fetched blob).
       const p = (f as File & { path?: string }).path;
-      if (p) void runOfflineImport(p, { includeStaticImages: offlineIncludeImages });
+      if (p) void runOfflineImport(p, { includeStaticImages: false });
     };
     window.addEventListener('dragover', onDragOver);
     window.addEventListener('drop', onDrop);
@@ -1058,7 +1055,7 @@ const App: React.FC = () => {
       window.removeEventListener('dragover', onDragOver);
       window.removeEventListener('drop', onDrop);
     };
-  }, [runOfflineImport, offlineIncludeImages]);
+  }, [runOfflineImport]);
 
   const onCancel = useCallback(() => {
     if (!giftk) return;
@@ -2111,72 +2108,23 @@ const App: React.FC = () => {
                   </div>
                 ) : null}
               </div>
-              {/* R-55 Fix #3 / R-56 Fix — Offline import escape hatch
-                  + its 「包含静态图像」 modifier. Wrapped in a single
-                  inline-flex group so:
-                   - the checkbox never wraps onto its own line away
-                     from the button it modifies (the bug visible in
-                     the R-56 feedback screenshot was the checkbox
-                     drifting to the toolbar's right edge alone);
-                   - on narrow windows the whole pair wraps together,
-                     keeping the visual association obvious;
-                   - the modifier is visually subordinate to the
-                     button (smaller font, no ghost-button border)
-                     so users read it as "an option for 离线导入",
-                     not as a separate primary action. */}
-              <div
-                className="offline-import-group"
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'stretch',
-                  gap: 0,
-                  flexWrap: 'nowrap',
-                  flexShrink: 0
-                }}
+              {/* R-55 Fix #3 — Offline import escape hatch.
+                  R-58 — The R-56「含静态图」checkbox was removed: it
+                  cluttered the toolbar (text overflowed in narrow
+                  windows) and was almost never the right call —
+                  surfacing static images defeats the project's GIF /
+                  video focus. The static-image filter still runs
+                  unconditionally inside the unified sniffFilters
+                  pipeline; we just no longer expose a UI knob for it. */}
+              <button
+                className="ghost"
+                onClick={onOfflineImport}
+                disabled={sniffing}
+                title="从本地选择 .mhtml / .html(可带 _files 目录)/ 单图 / 单视频,直接进入处理流程"
+                style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
               >
-                <button
-                  className="ghost"
-                  onClick={onOfflineImport}
-                  disabled={sniffing}
-                  title="从本地选择 .mhtml / .html(可带 _files 目录)/ 单图 / 单视频,直接进入处理流程"
-                  style={{
-                    whiteSpace: 'nowrap',
-                    borderTopRightRadius: 0,
-                    borderBottomRightRadius: 0
-                  }}
-                >
-                  📂 离线导入
-                </button>
-                <label
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 4,
-                    padding: '0 10px',
-                    fontSize: 12,
-                    color: 'var(--muted, #9aa0aa)',
-                    background: 'var(--bg-2, #23252b)',
-                    border: '1px solid var(--border)',
-                    borderLeft: 'none',
-                    borderTopRightRadius: 6,
-                    borderBottomRightRadius: 6,
-                    whiteSpace: 'nowrap',
-                    cursor: sniffing ? 'not-allowed' : 'pointer',
-                    opacity: sniffing ? 0.6 : 1,
-                    userSelect: 'none'
-                  }}
-                  title="勾选后,所有嗅探模式(URL / Webview / 真 Chrome / yt-dlp / 离线导入)都会把页面里的 .png/.jpg/.webp/.bmp/.avif 静态图像也作为结果纳入(默认仅保留 GIF 与 <video> / og:video)"
-                >
-                  <input
-                    type="checkbox"
-                    checked={offlineIncludeImages}
-                    disabled={sniffing}
-                    onChange={(e) => setOfflineIncludeImages(e.target.checked)}
-                    style={{ margin: 0 }}
-                  />
-                  含静态图
-                </label>
-              </div>
+                📂 离线导入
+              </button>
               <SniffHistoryPicker
                 open={sniffHistoryOpen}
                 entries={sniffHistory}
@@ -2251,7 +2199,48 @@ const App: React.FC = () => {
                           flexShrink: 0
                         }}
                       />
-                      <span>{sniffProgress.message}</span>
+                      <span style={{ flex: 1, minWidth: 0 }}>{sniffProgress.message}</span>
+                      {/* R-58 Fix — Inline action buttons so the user
+                          never has to scroll to find a way out. The
+                          previous design parked 取消 / 完成 in the
+                          bottom 「3. 处理参数」 section, but on tall
+                          windows the user couldn't see them while
+                          waiting on Chrome and reported "no way to
+                          cancel". */}
+                      <button
+                        onClick={onFinalizeSystemChromeSniff}
+                        title="立即结束嗅探并返回到目前已抓到的媒体(无需关闭 Chrome 整个进程)"
+                        style={{
+                          background: '#2aaa77',
+                          color: '#fff',
+                          border: 'none',
+                          padding: '4px 10px',
+                          borderRadius: 4,
+                          fontSize: 12,
+                          fontWeight: 600,
+                          cursor: 'pointer',
+                          flexShrink: 0
+                        }}
+                      >
+                        ✓ 完成嗅探
+                      </button>
+                      <button
+                        onClick={onCancel}
+                        title="取消嗅探,丢弃已捕获的媒体"
+                        style={{
+                          background: 'transparent',
+                          color: '#f1a140',
+                          border: '1px solid rgba(241, 161, 64, 0.5)',
+                          padding: '4px 10px',
+                          borderRadius: 4,
+                          fontSize: 12,
+                          fontWeight: 600,
+                          cursor: 'pointer',
+                          flexShrink: 0
+                        }}
+                      >
+                        取消
+                      </button>
                     </div>
                   ) : (
                     <div className="notice" style={{ marginTop: 4 }}>{sniffProgress.message}</div>

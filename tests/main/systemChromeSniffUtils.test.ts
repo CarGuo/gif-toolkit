@@ -160,9 +160,14 @@ describe('buildChromeArgs', () => {
       '--user-data-dir=/tmp/giftk/system-chrome-profiles/chat.openai.com-abc',
       '--no-first-run',
       '--no-default-browser-check',
-      '--disable-features=ChromeWhatsNewUI,WelcomeTour',
       '--disable-session-crashed-bubble',
       '--restore-last-session=false',
+      // R-58 anti-bot hardening — order matters because Chrome
+      // collapses duplicate --disable-features into the LAST flag.
+      '--disable-blink-features=AutomationControlled',
+      '--disable-features=AutomationControlled,Translate,ChromeWhatsNewUI,WelcomeTour',
+      '--password-store=basic',
+      '--use-mock-keychain',
       'https://chat.openai.com/'
     ]);
   });
@@ -170,6 +175,16 @@ describe('buildChromeArgs', () => {
   it('puts the URL last so Chrome treats it as the initial tab target', () => {
     const args = buildChromeArgs({ url: 'https://medium.com/x', userDataDir: '/d', port: 9222 });
     expect(args[args.length - 1]).toBe('https://medium.com/x');
+  });
+
+  it('R-58 — never passes --enable-automation (CF / DataDome key off it)', () => {
+    const args = buildChromeArgs({ url: 'https://x.com/', userDataDir: '/d', port: 0 });
+    expect(args).not.toContain('--enable-automation');
+  });
+
+  it('R-58 — disables AutomationControlled at the blink-features level', () => {
+    const args = buildChromeArgs({ url: 'https://x.com/', userDataDir: '/d', port: 0 });
+    expect(args).toContain('--disable-blink-features=AutomationControlled');
   });
 });
 

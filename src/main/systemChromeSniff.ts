@@ -353,6 +353,44 @@ export async function sniffViaSystemChrome(
     await Page.enable();
     await Runtime.enable();
 
+    // R-58 — Belt-and-suspenders to the `--disable-blink-features=
+    // AutomationControlled` launch flag. Even with that flag, some
+    // Chrome versions still set `navigator.webdriver` once a CDP
+    // session attaches (the renderer-side getter is set lazily). We
+    // inject a getter override that fires BEFORE any user JS so the
+    // value is `undefined` (matches a stock Chrome) every time the
+    // user navigates around inside the sniff window. We also nuke
+    // `navigator.permissions.query({ name: 'notifications' })`
+    // returning `denied` on automated profiles — which is the second
+    // CF Turnstile signal — by re-routing it to the actual document
+    // permission state. Cheap, idempotent, runs once per frame.
+    try {
+      await Page.addScriptToEvaluateOnNewDocument({
+        source: `
+          (() => {
+            try {
+              Object.defineProperty(Navigator.prototype, 'webdriver', {
+                get: () => undefined,
+                configurable: true
+              });
+            } catch (_) { /* ignore */ }
+            try {
+              const orig = navigator.permissions && navigator.permissions.query;
+              if (orig) {
+                navigator.permissions.query = (p) => (
+                  p && p.name === 'notifications'
+                    ? Promise.resolve({ state: Notification.permission })
+                    : orig.call(navigator.permissions, p)
+                );
+              }
+            } catch (_) { /* ignore */ }
+          })();
+        `
+      });
+    } catch (e) {
+      log(`[system-chrome-sniff] webdriver-mask injection failed: ${(e as Error).message}`);
+    }
+
     Network.responseReceived((params: CdpResponseReceivedParams) => {
       if (captured.size >= MAX_ITEMS) return;
       // Cheap pre-filter: skip resource types CDP marks as definitely
@@ -385,23 +423,73 @@ export async function sniffViaSystemChrome(
     // fires `child.exit`, which is what we listen to for the "user
     // closed everything" path. The finalize path is treated like
     // user-closed for result purposes (userClosed stays true).
+    //
+    // R-58 Fix — On many systems the child we spawn is just a launcher:
+    // when an existing Chrome instance is already running it merges the
+    // new window into the existing process and our launcher exits
+    // immediately (often BEFORE we attach `child.once('exit')`), or
+    // forks a UI process and exits before the user closes anything.
+    // Either way the `child.exit` handler we install here would never
+    // fire on the user-closes-window action and the sniff hangs at
+    // 60%. To make this robust we ALSO poll `CDP.List({ port })` every
+    // 1.5 s — when the page target disappears (user closed the tab
+    // OR the whole Chrome window), the WebSocket also dies. Either
+    // signal resolves the promise. Defensive: even if both upstream
+    // exits happen, we never resolve twice (`done` guard).
     let userClosed = false;
     let finalizedByUser = false;
     const finished = new Promise<void>((resolve) => {
-      child.once('exit', () => { userClosed = true; resolve(); });
+      let done = false;
+      const finishOnce = (closed: boolean): void => {
+        if (done) return;
+        done = true;
+        userClosed = closed || userClosed;
+        resolve();
+      };
+      // Path #1 — process exit (works when child is the actual UI
+      // process, e.g. brand-new isolated profile, no other Chrome
+      // running).
+      child.once('exit', () => finishOnce(true));
+      // Path #1b — child may have already exited (Chrome merged into
+      // an existing instance and the launcher returned 0 before we
+      // even got here). Detect that synchronously.
+      if (child.exitCode != null || child.killed) finishOnce(true);
+      // Path #2 — abort signal (renderer "取消嗅探" button).
       if (opts.signal) {
-        if (opts.signal.aborted) resolve();
-        else opts.signal.addEventListener('abort', () => resolve(), { once: true });
+        if (opts.signal.aborted) finishOnce(false);
+        else opts.signal.addEventListener('abort', () => finishOnce(false), { once: true });
       }
+      // Path #3 — finalize signal ("✓ 完成嗅探" button).
       if (opts.finalizeSignal) {
         const onFinalize = (): void => {
           finalizedByUser = true;
-          userClosed = true;
-          resolve();
+          finishOnce(true);
         };
         if (opts.finalizeSignal.aborted) onFinalize();
         else opts.finalizeSignal.addEventListener('abort', onFinalize, { once: true });
       }
+      // Path #4 — poll the CDP target list. When the user closes the
+      // last Chrome window or the entire app, the page target goes
+      // away and CDP.List either returns no `page` rows or the WS
+      // call rejects. This is the path that fixes the "stuck at 60%"
+      // bug on machines that already had Chrome running.
+      const pollHandle = setInterval(async () => {
+        if (done) { clearInterval(pollHandle); return; }
+        try {
+          const list = await CDP.List({ port });
+          const stillAlive = list.some((t) => t.type === 'page');
+          if (!stillAlive) {
+            clearInterval(pollHandle);
+            finishOnce(true);
+          }
+        } catch {
+          // CDP HTTP endpoint went away → Chrome quit. Treat as
+          // user-closed.
+          clearInterval(pollHandle);
+          finishOnce(true);
+        }
+      }, 1500);
+      pollHandle.unref?.();
     });
     opts.onProgress?.({ stage: 'parsing', percent: 60, message: '在 Chrome 中浏览/登录,然后点「✓ 完成嗅探」或关闭整个 Chrome 即可结束' });
 
