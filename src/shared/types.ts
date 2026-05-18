@@ -669,6 +669,16 @@ export interface UploadHistoryItem {
   error?: string;
   bytesTotal?: number;
   /**
+   * R-73 — Latest streamed percent (0..100) from the active upload.
+   * Folded in by `applyProgressToRecord` so the live progress modal
+   * can render a per-row bar without a separate transient state map.
+   * Only meaningful while `status === 'uploading'`; ignored on
+   * terminal rows (the icon already conveys the result). Persisted
+   * to localStorage but the writer is debounced 250ms so streaming
+   * percent ticks don't churn disk.
+   */
+  percent?: number;
+  /**
    * R-54 — sha256 hex digest of the bytes that were (or were
    * intended to be) uploaded. Populated for `done` rows so that
    * subsequent upload requests for the same bytes can short-circuit

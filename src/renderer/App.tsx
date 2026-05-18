@@ -1564,6 +1564,17 @@ const App: React.FC = () => {
         items[i].jobId = jobId;
       });
       setLogs((prev) => [...prev, `[upload] 已派发 ${r.jobIds.length} 个上传任务`].slice(-300));
+      // R-73 — Open the upload progress modal IMMEDIATELY on dispatch,
+      // not after every job settles. The modal is the same component
+      // we used to pop on completion; UploadResultModal renders the
+      // per-row live status list driven by `record.items`, so it
+      // animates as `applyUploadProgress` folds streaming events. The
+      // terminal-modal-open path in the IPC listener still fires when
+      // the in-flight counter hits zero — it's now a no-op (the modal
+      // is already showing the same record id) but the call is kept
+      // for the edge case where the user manually closed the modal
+      // mid-upload and we want to surface the final summary.
+      setUploadResult(recId);
     } catch (e) {
       setLogs((prev) => [...prev, `[upload] 派发失败: ${(e as Error).message}`].slice(-300));
       uploadInflightRef.current.delete(recId);

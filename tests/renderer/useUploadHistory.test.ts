@@ -19,6 +19,7 @@ import {
   findUploadByHash,
   paginateHistory
 } from '../../src/renderer/components/useUploadHistory';
+import { statusBadge, summarizeRecord } from '../../src/renderer/components/UploadResultModal';
 import type { UploadConfigs, UploadHistoryRecord } from '../../src/shared/types';
 
 function makeRecord(): UploadHistoryRecord {
@@ -112,6 +113,101 @@ describe('applyProgressToRecord', () => {
     });
     expect(after.items[0].status).toBe('done');
     expect(after.items[0].fileHash).toBe('sha-old');
+  });
+
+  it('R-73: folds streaming percent into a non-terminal row', () => {
+    const before = makeRecord();
+    const after = applyProgressToRecord(before, {
+      jobId: 'j1', status: 'uploading', percent: 42
+    });
+    expect(after.items[0].status).toBe('uploading');
+    expect(after.items[0].percent).toBe(42);
+  });
+
+  it('R-73: clamps percent to 0..100', () => {
+    const r1 = applyProgressToRecord(makeRecord(), {
+      jobId: 'j1', status: 'uploading', percent: 250
+    });
+    expect(r1.items[0].percent).toBe(100);
+    const r2 = applyProgressToRecord(makeRecord(), {
+      jobId: 'j1', status: 'uploading', percent: -10
+    });
+    expect(r2.items[0].percent).toBe(0);
+  });
+
+  it('R-73: clears percent when the row transitions to a terminal status', () => {
+    const before: UploadHistoryRecord = {
+      ...makeRecord(),
+      items: [{ jobId: 'j1', fileName: 'a.gif', filePath: '/o/a.gif', status: 'uploading', percent: 47 }]
+    };
+    const after = applyProgressToRecord(before, {
+      jobId: 'j1', status: 'done', percent: 100, url: 'https://x'
+    });
+    expect(after.items[0].status).toBe('done');
+    expect(after.items[0].percent).toBeUndefined();
+  });
+
+  it('R-73: keeps prior percent when emit omits it on a non-terminal row', () => {
+    const before: UploadHistoryRecord = {
+      ...makeRecord(),
+      items: [{ jobId: 'j1', fileName: 'a.gif', filePath: '/o/a.gif', status: 'uploading', percent: 30 }]
+    };
+    const after = applyProgressToRecord(before, {
+      // Some backends emit a status-only event with no percent (e.g.
+      // queued → uploading transition before the first stream tick).
+      // Casting through `as never` to construct the malformed emit on
+      // purpose — TS contract requires `percent: number`.
+      jobId: 'j1', status: 'uploading'
+    } as never);
+    expect(after.items[0].percent).toBe(30);
+  });
+});
+
+describe('R-73 statusBadge', () => {
+  it('returns a distinct icon for each terminal state', () => {
+    expect(statusBadge('done').icon).toBe('✓');
+    expect(statusBadge('failed').icon).toBe('✗');
+    expect(statusBadge('cancelled').icon).toBe('⊘');
+  });
+
+  it('returns a spinner icon while uploading', () => {
+    expect(statusBadge('uploading').icon).toBe('⟳');
+  });
+
+  it('falls back to the pending icon for an unknown status', () => {
+    expect(statusBadge('weird-future-status' as never).icon).toBe('…');
+  });
+});
+
+describe('R-73 summarizeRecord', () => {
+  it('counts per-status and reports finished only when nothing is in flight', () => {
+    const s1 = summarizeRecord([
+      { jobId: 'j1', fileName: 'a', filePath: '/a', status: 'done', url: 'https://a' },
+      { jobId: 'j2', fileName: 'b', filePath: '/b', status: 'uploading' },
+      { jobId: 'j3', fileName: 'c', filePath: '/c', status: 'failed', error: 'x' }
+    ]);
+    expect(s1.done).toBe(1);
+    expect(s1.failed).toBe(1);
+    expect(s1.inFlight).toBe(1);
+    expect(s1.total).toBe(3);
+    expect(s1.finished).toBe(false);
+  });
+
+  it('reports finished=true when all rows reached a terminal status', () => {
+    const s = summarizeRecord([
+      { jobId: 'j1', fileName: 'a', filePath: '/a', status: 'done', url: 'https://a' },
+      { jobId: 'j2', fileName: 'b', filePath: '/b', status: 'cancelled' }
+    ]);
+    expect(s.finished).toBe(true);
+    expect(s.inFlight).toBe(0);
+  });
+
+  it('treats pending as in-flight, not finished', () => {
+    const s = summarizeRecord([
+      { jobId: 'j1', fileName: 'a', filePath: '/a', status: 'pending' }
+    ]);
+    expect(s.finished).toBe(false);
+    expect(s.inFlight).toBe(1);
   });
 });
 

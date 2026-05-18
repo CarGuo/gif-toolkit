@@ -92,6 +92,12 @@ export interface UseUploadHistoryApi {
  * R-45 — Pure helper. Folds an UploadProgress emit into a record's
  * items list; preserves insertion order. Returns the SAME record object
  * when nothing meaningful changed (so React can skip the re-render).
+ *
+ * R-73 — Now also folds `p.percent` into the row so the live in-flight
+ * progress modal can render per-row bars. Percent is only stored while
+ * the row is in a non-terminal state; once it transitions to
+ * done/failed/cancelled we clear the field (the status icon already
+ * conveys the outcome and a stale "47%" next to a ✓ is just noise).
  */
 export function applyProgressToRecord(
   rec: UploadHistoryRecord,
@@ -101,8 +107,23 @@ export function applyProgressToRecord(
   if (idx < 0) return rec;
   const prev = rec.items[idx];
   const TERMINAL: UploadStatus[] = ['done', 'failed', 'cancelled'];
-  const nextStatus: UploadStatus =
-    prev.status && TERMINAL.includes(prev.status) ? prev.status : p.status;
+  const wasTerminal = prev.status && TERMINAL.includes(prev.status);
+  const nextStatus: UploadStatus = wasTerminal ? prev.status : p.status;
+  const nextIsTerminal = TERMINAL.includes(nextStatus);
+  // R-73 — percent strategy:
+  //   - terminal rows: clear (undefined) so a stale 47% isn't shown next
+  //     to a ✓ icon;
+  //   - non-terminal rows: keep the latest emit's percent, clamped 0..100;
+  //     fall back to prev when the emit omits it (some backends only emit
+  //     status without percent, e.g. queued).
+  let nextPercent: number | undefined;
+  if (nextIsTerminal) {
+    nextPercent = undefined;
+  } else if (typeof p.percent === 'number' && Number.isFinite(p.percent)) {
+    nextPercent = Math.max(0, Math.min(100, p.percent));
+  } else {
+    nextPercent = prev.percent;
+  }
   // Only meaningful diff triggers a re-write.
   const sameStatus = prev.status === nextStatus;
   const sameUrl = (prev.url || '') === (p.url || '');
@@ -115,7 +136,8 @@ export function applyProgressToRecord(
   const nextReused = prev.reused ?? p.reused;
   const sameHash = (prev.fileHash || '') === (nextHash || '');
   const sameReused = (prev.reused ?? false) === (nextReused ?? false);
-  if (sameStatus && sameUrl && sameError && sameMd && sameHash && sameReused) {
+  const samePercent = (prev.percent ?? -1) === (nextPercent ?? -1);
+  if (sameStatus && sameUrl && sameError && sameMd && sameHash && sameReused && samePercent) {
     return rec;
   }
   const next: UploadHistoryItem = {
@@ -125,7 +147,8 @@ export function applyProgressToRecord(
     markdown: p.markdown || prev.markdown,
     error: p.error || prev.error,
     fileHash: nextHash,
-    reused: nextReused
+    reused: nextReused,
+    percent: nextPercent
   };
   const items = rec.items.slice();
   items[idx] = next;
