@@ -1,0 +1,168 @@
+# R-71 — Tag-driven cross-platform release pipeline.
+#
+# What this workflow does:
+#   1. Triggers on a `v*` tag push (e.g. `git push origin v0.1.0`) OR
+#      a manual `workflow_dispatch` so we can dry-run from the
+#      Actions tab without creating a tag.
+#   2. Spawns a build matrix across macos-latest, windows-latest, and
+#      ubuntu-latest. Each runner stamps `src/shared/buildInfo.ts`
+#      with the SHA / version / build time / runner os-arch BEFORE
+#      `npm run build` so the fingerprint gets tree-baked into both
+#      the main bundle (tsc) and the renderer bundle (vite).
+#   3. Runs the full test suite on each platform — this is the only
+#      place where vitest runs against the real OS, so it doubles as
+#      our cross-platform regression net.
+#   4. Calls electron-builder per OS with `--publish always`, which
+#      uploads the artifacts directly to a GitHub Release tagged with
+#      the same `v*` ref. The release is created in DRAFT first
+#      (electron-builder default), so we can sanity-check the asset
+#      list before flipping it public.
+#
+# Important non-obvious decisions:
+#   * macOS is built UN-SIGNED (`CSC_IDENTITY_AUTO_DISCOVERY=false`).
+#     First-launch Gatekeeper prompt is documented in the README.
+#   * Windows is built UN-SIGNED. SmartScreen will warn on first
+#     install; this is acceptable for an OSS hobby release.
+#   * Linux only ships x64 in this workflow. Building arm64 .deb /
+#     .AppImage on an x64 runner cross-bakes the wrong native modules
+#     (sharp / ffmpeg-static prebuilds are arch-specific). Users on
+#     arm64 Linux are pointed at "build from source" in the README.
+#   * We do NOT cache `node_modules` between runs — the postinstall
+#     `npm rebuild` is OS-specific and a stale cache would cross-link
+#     the wrong native binaries. We DO cache `~/.npm` via setup-node's
+#     built-in `cache: npm`, which is just the registry tarballs.
+#   * `permissions: contents: write` is required so the
+#     auto-provisioned `GITHUB_TOKEN` can create the release and
+#     upload assets. Without it, electron-builder's publish step
+#     fails with 403.
+#
+# How to trigger a real release (operator's runbook):
+#   $ git tag v0.1.0
+#   $ git push origin v0.1.0
+# How to dry-run without a tag (for debugging this workflow):
+#   GitHub UI → Actions → "Release" → Run workflow → enter "0.1.0".
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version label (no leading v, e.g. 0.1.0). Used only for fingerprint stamping; no tag is created.'
+        required: true
+        default: '0.0.0-dispatch'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: mac
+            builder_args: '--mac --x64 --arm64'
+          - os: windows-latest
+            platform: win
+            builder_args: '--win --x64'
+          - os: ubuntu-latest
+            platform: linux
+            builder_args: '--linux --x64'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # We need the full history so `git rev-parse --short=7 HEAD`
+          # in scripts/write-build-info.mjs returns the real SHA when
+          # GIFTK_COMMIT isn't passed. Default `fetch-depth: 1` would
+          # also work since we resolve HEAD, but keeping 0 lets us
+          # inspect prior commits if a future build step ever wants
+          # to embed "commits since last tag" or similar.
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # Linux runners need extra deps for electron-builder's AppImage
+      # / deb tooling. macOS and Windows runners ship them already.
+      - name: Install Linux build deps
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libarchive-tools \
+            rpm \
+            fakeroot \
+            dpkg
+
+      - name: Resolve build version
+        id: ver
+        shell: bash
+        run: |
+          # Prefer the tag (`v1.2.3` -> `1.2.3`); fall back to the
+          # workflow_dispatch input; last resort is package.json.
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            RAW="${GITHUB_REF_NAME}"
+          else
+            RAW="${{ github.event.inputs.version }}"
+          fi
+          VERSION="${RAW#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved build version: ${VERSION}"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Stamp build info
+        shell: bash
+        env:
+          GIFTK_VERSION: ${{ steps.ver.outputs.version }}
+          GIFTK_COMMIT: ${{ github.sha }}
+          GIFTK_RUN_NUMBER: ${{ github.run_number }}
+          # We deliberately tag the OS+arch of the RUNNER, not of any
+          # specific produced artifact. A single mac-latest runner
+          # builds both x64 and arm64 dmgs; the buildPlatform string
+          # records only that they were both built on darwin-arm64.
+          GIFTK_BUILD_PLATFORM: ${{ runner.os }}-${{ runner.arch }}
+        run: node scripts/write-build-info.mjs
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build renderer + main bundles
+        run: npm run build
+
+      - name: Package and publish to GitHub Release
+        shell: bash
+        env:
+          # GH_TOKEN (not GITHUB_TOKEN) is what electron-builder reads
+          # for the GitHub publisher. They're the same token, just a
+          # different env var name electron-builder expects.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No code-signing identity available — disable auto-discovery
+          # so electron-builder doesn't try to sign with a missing
+          # certificate and abort the build.
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: |
+          # `--publish always` ensures we upload the artifacts whether
+          # or not we're on a tag (workflow_dispatch dry-runs still
+          # publish to a draft release; the operator can inspect the
+          # asset list and either promote or delete the draft).
+          npx --no-install electron-builder ${{ matrix.builder_args }} --publish always

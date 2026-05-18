@@ -20,6 +20,7 @@ import type {
   UploadTestResult,
   CapabilityReport
 } from '../shared/types';
+import type { BuildInfo } from '../shared/buildInfo';
 
 export interface YtdlpStatus {
   installed: boolean;
@@ -194,6 +195,16 @@ const api = {
    */
   async getCapabilities(): Promise<CapabilityReport> {
     return ipcRenderer.invoke('system:capabilities');
+  },
+  /**
+   * R-71 — Read the build fingerprint that was tree-baked into the
+   * bundle by the release pipeline. Renderer uses this for the About
+   * panel and to seed bug-report templates so the issue tracker
+   * always knows which exact build produced a screenshot. Cheap
+   * synchronous IPC; safe to call eagerly on mount.
+   */
+  async getBuildInfo(): Promise<BuildInfo> {
+    return ipcRenderer.invoke('app:buildInfo');
   },
   onProgress(cb: (p: TaskProgress) => void): () => void {
     const handler = (_: unknown, payload: TaskProgress) => {

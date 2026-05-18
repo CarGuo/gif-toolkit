@@ -12,6 +12,8 @@
     "build": "npm run build:renderer && npm run build:main",
     "build:renderer": "vite build",
     "build:main": "tsc -p tsconfig.main.json",
+    "build:info": "node scripts/write-build-info.mjs",
+    "prebuild": "node scripts/write-build-info.mjs",
     "start": "cross-env NODE_ENV=production electron .",
     "package:mac": "npm run build && electron-builder --mac",
     "package:win": "npm run build && electron-builder --win",
@@ -71,10 +73,19 @@
   "build": {
     "appId": "com.giftoolkit.app",
     "productName": "Gif Toolkit",
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "directories": {
       "output": "release",
       "buildResources": "build"
     },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "CarGuo",
+        "repo": "gif-toolkit",
+        "releaseType": "release"
+      }
+    ],
     "files": [
       "dist/**/*",
       "node_modules/**/*",
@@ -91,6 +102,7 @@
     ],
     "mac": {
       "icon": "build/icon.png",
+      "identity": null,
       "target": [
         {
           "target": "dmg",
@@ -127,22 +139,19 @@
         {
           "target": "AppImage",
           "arch": [
-            "x64",
-            "arm64"
+            "x64"
           ]
         },
         {
           "target": "deb",
           "arch": [
-            "x64",
-            "arm64"
+            "x64"
           ]
         },
         {
           "target": "tar.gz",
           "arch": [
-            "x64",
-            "arm64"
+            "x64"
           ]
         }
       ]

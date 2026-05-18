@@ -25,6 +25,7 @@ import type {
 } from '../shared/types';
 import { isPrivateHost, safeName } from './helpers';
 import { applySniffFilters, type SniffFilterOptions } from './sniffFilters';
+import { BUILD_INFO, formatBuildInfo } from '../shared/buildInfo';
 import { RESOLVED_HEADER_ALLOWLIST, SNIFFED_MEDIA_SOURCES } from '../shared/headers';
 import {
   resolveEmbed,
@@ -1101,6 +1102,18 @@ ipcMain.handle('system:capabilities', async () => {
 });
 
 /**
+ * R-71 — Expose the build provenance (version / commit / build time /
+ * runner platform / node + Electron versions) to the renderer. This is
+ * what the future "About" modal — and any in-app bug-report copy —
+ * reads. The constant is tree-baked into the bundle by
+ * `scripts/write-build-info.mjs`, so this handler is a tiny
+ * pass-through with no I/O.
+ */
+ipcMain.handle('app:buildInfo', async () => {
+  return BUILD_INFO;
+});
+
+/**
  * R-27 — Re-allow a previously-created output directory after a
  * renderer reload. Each batch sub-dir is added to `allowedOutputDirs`
  * the first time it's created (process:start), but that set lives in
@@ -1460,6 +1473,12 @@ if (!gotLock) {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
     log('app ready');
+    // R-71 — Stamp every saved log with the build fingerprint right
+    // after `app ready` so anyone reading a user-submitted log file
+    // can instantly tell which release produced it (version / commit /
+    // build time / runner platform). This is one synchronous string
+    // read of a tree-baked constant — no I/O, no side effects.
+    log(`build: ${formatBuildInfo()}`);
     // R-66 — Run the binary diagnostic probe in a non-blocking way so
     // the main process event loop isn't frozen while ETIMEDOUT-prone
     // binaries (e.g. macOS arm64 ffprobe-static first-launch) burn
