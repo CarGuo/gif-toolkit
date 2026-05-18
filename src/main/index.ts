@@ -23,6 +23,7 @@ import type {
   ToolboxParams
 } from '../shared/types';
 import { isPrivateHost, safeName } from './helpers';
+import { applySniffFilters, type SniffFilterOptions } from './sniffFilters';
 import { RESOLVED_HEADER_ALLOWLIST, SNIFFED_MEDIA_SOURCES } from '../shared/headers';
 import {
   resolveEmbed,
@@ -602,8 +603,24 @@ let currentSniffCtrl: AbortController | null = null;
 // success" while abort means "cancel + show empty".
 let currentSystemChromeFinalizeCtrl: AbortController | null = null;
 
-ipcMain.handle('sniff:url', async (_e, url: unknown) => {
+/**
+ * R-57 — Parse the optional `SniffFilterOptions` bag handed in as the
+ * trailing IPC argument of every sniff handler. We keep this defensive
+ * (rather than typed) because the renderer can ship pre-R-57 builds
+ * that simply don't pass it. Unknown / malformed payloads fall back
+ * to the all-defaults shape, which is a no-op at the filter layer.
+ */
+function readSniffFilterOpts(raw: unknown): SniffFilterOptions {
+  if (!raw || typeof raw !== 'object') return {};
+  const obj = raw as Record<string, unknown>;
+  const out: SniffFilterOptions = {};
+  if (obj.includeStaticImages === true) out.includeStaticImages = true;
+  return out;
+}
+
+ipcMain.handle('sniff:url', async (_e, url: unknown, maybeFilterOpts: unknown) => {
   const safe = assertHttpUrl(url);
+  const filterOpts = readSniffFilterOpts(maybeFilterOpts);
   // Cancel any sniff that is still mid-flight before starting a new one.
   if (currentSniffCtrl) {
     try { currentSniffCtrl.abort(); } catch { /* ignore */ }
@@ -611,7 +628,7 @@ ipcMain.handle('sniff:url', async (_e, url: unknown) => {
   const ctrl = new AbortController();
   currentSniffCtrl = ctrl;
   try {
-    return await sniffPage(
+    const r = await sniffPage(
       safe,
       (p) => {
         if (mainWindow && !mainWindow.isDestroyed()) {
@@ -620,6 +637,10 @@ ipcMain.handle('sniff:url', async (_e, url: unknown) => {
       },
       ctrl.signal
     );
+    // R-57 — Run every sniff result through the unified filter pipeline
+    // before handing it to the renderer. New rules go into
+    // `applySniffFilters` and automatically apply to all 5 sniff modes.
+    return applySniffFilters(r, filterOpts);
   } finally {
     if (currentSniffCtrl === ctrl) currentSniffCtrl = null;
   }
@@ -653,11 +674,12 @@ ipcMain.handle('sniff:cancel', async () => {
 // switching from embedded webview to yt-dlp would orphan the embedded
 // window because the embedded path didn't even own a controller.
 let webviewSniffInFlight = false;
-ipcMain.handle('sniff:webview', async (_e, url: unknown) => {
+ipcMain.handle('sniff:webview', async (_e, url: unknown, maybeFilterOpts: unknown) => {
   if (webviewSniffInFlight) {
     throw new Error('已经有一个 Webview 嗅探窗口在进行中,请先关闭它');
   }
   const safe = assertHttpUrl(url);
+  const filterOpts = readSniffFilterOpts(maybeFilterOpts);
   if (currentSniffCtrl) {
     try { currentSniffCtrl.abort(); } catch { /* ignore */ }
   }
@@ -665,7 +687,11 @@ ipcMain.handle('sniff:webview', async (_e, url: unknown) => {
   currentSniffCtrl = ctrl;
   webviewSniffInFlight = true;
   try {
-    return await openWebviewSniff(safe, mainWindow, { signal: ctrl.signal });
+    const r = await openWebviewSniff(safe, mainWindow, { signal: ctrl.signal });
+    // R-57 — Unified post-filter (no-op for webview today since the
+    // webRequest listener already drops static images, but keeps the
+    // pipeline single-chokepoint for future rules).
+    return r ? applySniffFilters(r, filterOpts) : r;
   } finally {
     webviewSniffInFlight = false;
     if (currentSniffCtrl === ctrl) currentSniffCtrl = null;
@@ -681,11 +707,12 @@ let systemChromeSniffInFlight = false;
 ipcMain.handle('sniff:system-chrome:detect', async () => {
   return findInstalledBrowsers();
 });
-ipcMain.handle('sniff:system-chrome', async (_e, url: unknown) => {
+ipcMain.handle('sniff:system-chrome', async (_e, url: unknown, maybeFilterOpts: unknown) => {
   if (systemChromeSniffInFlight) {
     throw new Error('已经有一个真 Chrome 嗅探窗口在进行中,请先关闭它');
   }
   const safe = assertHttpUrl(url);
+  const filterOpts = readSniffFilterOpts(maybeFilterOpts);
   // Sniff progress + cancellation share the same channel & controller as
   // headless sniff so the renderer's existing 嗅探中… spinner / cancel
   // button keeps working unchanged.
@@ -699,7 +726,7 @@ ipcMain.handle('sniff:system-chrome', async (_e, url: unknown) => {
   currentSystemChromeFinalizeCtrl = finalizeCtrl;
   systemChromeSniffInFlight = true;
   try {
-    return await sniffViaSystemChrome(safe, {
+    const r = await sniffViaSystemChrome(safe, {
       signal: ctrl.signal,
       finalizeSignal: finalizeCtrl.signal,
       onProgress: (p) => {
@@ -708,6 +735,8 @@ ipcMain.handle('sniff:system-chrome', async (_e, url: unknown) => {
         }
       }
     });
+    // R-57 — Unified post-filter at the IPC chokepoint.
+    return applySniffFilters(r, filterOpts);
   } finally {
     systemChromeSniffInFlight = false;
     if (currentSniffCtrl === ctrl) currentSniffCtrl = null;
@@ -766,11 +795,10 @@ ipcMain.handle('sniff:offlineImport', async (_e, maybePath: unknown, maybeOpts: 
     absPath = path.resolve(r.filePaths[0]);
   }
   if (!absPath) return null;
-  let includeStaticImages = false;
-  if (maybeOpts && typeof maybeOpts === 'object') {
-    const obj = maybeOpts as Record<string, unknown>;
-    if (obj.includeStaticImages === true) includeStaticImages = true;
-  }
+  const filterOpts = readSniffFilterOpts(maybeOpts);
+  // R-57 — Always pass `includeStaticImages: true` to the offline parser
+  // so it harvests every <img>; the global filter then decides what to
+  // drop based on `filterOpts`. Single chokepoint, single rule set.
   // Single-flight: cancel any in-flight sniff (online or offline)
   // before kicking off this offline import.
   if (currentSniffCtrl) {
@@ -779,15 +807,16 @@ ipcMain.handle('sniff:offlineImport', async (_e, maybePath: unknown, maybeOpts: 
   const ctrl = new AbortController();
   currentSniffCtrl = ctrl;
   try {
-    return await importOfflinePath(absPath, {
+    const r = await importOfflinePath(absPath, {
       signal: ctrl.signal,
-      includeStaticImages,
+      includeStaticImages: true,
       onProgress: (p) => {
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('sniff:progress', p);
         }
       }
     });
+    return r ? applySniffFilters(r, filterOpts) : r;
   } finally {
     if (currentSniffCtrl === ctrl) currentSniffCtrl = null;
   }
@@ -799,11 +828,12 @@ ipcMain.handle('sniff:offlineImport', async (_e, maybePath: unknown, maybeOpts: 
 // direct media as a single SniffedMedia. Best for sites where ① is too
 // fragile (Cloudflare) AND ② is too heavy (user just wants the file).
 let ytdlpDirectSniffInFlight = false;
-ipcMain.handle('sniff:ytdlp-direct', async (_e, url: unknown) => {
+ipcMain.handle('sniff:ytdlp-direct', async (_e, url: unknown, maybeFilterOpts: unknown) => {
   if (ytdlpDirectSniffInFlight) {
     throw new Error('已经有一个 yt-dlp 直链解析在进行中,请先取消');
   }
   const safe = assertHttpUrl(url);
+  const filterOpts = readSniffFilterOpts(maybeFilterOpts);
   if (currentSniffCtrl) {
     try { currentSniffCtrl.abort(); } catch { /* ignore */ }
   }
@@ -811,7 +841,7 @@ ipcMain.handle('sniff:ytdlp-direct', async (_e, url: unknown) => {
   currentSniffCtrl = ctrl;
   ytdlpDirectSniffInFlight = true;
   try {
-    return await sniffViaYtdlp(safe, {
+    const r = await sniffViaYtdlp(safe, {
       signal: ctrl.signal,
       onProgress: (p) => {
         if (mainWindow && !mainWindow.isDestroyed()) {
@@ -819,6 +849,8 @@ ipcMain.handle('sniff:ytdlp-direct', async (_e, url: unknown) => {
         }
       }
     });
+    // R-57 — Unified post-filter at the IPC chokepoint.
+    return applySniffFilters(r, filterOpts);
   } finally {
     ytdlpDirectSniffInFlight = false;
     if (currentSniffCtrl === ctrl) currentSniffCtrl = null;

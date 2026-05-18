@@ -39,9 +39,9 @@ function ensureObject<T>(v: unknown, name: string): T {
 }
 
 const api = {
-  async sniff(url: string): Promise<SniffResult> {
+  async sniff(url: string, opts?: { includeStaticImages?: boolean }): Promise<SniffResult> {
     ensureString(url, 'url');
-    return ipcRenderer.invoke('sniff:url', url);
+    return ipcRenderer.invoke('sniff:url', url, opts ?? {});
   },
   // R-44 — webview-assisted sniff. Opens a real Chromium window in the
   // main process so the user can sign in to gated sites (Medium private
@@ -49,18 +49,18 @@ const api = {
   // user clicks "✅ 完成嗅探" in the injected toolbar, this resolves with
   // the same `SniffResult` shape as `sniff()`, so the renderer can feed
   // both pipelines into the same dedupe/history flow.
-  async sniffWithWebview(url: string): Promise<SniffResult> {
+  async sniffWithWebview(url: string, opts?: { includeStaticImages?: boolean }): Promise<SniffResult> {
     ensureString(url, 'url');
-    return ipcRenderer.invoke('sniff:webview', url);
+    return ipcRenderer.invoke('sniff:webview', url, opts ?? {});
   },
   // R-51 — system-Chrome sniff. Spawns the user's actual installed
   // Chrome / Edge / Brave (NOT Electron's bundled Chromium) so TLS &
   // HTTP/2 fingerprints come from a real browser; the user manually
   // clears any Turnstile / login in that window, and we scrape via
   // CDP. Same `SniffResult` shape as the other two sniff entries.
-  async sniffWithSystemChrome(url: string): Promise<SniffResult> {
+  async sniffWithSystemChrome(url: string, opts?: { includeStaticImages?: boolean }): Promise<SniffResult> {
     ensureString(url, 'url');
-    return ipcRenderer.invoke('sniff:system-chrome', url);
+    return ipcRenderer.invoke('sniff:system-chrome', url, opts ?? {});
   },
   /**
    * Preflight: list installed system browsers (Chrome / Edge / Brave /
@@ -114,9 +114,9 @@ const api = {
   // SniffResult shape as the other entries, with a single SniffedMedia
   // whose `resolved` field is already populated so the renderer can
   // dispatch it into the processor without an extra resolve step.
-  async sniffWithYtdlpDirect(url: string): Promise<SniffResult> {
+  async sniffWithYtdlpDirect(url: string, opts?: { includeStaticImages?: boolean }): Promise<SniffResult> {
     ensureString(url, 'url');
-    return ipcRenderer.invoke('sniff:ytdlp-direct', url);
+    return ipcRenderer.invoke('sniff:ytdlp-direct', url, opts ?? {});
   },
   async preview(media: SniffedMedia, options: ProcessOptions): Promise<PreviewResult> {
     ensureObject(media, 'media');

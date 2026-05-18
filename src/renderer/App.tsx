@@ -444,6 +444,13 @@ const App: React.FC = () => {
     [items, activeId]
   );
 
+  // R-57 — Hoisted from later in the file. The「含静态图」toggle now
+  // governs every sniff backend (URL / webview / system-chrome /
+  // ytdlp-direct / offline-import), so we declare the state ahead of
+  // every sniff useCallback that needs to read it. Default `false`
+  // matches the previous offline-import-only behaviour.
+  const [offlineIncludeImages, setOfflineIncludeImages] = useState(false);
+
   const onSniff = useCallback(async () => {
     if (!giftk) return;
     const trimmed = url.trim();
@@ -492,7 +499,9 @@ const App: React.FC = () => {
     }, SNIFF_TIMEOUT_MS);
 
     try {
-      const r = await giftk.sniff(trimmed);
+      // R-57 — Forward「含静态图」to the unified sniffFilters layer so
+      // the toggle governs every sniff backend, not just offline-import.
+      const r = await giftk.sniff(trimmed, { includeStaticImages: offlineIncludeImages });
       if (myId !== sniffReqId.current || finished) return;
       finished = true;
       clearTimeout(timeout);
@@ -549,7 +558,7 @@ const App: React.FC = () => {
         setSniffProgress(null);
       }
     }
-  }, [url, result, options, pushOrReplace, addSniffHistory]);
+  }, [url, result, options, pushOrReplace, addSniffHistory, offlineIncludeImages]);
 
   // R-44 — webview-assisted sniff. Opens a real Chromium window in the
   // main process so the user can sign in to gated sites. Resolves with a
@@ -602,7 +611,9 @@ const App: React.FC = () => {
           : `[webview] 打开 ${trimmed} — 浏览到目标页面后,点击顶部「✅ 完成嗅探」`;
     setLogs((prev) => [...prev, hint].slice(-300));
     try {
-      const r = await api(trimmed);
+      // R-57 — Pass the global「含静态图」toggle so the unified
+      // sniffFilters layer applies the same rule to every backend.
+      const r = await api(trimmed, { includeStaticImages: offlineIncludeImages });
       if (myId !== sniffReqId.current) return;
       setResult(r);
       const auto = new Set(
@@ -636,7 +647,7 @@ const App: React.FC = () => {
         setActiveSniffMode(null);
       }
     }
-  }, [url, options, pushOrReplace, addSniffHistory]);
+  }, [url, options, pushOrReplace, addSniffHistory, offlineIncludeImages]);
   const onWebviewSniff = useCallback(() => runWebviewSniff('embed'), [runWebviewSniff]);
   const onSystemChromeSniff = useCallback(() => runWebviewSniff('system-chrome'), [runWebviewSniff]);
   const onYtdlpDirectSniff = useCallback(() => runWebviewSniff('ytdlp-direct'), [runWebviewSniff]);
@@ -1007,11 +1018,11 @@ const App: React.FC = () => {
     }
   }, [options, pushOrReplace]);
 
-  // R-56 — toolbar checkbox lets the user opt static images back in
-  // before clicking 离线导入. We keep it next to the button (small
-  // ghost-styled checkbox) instead of burying it in settings because
-  // the choice is per-import, not per-app.
-  const [offlineIncludeImages, setOfflineIncludeImages] = useState(false);
+  // R-56 / R-57 — `offlineIncludeImages` was previously declared right
+  // here as the toggle for offline-import only. R-57 promoted it to a
+  // global "含静态图" toggle that flows through every sniff backend
+  // (see hoisted useState above near `onSniff`). Keep the comment as
+  // a sign-post for future readers.
 
   const onOfflineImport = useCallback(() => {
     void runOfflineImport(undefined, { includeStaticImages: offlineIncludeImages });
@@ -2100,45 +2111,72 @@ const App: React.FC = () => {
                   </div>
                 ) : null}
               </div>
-              {/* R-55 Fix #3 — Offline import escape hatch. Sits next
-                  to the network sniff buttons because the user reaches
-                  for it for the same reason: "I want media off this
-                  page", just from a local file instead of a URL. */}
-              <button
-                className="ghost"
-                onClick={onOfflineImport}
-                disabled={sniffing}
-                title="从本地选择 .mhtml / .html(可带 _files 目录)/ 单图 / 单视频,直接进入处理流程"
-                style={{ whiteSpace: 'nowrap' }}
-              >
-                📂 离线导入
-              </button>
-              {/* R-56 — opt-in 「包含静态图像」switch. Off by default
-                  so saved-page imports don't bleed every avatar / sprite
-                  / cover.png into the result grid. GIFs and <video>/
-                  og:video are always kept regardless. */}
-              <label
-                className="ghost"
+              {/* R-55 Fix #3 / R-56 Fix — Offline import escape hatch
+                  + its 「包含静态图像」 modifier. Wrapped in a single
+                  inline-flex group so:
+                   - the checkbox never wraps onto its own line away
+                     from the button it modifies (the bug visible in
+                     the R-56 feedback screenshot was the checkbox
+                     drifting to the toolbar's right edge alone);
+                   - on narrow windows the whole pair wraps together,
+                     keeping the visual association obvious;
+                   - the modifier is visually subordinate to the
+                     button (smaller font, no ghost-button border)
+                     so users read it as "an option for 离线导入",
+                     not as a separate primary action. */}
+              <div
+                className="offline-import-group"
                 style={{
                   display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 4,
-                  padding: '4px 8px',
-                  whiteSpace: 'nowrap',
-                  cursor: sniffing ? 'not-allowed' : 'pointer',
-                  opacity: sniffing ? 0.6 : 1
+                  alignItems: 'stretch',
+                  gap: 0,
+                  flexWrap: 'nowrap',
+                  flexShrink: 0
                 }}
-                title="勾选后,离线导入会把页面里的 .png/.jpg/.webp/.bmp/.avif 静态图像也作为结果纳入(默认仅保留 GIF 与 <video> / og:video)"
               >
-                <input
-                  type="checkbox"
-                  checked={offlineIncludeImages}
+                <button
+                  className="ghost"
+                  onClick={onOfflineImport}
                   disabled={sniffing}
-                  onChange={(e) => setOfflineIncludeImages(e.target.checked)}
-                  style={{ margin: 0 }}
-                />
-                包含静态图像
-              </label>
+                  title="从本地选择 .mhtml / .html(可带 _files 目录)/ 单图 / 单视频,直接进入处理流程"
+                  style={{
+                    whiteSpace: 'nowrap',
+                    borderTopRightRadius: 0,
+                    borderBottomRightRadius: 0
+                  }}
+                >
+                  📂 离线导入
+                </button>
+                <label
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 4,
+                    padding: '0 10px',
+                    fontSize: 12,
+                    color: 'var(--muted, #9aa0aa)',
+                    background: 'var(--bg-2, #23252b)',
+                    border: '1px solid var(--border)',
+                    borderLeft: 'none',
+                    borderTopRightRadius: 6,
+                    borderBottomRightRadius: 6,
+                    whiteSpace: 'nowrap',
+                    cursor: sniffing ? 'not-allowed' : 'pointer',
+                    opacity: sniffing ? 0.6 : 1,
+                    userSelect: 'none'
+                  }}
+                  title="勾选后,所有嗅探模式(URL / Webview / 真 Chrome / yt-dlp / 离线导入)都会把页面里的 .png/.jpg/.webp/.bmp/.avif 静态图像也作为结果纳入(默认仅保留 GIF 与 <video> / og:video)"
+                >
+                  <input
+                    type="checkbox"
+                    checked={offlineIncludeImages}
+                    disabled={sniffing}
+                    onChange={(e) => setOfflineIncludeImages(e.target.checked)}
+                    style={{ margin: 0 }}
+                  />
+                  含静态图
+                </label>
+              </div>
               <SniffHistoryPicker
                 open={sniffHistoryOpen}
                 entries={sniffHistory}
