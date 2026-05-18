@@ -1076,7 +1076,29 @@ const App: React.FC = () => {
   // on dragover so the browser doesn't try to navigate away to the
   // dropped file. Only the FIRST file is imported because the offline
   // path is single-source-of-truth (one page → one SniffResult).
+  //
+  // R-68 — Tab-scoping fix. Pre-R-68 this listener fired on EVERY tab.
+  // When the user dragged a file onto the Toolbox tab to add a job,
+  // ToolboxPanel's own `onDrop` correctly added the job *and* this
+  // window listener also fired, calling `runOfflineImport(p)` which
+  // populated the home-tab "已选媒体" grid with that toolbox file.
+  // Visible symptom in the user's screenshot: a toolbox-side webp
+  // (`1CCA6D513B...webp`) showing up as a sniff result on the home
+  // page even though the user never sniffed any URL. We now:
+  //   1. Bail when the active tab isn't 'home' — toolbox / history /
+  //      uploads have their own drop handling and shouldn't share
+  //      the home grid.
+  //   2. Honour `e.defaultPrevented` so any nested React onDrop
+  //      handler that called `e.preventDefault()` already handled
+  //      the drop and we shouldn't double-process it.
   useEffect(() => {
+    if (view !== 'home') {
+      // Toolbox / history / uploads do their own drop handling
+      // (ToolboxPanel.handleDrop, etc.). Skipping the global listener
+      // entirely on those tabs prevents the cross-tab pollution where
+      // a toolbox-added file would appear in the home "已选媒体" grid.
+      return;
+    }
     const onDragOver = (e: DragEvent) => {
       if (!e.dataTransfer) return;
       // Only react if the drag actually carries files.
@@ -1087,6 +1109,13 @@ const App: React.FC = () => {
     const onDrop = (e: DragEvent) => {
       if (!e.dataTransfer) return;
       if (!e.dataTransfer.files || e.dataTransfer.files.length === 0) return;
+      // R-68 — If a child React onDrop already called preventDefault,
+      // it means an inner drop zone (e.g. a future home-side toolbox
+      // embed) consumed the drop and our window-level fallback would
+      // duplicate the work. Native `defaultPrevented` is reliable
+      // across the React-synthetic / native boundary because React
+      // dispatches preventDefault straight to the native event.
+      if (e.defaultPrevented) return;
       e.preventDefault();
       const f = e.dataTransfer.files[0];
       // Electron exposes a non-standard `path` on File when the file
@@ -1100,7 +1129,7 @@ const App: React.FC = () => {
       window.removeEventListener('dragover', onDragOver);
       window.removeEventListener('drop', onDrop);
     };
-  }, [runOfflineImport]);
+  }, [runOfflineImport, view]);
 
   const onCancel = useCallback(() => {
     if (!giftk) return;
