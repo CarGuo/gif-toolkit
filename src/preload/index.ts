@@ -17,7 +17,8 @@ import type {
   UploadProgress,
   UploadStartPayload,
   UploadStartResult,
-  UploadTestResult
+  UploadTestResult,
+  CapabilityReport
 } from '../shared/types';
 
 export interface YtdlpStatus {
@@ -183,6 +184,16 @@ const api = {
   },
   async getDefaultOutputDir(): Promise<string> {
     return ipcRenderer.invoke('app:defaultDir');
+  },
+  /**
+   * R-62 — Cross-platform capability probe. Returns the current
+   * platform / arch, binary availability matrix, and a list of
+   * `CapabilityIssue`s the renderer should surface as toasts. Cached
+   * on the main side for the lifetime of the process — calling this
+   * multiple times is cheap.
+   */
+  async getCapabilities(): Promise<CapabilityReport> {
+    return ipcRenderer.invoke('system:capabilities');
   },
   onProgress(cb: (p: TaskProgress) => void): () => void {
     const handler = (_: unknown, payload: TaskProgress) => {

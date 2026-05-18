@@ -11,6 +11,7 @@ import { previewMedia, startBatch, cancelAllTasks, cancelTask, prefetchThumbnail
 import { killAllProcs, probe as probeMedia, extractFrameDataUrl } from './ffmpeg';
 import { log } from './logger';
 import { printPaths } from './binaries';
+import { getCapabilityReport } from './capabilities';
 import { registerUploaderIpc } from './uploader';
 import { DEFAULT_OPTIONS, TOOLBOX_INPUT_EXTENSIONS } from '../shared/types';
 import type {
@@ -527,12 +528,19 @@ function sanitizeToolboxJob(j: unknown): ToolboxJob {
 /* ----------------------- Window / CSP ----------------------- */
 
 async function createWindow(): Promise<void> {
-  // R-50.2 — Resolve the bundled app icon. In dev we read it from the
-  // repo's build/ folder; in a packaged app electron-builder copies the
-  // same file to `process.resourcesPath`. Fall back silently if absent —
-  // BrowserWindow happily ignores `icon: undefined`.
+  // R-50.2 / R-62 — Resolve the bundled app icon. Prefer the
+  // hi-res PNG source (1254×1254) which mac/linux can render at
+  // any DPI; fall back to the legacy 32×32 .ico for Windows-only
+  // installs where PNG isn't yet generated. In dev we read it from
+  // the repo's build/ folder; in a packaged app electron-builder
+  // copies the same file to `process.resourcesPath`. Fall back
+  // silently if absent — BrowserWindow happily ignores
+  // `icon: undefined`.
   const iconPath = (() => {
     const candidates = [
+      path.join(__dirname, '..', '..', 'build', 'icon.png'),
+      path.join(process.resourcesPath || '', 'build', 'icon.png'),
+      path.join(process.resourcesPath || '', 'icon.png'),
       path.join(__dirname, '..', '..', 'build', 'icon.ico'),
       path.join(process.resourcesPath || '', 'build', 'icon.ico'),
       path.join(process.resourcesPath || '', 'icon.ico')
@@ -563,6 +571,21 @@ async function createWindow(): Promise<void> {
       webSecurity: true
     }
   });
+
+  // R-62 — On macOS the BrowserWindow `icon` field is ignored for the
+  // Dock; Dock icon comes from Info.plist (.icns), which only exists
+  // in packaged builds. In `npm run dev` we therefore fall back to
+  // `app.dock.setIcon(<png>)` so the running Electron process shows
+  // the Gif Toolkit logo in the Dock instead of Electron's default
+  // atom icon. The PNG path is the same one we resolved above.
+  if (process.platform === 'darwin' && iconPath && /\.png$/i.test(iconPath)) {
+    try {
+      const dock = (app as unknown as { dock?: { setIcon: (p: string) => void } }).dock;
+      dock?.setIcon(iconPath);
+    } catch (e) {
+      log(`dock.setIcon failed: ${(e as Error).message}`);
+    }
+  }
 
   // Block all new window opens (e.g. external links)
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -1025,6 +1048,15 @@ ipcMain.handle('app:defaultDir', async () => {
   const d = defaultOutDir();
   if (d) allowedOutputDirs.add(d);
   return d;
+});
+
+/**
+ * R-62 — Cross-platform capability probe. Probed once on first call,
+ * cached for the lifetime of the main process. Renderer calls this
+ * on startup and renders one toast per `issues[]` entry.
+ */
+ipcMain.handle('system:capabilities', async () => {
+  return getCapabilityReport();
 });
 
 /**

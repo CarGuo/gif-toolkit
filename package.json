@@ -90,7 +90,7 @@
       "node_modules/ytdlp-nodejs/bin/**"
     ],
     "mac": {
-      "icon": "build/icon.ico",
+      "icon": "build/icon.png",
       "target": [
         {
           "target": "dmg",
@@ -121,7 +121,7 @@
       ]
     },
     "linux": {
-      "icon": "build/icon.ico",
+      "icon": "build/icon.png",
       "category": "Graphics",
       "target": [
         {

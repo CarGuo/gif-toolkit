@@ -38,6 +38,7 @@ import { useUploadHistory, isUploadConfigured } from './components/useUploadHist
 import { UploadSettingsModal } from './components/UploadSettingsModal';
 import { UploadHistoryPanel } from './components/UploadHistoryPanel';
 import { UploadResultModal } from './components/UploadResultModal';
+import { Toaster, useToaster } from './components/Toast';
 
 const giftk = (typeof window !== 'undefined' ? window.giftk : undefined);
 
@@ -46,6 +47,32 @@ const SNIFF_TIMEOUT_MS = 60_000;
 const App: React.FC = () => {
   const [url, setUrl] = useState('');
   const [urlError, setUrlError] = useState<string | null>(null);
+  // R-62 — Toaster for cross-platform capability issues + ad-hoc
+  // notifications. The hook returns a stable `pushCapability`
+  // imperative we wire into the bottom-right Toaster instance.
+  const toaster = useToaster();
+  // R-62 — On first mount, ask main for the platform capability
+  // report and surface one toast per issue (skipping ones the user
+  // has previously dismissed via "不再提醒"). Run once — capabilities
+  // are cached on the main side and don't change at runtime.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const cap = await window.giftk?.getCapabilities?.();
+        if (cancelled || !cap) return;
+        for (const issue of cap.issues) {
+          toaster.pushCapability(issue);
+        }
+      } catch (e) {
+        // Don't toast about the toaster failing — just log.
+        // eslint-disable-next-line no-console
+        console.warn('[capabilities] probe failed:', e);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [sniffing, setSniffing] = useState(false);
   const [sniffProgress, setSniffProgress] = useState<SniffProgress | null>(null);
   // R-55 Fix #2 — current sniff backend; non-null only while sniffing.
@@ -2621,6 +2648,10 @@ const App: React.FC = () => {
         if (!rec) return null;
         return <UploadResultModal record={rec} onClose={() => setUploadResult(null)} />;
       })() : null}
+
+      {/* R-62 — Cross-platform capability toaster. Always mounted;
+          renders nothing until at least one toast is pushed. */}
+      <Toaster registerHandle={toaster.handleSetter} />
     </div>
   );
 };

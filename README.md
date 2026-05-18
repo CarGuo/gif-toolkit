@@ -19,19 +19,21 @@
 
 ---
 
-## 🌍 跨平台支持矩阵(R-61)
+## 🌍 跨平台支持矩阵(R-61 → R-62)
 
 | 能力 | macOS | Windows | Linux |
 |---|---|---|---|
-| 桌面打包 | ✅ dmg / zip(Intel + Apple Silicon) | ✅ NSIS x64 | ✅ AppImage / deb / tar.gz(x64 + arm64) |
-| FFmpeg / FFprobe / Sharp / yt-dlp | ✅ 预编译二进制 | ✅ 预编译二进制 | ✅ 预编译二进制 |
-| Gifsicle 优化 | ✅ | ✅ | ✅ x64 / arm64;arm32 / 老 musl 自动跳过 |
-| 真 Chrome 嗅探探测 | Google Chrome / Chrome Canary / Edge / Brave / Chromium(系统级 + `~/Applications`) | Program Files / `LOCALAPPDATA` 各 Chrome / Edge / Brave 包括 per-user 路径 | `/usr/bin`、`/opt`、`/snap/bin`(Snap)、`~/.local/share/flatpak/exports/bin`(Flatpak)、`/usr/local/bin`,**Snap / Flatpak / .deb / .rpm 全覆盖** |
-| 真实 Chrome profile(`useRealProfile`) | `~/Library/Application Support/Google/Chrome` 等 | `%LOCALAPPDATA%\Google\Chrome\User Data` 等 | `~/.config/google-chrome`、`~/snap/chromium/common/chromium`、`~/.var/app/<app-id>/config/...`(Flatpak) |
-| Chrome 占用检测(SingletonLock) | ✅ symlink readlink + `kill -0` 探活 | ✅ `Local State` lockfile mtime <30s 兜底 | ✅ symlink readlink + `kill -0` 探活 |
+| 桌面打包 | ✅ dmg / zip(Intel + Apple Silicon) | ✅ NSIS x64 | ⚠️ AppImage / deb / tar.gz(x64 + arm64),**未在 Linux 实机自测** |
+| 应用图标(R-62) | ✅ 高清 PNG → electron-builder 自动生成 .icns | ✅ 用 PNG + 旧版 32×32 .ico 兜底 | ⚠️ 高清 PNG;Snap/Flatpak 沙箱 desktop entry 未实测 |
+| FFmpeg / FFprobe / Sharp / yt-dlp | ✅ 预编译二进制 | ✅ 预编译二进制 | ✅ x64 + arm64 二进制(armv7 等需自行编译) |
+| Gifsicle 优化 | ✅ | ✅ | ⚠️ x64/arm64 有 vendor;armv7 / Alpine musl 需 `apt install gifsicle` |
+| 真 Chrome 嗅探探测 | ✅ Google Chrome / Chrome Canary / Edge / Brave / Chromium(系统级 + `~/Applications`) | ✅ Program Files / `LOCALAPPDATA` 各 Chrome / Edge / Brave 包括 per-user 路径 | ⚠️ `/usr/bin`、`/opt`、`/snap/bin`(Snap)、`~/.local/share/flatpak/exports/bin`(Flatpak)、`/usr/local/bin`,**Snap / Flatpak / .deb / .rpm 全覆盖**(代码已加,未实机) |
+| 真实 Chrome profile(`useRealProfile`) | ✅ `~/Library/Application Support/Google/Chrome` 等 | ✅ `%LOCALAPPDATA%\Google\Chrome\User Data` 等 | ⚠️ `~/.config/google-chrome`、`~/snap/chromium/common/chromium`、`~/.var/app/<app-id>/config/...`(Flatpak) |
+| Chrome 占用检测(SingletonLock) | ✅ symlink readlink + `kill -0` 探活 | ✅ `Local State` lockfile mtime <30s 兜底 | ⚠️ symlink readlink + `kill -0`,但 Snap/Flatpak 沙箱内 SingletonLock 不创建 |
+| 启动时能力探测 + Toast(R-62) | ✅ 缺少 ffmpeg/gifsicle/icon 时 toast | ✅ 同左 + ARM64 提示 | ✅ 同左 + 「Linux 未实机验证」 toast + arch 不支持时 error toast |
 
 > **打包命令**:`npm run package:mac` · `npm run package:win` · `npm run package:linux`(R-61 新加)。
-> **Apple 签名 / 公证 + Linux Code Signing 暂未配置**,首次运行需要 Gatekeeper / `chmod +x` 手动放行。
+> **Apple 签名 / Authenticode 签名 / Linux Code Signing 全部暂未配置**,首次运行需要 Gatekeeper / `chmod +x` / SmartScreen 手动放行 — 启动时 toast 会按平台自动提示。
 
 ---
 
@@ -69,6 +71,13 @@
   - **跨域 iframe 直链**:`Target.setAutoAttach({ flatten: true })` 订阅所有子 frame target,通过 sessionId 路由 `Network.responseReceived`,**OpenAI / YouTube embed 内部的 .mp4 / .m3u8 直链现在能抓到了**(顶层 session 之前完全看不到 OOPIF 进程的 network)。
   - **真 profile 单 tab 保证**:Chrome 启动改用 `about:blank`(不再把 url 作为位置参数,避开"用户日常 profile 的 chrome://settings 启动页 + 我们的位置 url 同时打开 = 双 tab"问题);CDP attach 后枚举所有 page target 并 `closeTarget` 关掉非主 tab,然后 `Page.navigate(url)` 跳转主 tab。
   - **iframe-embed 共享**:离线 mhtml/html 的 [collectFromDom](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/offlineImport.ts) 现在 import 在线 sniffer.ts 的 `matchEmbedProvider`,**离线导入也能识别 YouTube / Vimeo / Bilibili 等 13 个 iframe-embed provider**(原本只走 `<video>` / og:video 缩水版)。
+- **R-62 跨平台能力探测 + Toast 体系**:启动后主进程 [getCapabilityReport](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/capabilities.ts) 一次性 spawn `ffmpeg -version` / `ffprobe -version` / `gifsicle --version` / `yt-dlp --version`,加上 icon PNG 探测、`process.platform` × `process.arch` 矩阵判断,产出 `CapabilityIssue[]`;渲染层 [Toaster](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/Toast.tsx) 在右下角分级展示(error 不自动关 / warn 8s / info 5s,鼠标 hover 暂停)。例如:
+  - mac dev 没放 PNG 源图 → 「macOS Dock 图标使用默认图」warn
+  - ARM Linux 缺 gifsicle vendor → 「gifsicle 不可用」error,提示 `apt install gifsicle`
+  - 在 Linux 任何平台启动 → 「Linux 平台尚未实机验证」warn(代码已写,等社区反馈)
+  - 打包后没 Apple Developer ID → 「macOS 应用未签名」info,告知 Gatekeeper 放行步骤
+  用户可点「不再提醒」把 issue id 写进 `localStorage.giftk.dismissedCaps`,下次启动不再 toast 同一项。
+- **R-62 高清 logo 整合**:`build/icon.png`(1254×1254)替换原 32×32 `icon.ico`,electron-builder 在打包时自动生成各平台分辨率;dev 模式 mac 通过 `app.dock.setIcon(<png>)` 替换 Dock 默认 Electron 原子图标。
 
 
 
