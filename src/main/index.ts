@@ -527,34 +527,54 @@ function sanitizeToolboxJob(j: unknown): ToolboxJob {
 
 /* ----------------------- Window / CSP ----------------------- */
 
-async function createWindow(): Promise<void> {
-  // R-50.2 / R-62 — Resolve the bundled app icon. Prefer the
-  // hi-res PNG source (1254×1254) which mac/linux can render at
-  // any DPI; fall back to the legacy 32×32 .ico for Windows-only
-  // installs where PNG isn't yet generated. In dev we read it from
-  // the repo's build/ folder; in a packaged app electron-builder
-  // copies the same file to `process.resourcesPath`. Fall back
-  // silently if absent — BrowserWindow happily ignores
-  // `icon: undefined`.
-  const iconPath = (() => {
-    const candidates = [
-      path.join(__dirname, '..', '..', 'build', 'icon.png'),
-      path.join(process.resourcesPath || '', 'build', 'icon.png'),
-      path.join(process.resourcesPath || '', 'icon.png'),
-      path.join(__dirname, '..', '..', 'build', 'icon.ico'),
-      path.join(process.resourcesPath || '', 'build', 'icon.ico'),
-      path.join(process.resourcesPath || '', 'icon.ico')
-    ];
-    for (const p of candidates) {
-      try {
-        if (p && existsSync(p)) return p;
-      } catch {
-        /* ignore */
-      }
+/**
+ * R-50.2 / R-62 / R-64 — Locate the bundled app icon ONCE.
+ *
+ * Prefers the hi-res PNG (1254×1254 in dev, then the squircle-masked
+ * 1024×1024 R-63 build) which mac / Linux can render at any DPI; falls
+ * back to the 32×32 .ico for Windows-only installs where PNG isn't yet
+ * generated. In dev we read from the repo's build/ folder; in packaged
+ * builds electron-builder copies the same file to `process.resourcesPath`.
+ *
+ * Hoisted out of `createWindow()` because R-64 needs to call
+ * `app.dock.setIcon(<png>)` BEFORE the BrowserWindow is created so the
+ * macOS Dock never flashes the Electron atom logo (the user's R-64
+ * report). Returns `undefined` if no icon exists; BrowserWindow happily
+ * ignores `icon: undefined`.
+ */
+function resolveAppIconPath(): string | undefined {
+  const candidates = [
+    path.join(__dirname, '..', '..', 'build', 'icon.png'),
+    path.join(process.resourcesPath || '', 'build', 'icon.png'),
+    path.join(process.resourcesPath || '', 'icon.png'),
+    path.join(__dirname, '..', '..', 'build', 'icon.ico'),
+    path.join(process.resourcesPath || '', 'build', 'icon.ico'),
+    path.join(process.resourcesPath || '', 'icon.ico')
+  ];
+  for (const p of candidates) {
+    try {
+      if (p && existsSync(p)) return p;
+    } catch {
+      /* ignore */
     }
-    return undefined;
-  })();
+  }
+  return undefined;
+}
 
+async function createWindow(): Promise<void> {
+  const iconPath = resolveAppIconPath();
+
+  // R-64 — `show: false` + `ready-to-show` so the user never sees an
+  // empty BrowserWindow in front of the rainbow loader while the dev
+  // server / renderer bundle is still cold-starting. With `show: true`
+  // (the previous default) Electron creates a blank #0e0f12 window the
+  // moment the constructor runs, then awaits `loadURL('http://localhost:5173')`
+  // for several seconds while Vite compiles the React entry — that
+  // gap is exactly what produced the "卡彩虹 loading" report. We now
+  // hold the window invisible until WebContents fires
+  // `ready-to-show`, which the docs explicitly recommend as the
+  // first-paint hook (see
+  // https://www.electronjs.org/docs/latest/api/browser-window#using-the-ready-to-show-event).
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 820,
@@ -563,6 +583,7 @@ async function createWindow(): Promise<void> {
     backgroundColor: '#0e0f12',
     title: 'Gif Toolkit',
     icon: iconPath,
+    show: false,
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -572,12 +593,19 @@ async function createWindow(): Promise<void> {
     }
   });
 
-  // R-62 — On macOS the BrowserWindow `icon` field is ignored for the
-  // Dock; Dock icon comes from Info.plist (.icns), which only exists
-  // in packaged builds. In `npm run dev` we therefore fall back to
-  // `app.dock.setIcon(<png>)` so the running Electron process shows
-  // the Gif Toolkit logo in the Dock instead of Electron's default
-  // atom icon. The PNG path is the same one we resolved above.
+  mainWindow.once('ready-to-show', () => {
+    mainWindow?.show();
+  });
+
+  // R-62 / R-64 — On macOS the BrowserWindow `icon` field is ignored
+  // for the Dock; Dock icon comes from Info.plist (.icns), which only
+  // exists in packaged builds. In `npm run dev` we therefore fall
+  // back to `app.dock.setIcon(<png>)`. Note: this is now ALSO called
+  // earlier (in app.whenReady, before createWindow runs) so the Dock
+  // shows the custom logo from the very first frame; this duplicate
+  // call here keeps the behaviour idempotent and protects the
+  // app.activate path (re-creating a window after all windows have
+  // been closed) from regressing.
   if (process.platform === 'darwin' && iconPath && /\.png$/i.test(iconPath)) {
     try {
       const dock = (app as unknown as { dock?: { setIcon: (p: string) => void } }).dock;
@@ -1312,6 +1340,25 @@ if (!gotLock) {
   });
 
   app.whenReady().then(async () => {
+    // R-64 — Set the macOS Dock icon SYNCHRONOUSLY at the very top of
+    // `whenReady` so the user never sees the Electron atom logo. The
+    // setIcon inside `createWindow()` is too late: by the time await
+    // chains for fs.mkdir / protocol.handle / loadURL have settled,
+    // the Dock has already been showing the default icon for ~1s.
+    // Doing it before any await means the swap happens on the same
+    // microtask the Dock first becomes visible.
+    if (process.platform === 'darwin') {
+      const ico = resolveAppIconPath();
+      if (ico && /\.png$/i.test(ico)) {
+        try {
+          const dock = (app as unknown as { dock?: { setIcon: (p: string) => void } }).dock;
+          dock?.setIcon(ico);
+        } catch (e) {
+          log(`early dock.setIcon failed: ${(e as Error).message}`);
+        }
+      }
+    }
+
     const def = defaultOutDir();
     if (def) {
       await fsp.mkdir(def, { recursive: true }).catch(() => undefined);

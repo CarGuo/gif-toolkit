@@ -121,17 +121,30 @@ const UploadBatchCard: React.FC<{ rec: UploadHistoryRecord; onOpen: () => void; 
 
   return (
     <div style={{ border: '1px solid rgba(255,255,255,0.08)', borderRadius: 6, padding: 10, background: 'rgba(255,255,255,0.02)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}>
-          <span style={{ fontSize: 11, color: 'var(--muted)' }}>{new Date(rec.createdAt).toLocaleString()}</span>
-          <span style={{ fontSize: 11, padding: '2px 6px', background: 'rgba(255,255,255,0.06)', borderRadius: 4 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+        {/* R-64 — Header meta row.
+            The previous version put 时间戳 + backend chip + counts + 操作按钮 in
+            one nowrap flex row. When the Upload-History side panel was
+            narrow (the user's screenshot was ~360px wide), the chips and
+            counts collapsed onto multiple visual lines INSIDE each item
+            because their inner span had default `whiteSpace: normal`.
+            That produced "5/17/2026,\n5:40:31 PM" / "七牛\n云" / "1 项 · 1\n
+            成功" stacks. Fix: every fixed-purpose inline label is now
+            `whiteSpace: 'nowrap'`; the meta-block itself is allowed to
+            wrap (`flexWrap: 'wrap'`) so the timestamp/chip/counts row
+            and the action-buttons row can break instead of compressing
+            their contents. minWidth: 0 on the flex child also stops the
+            ellipsis from being applied INSIDE the timestamp. */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: '1 1 200px', minWidth: 0, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 11, color: 'var(--muted)', whiteSpace: 'nowrap' }}>{new Date(rec.createdAt).toLocaleString()}</span>
+          <span style={{ fontSize: 11, padding: '2px 6px', background: 'rgba(255,255,255,0.06)', borderRadius: 4, whiteSpace: 'nowrap' }}>
             {backendLabel(rec.backend)}
           </span>
-          <span style={{ fontSize: 11, color: 'var(--muted)' }}>
+          <span style={{ fontSize: 11, color: 'var(--muted)', whiteSpace: 'nowrap' }}>
             {total} 项 · {counts.done} 成功{counts.failed ? ` · ${counts.failed} 失败` : ''}{counts.cancelled ? ` · ${counts.cancelled} 取消` : ''}
           </span>
         </div>
-        <div style={{ display: 'flex', gap: 6 }}>
+        <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
           <button onClick={onOpen} title="查看 markdown">查看</button>
           <button onClick={onRemove} title="删除该批">删除</button>
         </div>

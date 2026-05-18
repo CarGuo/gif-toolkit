@@ -151,11 +151,19 @@ function buildIssues(opts: {
     });
   }
   if (!opts.ytdlpOk) {
+    // R-64 — Demoted to 'info'. yt-dlp is the network-fallback path
+    // for "真 Chrome 嗅探 / yt-dlp 直链" only — the resolver auto-
+    // downloads on first use. Surfacing this as a 'warn' on every
+    // launch was misread by users (R-63 / R-64 reports) as "the
+    // bundled binary is broken", when in practice it just means the
+    // initial probe couldn't locate a copy yet. The toast still
+    // shows as info-coloured so power users can debug an air-gapped
+    // install, but is no longer alarming.
     issues.push({
       id: `${opts.platform}.ytdlp-missing`,
-      severity: 'warn',
-      title: 'yt-dlp 未就绪',
-      detail: '尚未在本地找到 yt-dlp 可执行文件。「真 Chrome 嗅探 / yt-dlp 直链」入口将无法解析 YouTube / Twitter / Bilibili 等需要直链解析的源。\n首次使用任一直链解析时会自动下载。'
+      severity: 'info',
+      title: 'yt-dlp 待下载',
+      detail: '尚未在本地找到 yt-dlp 可执行文件,首次使用「真 Chrome 嗅探 / yt-dlp 直链」时会自动下载并缓存到用户目录。\n如果一直失败,请检查网络,或手动把 yt-dlp 二进制放进 userData/bin/。'
     });
   }
 
@@ -230,8 +238,12 @@ export function getCapabilityReport(): CapabilityReport {
   // binary regardless of which candidate dir it ended up in. Falls back
   // to the canonical "expected" path for the diagnostics field if
   // nothing is on disk yet.
+  // R-64 — Add explicit logging so future "yt-dlp 未就绪 / 待下载" reports
+  // can be diagnosed: log whether the sync finder hit, and the exact
+  // path we end up probing.
   const ytdlpFound = findYtdlpBinarySync();
   const ytdlpPath = ytdlpFound ?? ytdlpBinaryPath();
+  log(`cap probe ytdlp: found=${ytdlpFound ?? '<none>'} probePath=${ytdlpPath}`);
 
   const ffmpeg = probeBinary('ffmpeg', ffmpegPath, ['-version']);
   const ffprobe = probeBinary('ffprobe', ffprobePath, ['-version']);
