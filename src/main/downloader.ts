@@ -2,6 +2,7 @@ import axios, { AxiosRequestConfig } from 'axios';
 import fs from 'fs';
 import path from 'path';
 import { promises as fsp } from 'fs';
+import { fileURLToPath } from 'url';
 
 const UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
@@ -19,6 +20,38 @@ export interface DownloadOptions {
   headers?: Record<string, string>;
 }
 
+/**
+ * R-56 — Resolve a sniffed-media URL into an on-disk path when it
+ * points at a local resource. Returns null for remote http(s) URLs.
+ *
+ * Supports two local schemes that the offline-import pipeline emits:
+ *
+ *   file:///abs/path                 standard RFC 8089 file URL
+ *   giftk-local://localhost/abs/path our renderer-displayable mirror
+ *                                    (see main/index.ts protocol handler)
+ *
+ * Falls back to null on any parse failure so the caller can take the
+ * normal axios path.
+ */
+export function resolveLocalUrl(rawUrl: string): string | null {
+  if (rawUrl.startsWith('file://')) {
+    try { return fileURLToPath(rawUrl); } catch { return null; }
+  }
+  if (rawUrl.startsWith('giftk-local://')) {
+    try {
+      const u = new URL(rawUrl);
+      // pathname comes back as `/Users/...` on macOS / `/C:/...` on
+      // Windows. decodeURIComponent so spaces / unicode resolve.
+      let p = decodeURIComponent(u.pathname);
+      if (process.platform === 'win32' && /^\/[a-zA-Z]:/.test(p)) p = p.slice(1);
+      return p;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 export async function downloadToFile(
   url: string,
   destDir: string,
@@ -33,6 +66,28 @@ export async function downloadToFile(
 
   await fsp.mkdir(destDir, { recursive: true });
   const target = path.join(destDir, fileName);
+
+  // R-56 — local-file fast path. Offline-import items return either a
+  // file:// or giftk-local:// URL pointing at a real on-disk file
+  // (mhtml extracted to tmpdir, single .mp4 the user dropped, ...).
+  // Skip axios entirely and just `fs.copyFile` so the processor /
+  // toolbox / probe pipeline keeps working on offline-mode items
+  // without needing a giftk-local capable HTTP client.
+  const localPath = resolveLocalUrl(url);
+  if (localPath) {
+    if (!fs.existsSync(localPath)) {
+      throw new Error(`offline file not found: ${localPath}`);
+    }
+    const st = await fsp.stat(localPath);
+    const maxBytesLocal = opts.maxBytes ?? DEFAULT_MAX_BYTES;
+    if (st.size > maxBytesLocal) {
+      throw new Error(`local file too large: ${st.size} > ${maxBytesLocal}`);
+    }
+    await fsp.copyFile(localPath, target);
+    if (opts.onProgress) opts.onProgress(st.size, st.size);
+    return target;
+  }
+
   const tmp = `${target}.part`;
   const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES;
 

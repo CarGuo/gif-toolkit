@@ -51,7 +51,7 @@ const App: React.FC = () => {
   // R-55 Fix #2 — current sniff backend; non-null only while sniffing.
   // Drives whether the「✓ 完成嗅探」button shows up at the 60% stage
   // (only meaningful for system-chrome which waits for child exit).
-  const [activeSniffMode, setActiveSniffMode] = useState<'embed' | 'system-chrome' | 'ytdlp-direct' | null>(null);
+  const [activeSniffMode, setActiveSniffMode] = useState<'embed' | 'system-chrome' | 'ytdlp-direct' | 'offline' | null>(null);
   const [result, setResult] = useState<SniffResult | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -939,12 +939,29 @@ const App: React.FC = () => {
   // lets us reuse this handler for both the toolbar button (no path
   // → main pops a picker) and drag-and-drop (renderer already has
   // the absolute path).
-  const runOfflineImport = useCallback(async (absPath?: string) => {
+  //
+  // R-56 — `includeStaticImages` opts the result back into accepting
+  // <img>-sourced static images (.png/.jpg/.webp/.bmp/.avif). Default
+  // false: the result grid was being polluted with avatars / sprites /
+  // thumbnails the user couldn't actually do anything with. Also
+  // removed the hard-coded `percent: 50` placeholder that the user
+  // saw as "卡 60%" — main now emits real per-stage progress over
+  // the existing `sniff:progress` channel and the global
+  // `onSniffProgress` subscriber picks it up automatically.
+  const runOfflineImport = useCallback(async (
+    absPath?: string,
+    runOpts?: { includeStaticImages?: boolean }
+  ) => {
     if (!giftk?.importOfflinePage) return;
     const myId = ++sniffReqId.current;
     setSniffing(true);
-    setActiveSniffMode(null);
-    setSniffProgress({ stage: 'parsing', percent: 50, message: '解析离线网页/媒体…' });
+    setActiveSniffMode('offline');
+    // R-56 — kick off with stage:fetching/percent:0; main emits real
+    // milestones (5/15/25/55/70/85/100) which override this via the
+    // global onSniffProgress handler. Without overriding, the user
+    // sees an honest "starting…" indicator instead of the previous
+    // hard-pinned 50% that looked like a stalled job.
+    setSniffProgress({ stage: 'fetching', percent: 0, message: '准备解析离线内容…' });
     setResult(null);
     setSelected(new Set());
     setActiveId(null);
@@ -953,9 +970,9 @@ const App: React.FC = () => {
     setResolvingSet(new Set());
     setResolveErrorMap({});
     activeHistoryIdRef.current = null;
-    setLogs((prev) => [...prev, `[offline-import] ${absPath ? absPath : '(等用户在弹窗里选择文件/目录)'}`].slice(-300));
+    setLogs((prev) => [...prev, `[offline-import] ${absPath ? absPath : '(等用户在弹窗里选择文件/目录)'}${runOpts?.includeStaticImages ? ' (包含静态图像)' : ''}`].slice(-300));
     try {
-      const r = await giftk.importOfflinePage(absPath);
+      const r = await giftk.importOfflinePage(absPath, { includeStaticImages: !!runOpts?.includeStaticImages });
       if (myId !== sniffReqId.current) return;
       if (!r) {
         // Picker cancelled — silently bail.
@@ -990,9 +1007,15 @@ const App: React.FC = () => {
     }
   }, [options, pushOrReplace]);
 
+  // R-56 — toolbar checkbox lets the user opt static images back in
+  // before clicking 离线导入. We keep it next to the button (small
+  // ghost-styled checkbox) instead of burying it in settings because
+  // the choice is per-import, not per-app.
+  const [offlineIncludeImages, setOfflineIncludeImages] = useState(false);
+
   const onOfflineImport = useCallback(() => {
-    void runOfflineImport(undefined);
-  }, [runOfflineImport]);
+    void runOfflineImport(undefined, { includeStaticImages: offlineIncludeImages });
+  }, [runOfflineImport, offlineIncludeImages]);
 
   // R-55 Fix #3 — Global drag-and-drop bridge for the offline import.
   // Attached to `window` instead of a specific div so the user can
@@ -1016,7 +1039,7 @@ const App: React.FC = () => {
       // Electron exposes a non-standard `path` on File when the file
       // came from the OS (vs. a renderer-fetched blob).
       const p = (f as File & { path?: string }).path;
-      if (p) void runOfflineImport(p);
+      if (p) void runOfflineImport(p, { includeStaticImages: offlineIncludeImages });
     };
     window.addEventListener('dragover', onDragOver);
     window.addEventListener('drop', onDrop);
@@ -1024,7 +1047,7 @@ const App: React.FC = () => {
       window.removeEventListener('dragover', onDragOver);
       window.removeEventListener('drop', onDrop);
     };
-  }, [runOfflineImport]);
+  }, [runOfflineImport, offlineIncludeImages]);
 
   const onCancel = useCallback(() => {
     if (!giftk) return;
@@ -2090,6 +2113,32 @@ const App: React.FC = () => {
               >
                 📂 离线导入
               </button>
+              {/* R-56 — opt-in 「包含静态图像」switch. Off by default
+                  so saved-page imports don't bleed every avatar / sprite
+                  / cover.png into the result grid. GIFs and <video>/
+                  og:video are always kept regardless. */}
+              <label
+                className="ghost"
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 4,
+                  padding: '4px 8px',
+                  whiteSpace: 'nowrap',
+                  cursor: sniffing ? 'not-allowed' : 'pointer',
+                  opacity: sniffing ? 0.6 : 1
+                }}
+                title="勾选后,离线导入会把页面里的 .png/.jpg/.webp/.bmp/.avif 静态图像也作为结果纳入(默认仅保留 GIF 与 <video> / og:video)"
+              >
+                <input
+                  type="checkbox"
+                  checked={offlineIncludeImages}
+                  disabled={sniffing}
+                  onChange={(e) => setOfflineIncludeImages(e.target.checked)}
+                  style={{ margin: 0 }}
+                />
+                包含静态图像
+              </label>
               <SniffHistoryPicker
                 open={sniffHistoryOpen}
                 entries={sniffHistory}

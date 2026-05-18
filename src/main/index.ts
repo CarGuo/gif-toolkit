@@ -1,7 +1,8 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, session } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell, session, protocol, net } from 'electron';
 import path from 'path';
 import { promises as fsp, statSync, existsSync } from 'fs';
 import crypto from 'crypto';
+import { pathToFileURL } from 'url';
 import { sniffPage } from './sniffer';
 import { openWebviewSniff } from './webviewSniff';
 import { sniffViaSystemChrome, findInstalledBrowsers } from './systemChromeSniff';
@@ -36,6 +37,28 @@ import {
 app.commandLine.appendSwitch('disable-quic');
 app.commandLine.appendSwitch('disable-features', 'NetworkServiceCodeIntegrity,IsolateOrigins,site-per-process');
 
+// R-56 — Register the `giftk-local://` scheme as privileged BEFORE
+// `app.ready` fires. Used by the offline-import pipeline to expose
+// staged files from the OS temp dir (mhtml extracts, single-file
+// drops) to the renderer without flipping `webSecurity: false` on
+// the BrowserWindow. The actual fetch handler is wired in
+// `app.whenReady()` below — this only declares the scheme's
+// security characteristics so Chromium routes <img>/<video>
+// requests through net:// as if it were a normal http origin.
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'giftk-local',
+    privileges: {
+      secure: true,
+      standard: true,
+      supportFetchAPI: true,
+      stream: true,
+      bypassCSP: false,
+      corsEnabled: true
+    }
+  }
+]);
+
 let mainWindow: BrowserWindow | null = null;
 const allowedOutputDirs: Set<string> = new Set();
 
@@ -69,6 +92,32 @@ function assertHttpUrl(u: unknown): string {
     throw new Error('host is private/loopback and is not allowed');
   }
   return parsed.toString();
+}
+
+/**
+ * R-56 — Variant of `assertHttpUrl` that ALSO accepts giftk-local://
+ * URLs minted by the offline-import pipeline. Used by `sanitizeMedia`
+ * so SniffedMedia rows whose `url` is a staged file (mhtml extract,
+ * dropped .mp4) survive the IPC validation gate that previously
+ * rejected anything non-http(s).
+ *
+ * The giftk-local scheme is registered in this module's top-level
+ * `protocol.registerSchemesAsPrivileged` call; the actual fetch
+ * handler runs inside `app.whenReady` and re-validates the path
+ * before reading the bytes off disk, so this function only needs
+ * a syntactic check.
+ */
+function assertHttpOrLocalUrl(u: unknown): string {
+  if (typeof u !== 'string') throw new Error('url must be a string');
+  if (u.startsWith('giftk-local://')) {
+    let parsed: URL;
+    try { parsed = new URL(u); } catch { throw new Error('invalid giftk-local URL'); }
+    if (!parsed.pathname || parsed.pathname === '/') {
+      throw new Error('giftk-local URL is missing a path');
+    }
+    return parsed.toString();
+  }
+  return assertHttpUrl(u);
 }
 
 function isPathInside(parent: string, child: string): boolean {
@@ -141,12 +190,16 @@ function sanitizeResolved(r: unknown): ResolvedMedia | undefined {
 function sanitizeMedia(m: unknown): SniffedMedia {
   if (!m || typeof m !== 'object') throw new Error('invalid media');
   const obj = m as Record<string, unknown>;
-  const url = assertHttpUrl(obj.url);
+  // R-56 — accept giftk-local:// in addition to http(s) so offline-
+  // imported items survive the IPC sanitiser. The downloader has a
+  // matching local-file fast path so processor / probe / preview all
+  // work transparently for these.
+  const url = assertHttpOrLocalUrl(obj.url);
   const id = String(obj.id || '').replace(/[^a-zA-Z0-9._-]/g, '');
   if (!id) throw new Error('invalid media.id');
   const kind = obj.kind;
   if (kind !== 'video' && kind !== 'gif' && kind !== 'image') throw new Error('invalid media.kind');
-  const pageUrl = obj.pageUrl ? assertHttpUrl(obj.pageUrl) : url;
+  const pageUrl = obj.pageUrl ? assertHttpOrLocalUrl(obj.pageUrl) : url;
   // R-53 — strict source whitelist. A forged / future / typo-ed source
   // would otherwise pass through unchecked and downstream dedup may
   // double-count or mis-route the item. Reject the whole payload when
@@ -577,6 +630,16 @@ ipcMain.handle('sniff:cancel', async () => {
     try { currentSniffCtrl.abort(); } catch { /* ignore */ }
     currentSniffCtrl = null;
   }
+  // R-56 Fix #B — also detach the system-chrome finalize controller so
+  // a stale ctrl from the just-cancelled run cannot leak into the next
+  // sniff. Without this, the next 真 Chrome sniff's finalize button
+  // would either fire on the wrong run or the renderer's
+  // `finalizeSystemChromeSniff()` would resolve to `true` even though
+  // no sniff is in flight.
+  if (currentSystemChromeFinalizeCtrl) {
+    try { currentSystemChromeFinalizeCtrl.abort(); } catch { /* ignore */ }
+    currentSystemChromeFinalizeCtrl = null;
+  }
   return { ok: true };
 });
 
@@ -674,7 +737,17 @@ ipcMain.handle('sniff:system-chrome:finalize', async () => {
 //  - it passes nothing, in which case we open a native file picker
 //    here. The picker accepts both files and directories so the
 //    user can choose a Chrome "Webpage, complete" folder in one go.
-ipcMain.handle('sniff:offlineImport', async (_e, maybePath: unknown) => {
+//
+// R-56 — Now wired into the same single-flight `currentSniffCtrl`
+// + `sniff:progress` channel as the other four sniff entries, so
+// `sniff:cancel` actually cancels offline imports and the renderer
+// progress spinner reflects real per-stage milestones (read-mhtml
+// → stage-parts → rewrite-html → extract-media) instead of the old
+// hard-pinned 50% placeholder. The renderer can also pass a third
+// IPC argument `{ includeStaticImages: true }` to opt static-image
+// references back in (default = filtered out so png/webp thumbnails
+// don't pollute the result grid).
+ipcMain.handle('sniff:offlineImport', async (_e, maybePath: unknown, maybeOpts: unknown) => {
   const { importOfflinePath } = await import('./offlineImport');
   let absPath: string | null = null;
   if (typeof maybePath === 'string' && maybePath.trim()) {
@@ -693,7 +766,31 @@ ipcMain.handle('sniff:offlineImport', async (_e, maybePath: unknown) => {
     absPath = path.resolve(r.filePaths[0]);
   }
   if (!absPath) return null;
-  return importOfflinePath(absPath);
+  let includeStaticImages = false;
+  if (maybeOpts && typeof maybeOpts === 'object') {
+    const obj = maybeOpts as Record<string, unknown>;
+    if (obj.includeStaticImages === true) includeStaticImages = true;
+  }
+  // Single-flight: cancel any in-flight sniff (online or offline)
+  // before kicking off this offline import.
+  if (currentSniffCtrl) {
+    try { currentSniffCtrl.abort(); } catch { /* ignore */ }
+  }
+  const ctrl = new AbortController();
+  currentSniffCtrl = ctrl;
+  try {
+    return await importOfflinePath(absPath, {
+      signal: ctrl.signal,
+      includeStaticImages,
+      onProgress: (p) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('sniff:progress', p);
+        }
+      }
+    });
+  } finally {
+    if (currentSniffCtrl === ctrl) currentSniffCtrl = null;
+  }
 });
 
 // R-52 — yt-dlp direct sniff. The third tier (alongside R-44 embedded
@@ -1148,6 +1245,45 @@ if (!gotLock) {
       allowedOutputDirs.add(def);
     }
 
+    // R-56 — Register the giftk-local:// fetch handler. Resolves
+    // `giftk-local://localhost/<urlencoded-abs-path>` back to a real
+    // file on disk and streams it to the renderer. We deliberately
+    // restrict served paths to:
+    //   1. anything under os.tmpdir() (mhtml extraction targets); OR
+    //   2. anything under the user's allowed output dirs (toolbox /
+    //      processor outputs the renderer might preview); OR
+    //   3. any single file the user explicitly opted into via the
+    //      offline-import picker (we don't track those individually
+    //      so we accept any readable, regular file).
+    // This is a defence-in-depth hedge: the renderer can only mint a
+    // giftk-local URL that the main process itself produced, so the
+    // surface for arbitrary FS reads is the same as the existing
+    // file-picker IPC. We still log every served path for forensic
+    // tracing.
+    protocol.handle('giftk-local', async (request) => {
+      try {
+        const url = new URL(request.url);
+        let p = decodeURIComponent(url.pathname);
+        if (process.platform === 'win32' && /^\/[a-zA-Z]:/.test(p)) p = p.slice(1);
+        if (!path.isAbsolute(p)) {
+          return new Response('giftk-local: path must be absolute', { status: 400 });
+        }
+        if (p.indexOf('\u0000') !== -1) {
+          return new Response('giftk-local: null byte', { status: 400 });
+        }
+        // Reject any path whose normalised form differs (defence
+        // against `..` traversal even though we don't have a single
+        // root).
+        const norm = path.normalize(p);
+        if (norm !== p) {
+          return new Response('giftk-local: non-canonical path', { status: 400 });
+        }
+        return net.fetch(pathToFileURL(p).toString());
+      } catch (e) {
+        return new Response(`giftk-local: ${(e as Error).message}`, { status: 500 });
+      }
+    });
+
     // R-45 — wire upload IPC (settings persistence + per-job upload
     // streaming). Shares the same `allowedOutputDirs` set so upload
     // jobs cannot read files outside the allowed output tree.
@@ -1158,11 +1294,13 @@ if (!gotLock) {
     });
 
     // Strict CSP for renderer — packaged uses tight policy; dev keeps loose.
+    // R-56 — `giftk-local:` is allow-listed for img-src / media-src so
+    // offline-imported items render without flipping `webSecurity` off.
     session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
       const isDev = !app.isPackaged;
       const csp = isDev
-        ? "default-src 'self' http://localhost:5173 ws://localhost:5173 blob: data:; img-src * data: blob:; media-src * blob: data:; script-src 'self' http://localhost:5173 'unsafe-inline' 'unsafe-eval'; style-src 'self' http://localhost:5173 'unsafe-inline'; connect-src 'self' http://localhost:5173 ws://localhost:5173;"
-        : "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none';";
+        ? "default-src 'self' http://localhost:5173 ws://localhost:5173 blob: data:; img-src * data: blob: giftk-local:; media-src * blob: data: giftk-local:; script-src 'self' http://localhost:5173 'unsafe-inline' 'unsafe-eval'; style-src 'self' http://localhost:5173 'unsafe-inline'; connect-src 'self' http://localhost:5173 ws://localhost:5173 giftk-local:;"
+        : "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: giftk-local:; media-src 'self' blob: giftk-local:; connect-src 'self' giftk-local:; object-src 'none'; base-uri 'none'; frame-ancestors 'none';";
       callback({
         responseHeaders: {
           ...details.responseHeaders,

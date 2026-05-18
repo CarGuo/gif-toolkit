@@ -5,12 +5,22 @@
  * `src/main/offlineImport.ts`:
  *
  *   1. Single image / video file → one synthesised SniffedMedia with
- *      a `file://` URL.
+ *      a `giftk-local://` URL (R-56: was file:// pre-R-56; switched
+ *      to a custom standard scheme so the renderer can <img src=…>
+ *      it without flipping `webSecurity`).
  *   2. Single .html file with sibling assets on disk → relative refs
- *      resolve to `file://` URLs; missing refs are dropped (warning).
+ *      resolve to `giftk-local://` URLs; missing refs are dropped
+ *      (warning).
  *   3. .mhtml multipart/related → primary text/html part walked, with
  *      Content-Location → staged temp file rewriting so the resulting
- *      SniffResult exposes only `file://` URLs that exist on disk.
+ *      SniffResult exposes only `giftk-local://` URLs that exist on
+ *      disk.
+ *
+ * R-56 — Static images (.png/.jpg/.webp/.bmp/.avif) are filtered out
+ * by default because saved pages bleed avatars / sprites / cover art
+ * into the result grid. Tests that target the image path explicitly
+ * pass `{ includeStaticImages: true }` to opt back in. GIFs and
+ * `<video>`/`<source>`/og:video are always kept.
  *
  * We deliberately avoid network and avoid Electron — the module is
  * pure Node + cheerio so the entire surface can be unit tested with
@@ -31,8 +41,23 @@ vi.mock('electron', () => ({
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { pathToFileURL } from 'url';
 import { importOfflinePath } from '../../src/main/offlineImport';
+
+/**
+ * R-56 — mirror of `pathToGiftkLocalURL` from offlineImport.ts. We
+ * intentionally re-encode here (instead of importing the helper)
+ * because the test acts as a contract assertion: any change to the
+ * URL shape must be a deliberate test edit, not a silent drift.
+ */
+function expectedGiftkLocalURL(absPath: string): string {
+  const normalized = absPath.replace(/\\/g, '/');
+  const withLeading = normalized.startsWith('/') ? normalized : '/' + normalized;
+  const encoded = withLeading
+    .split('/')
+    .map((seg) => (seg ? encodeURIComponent(seg) : seg))
+    .join('/');
+  return 'giftk-local://localhost' + encoded;
+}
 
 let tmp: string;
 beforeEach(() => {
@@ -49,7 +74,7 @@ describe('importOfflinePath — single media file', () => {
     const r = await importOfflinePath(p);
     expect(r.items).toHaveLength(1);
     expect(r.items[0].kind).toBe('video');
-    expect(r.items[0].url).toBe(pathToFileURL(p).toString());
+    expect(r.items[0].url).toBe(expectedGiftkLocalURL(p));
     expect(r.items[0].sizeBytes).toBe(4);
     expect(r.warnings).toHaveLength(0);
   });
@@ -57,10 +82,12 @@ describe('importOfflinePath — single media file', () => {
   it('synthesises a single image item from a stand-alone .png', async () => {
     const p = path.join(tmp, 'a.png');
     fs.writeFileSync(p, Buffer.from([0]));
+    // Single-file media import is an explicit user pick, so we never
+    // filter it out — the user obviously wanted that exact file.
     const r = await importOfflinePath(p);
     expect(r.items).toHaveLength(1);
     expect(r.items[0].kind).toBe('image');
-    expect(r.items[0].url).toBe(pathToFileURL(p).toString());
+    expect(r.items[0].url).toBe(expectedGiftkLocalURL(p));
   });
 
   it('classifies .gif as gif (not image), so the processor picks the right pipeline', async () => {
@@ -78,7 +105,7 @@ describe('importOfflinePath — single media file', () => {
 });
 
 describe('importOfflinePath — html + sibling _files/', () => {
-  it('resolves relative <img>, <video>, <source> refs that exist on disk', async () => {
+  it('resolves relative <img>, <video>, <source> refs that exist on disk (with includeStaticImages)', async () => {
     const filesDir = path.join(tmp, 'page_files');
     fs.mkdirSync(filesDir);
     fs.writeFileSync(path.join(filesDir, 'cover.jpg'), Buffer.from([0]));
@@ -92,15 +119,53 @@ describe('importOfflinePath — html + sibling _files/', () => {
       </body></html>`
     );
 
-    const r = await importOfflinePath(path.join(tmp, 'page.html'));
+    // R-56 — opt static images back in; without this flag .jpg refs
+    // from <img> are filtered out because the result grid would
+    // otherwise be polluted with avatars / sprites / cover art the
+    // user can't usefully process.
+    const r = await importOfflinePath(path.join(tmp, 'page.html'), { includeStaticImages: true });
     expect(r.title).toBe('Saved page');
     expect(r.items).toHaveLength(2);
     expect(r.items.find((i) => i.kind === 'image')?.url).toBe(
-      pathToFileURL(path.join(filesDir, 'cover.jpg')).toString()
+      expectedGiftkLocalURL(path.join(filesDir, 'cover.jpg'))
     );
     expect(r.items.find((i) => i.kind === 'video')?.url).toBe(
-      pathToFileURL(path.join(filesDir, 'clip.mp4')).toString()
+      expectedGiftkLocalURL(path.join(filesDir, 'clip.mp4'))
     );
+  });
+
+  it('default-filters static <img> refs (.jpg/.png/.webp); only video survives', async () => {
+    const filesDir = path.join(tmp, 'page_files');
+    fs.mkdirSync(filesDir);
+    fs.writeFileSync(path.join(filesDir, 'cover.jpg'), Buffer.from([0]));
+    fs.writeFileSync(path.join(filesDir, 'clip.mp4'), Buffer.from([0]));
+
+    fs.writeFileSync(
+      path.join(tmp, 'page.html'),
+      `<!doctype html><html><head><title>P</title></head><body>
+        <img src="page_files/cover.jpg">
+        <video><source src="page_files/clip.mp4" type="video/mp4"></video>
+      </body></html>`
+    );
+
+    const r = await importOfflinePath(path.join(tmp, 'page.html'));
+    expect(r.items).toHaveLength(1);
+    expect(r.items[0].kind).toBe('video');
+  });
+
+  it('keeps GIF <img> refs even with the static-image filter on (default)', async () => {
+    const filesDir = path.join(tmp, 'page_files');
+    fs.mkdirSync(filesDir);
+    fs.writeFileSync(path.join(filesDir, 'spin.gif'), Buffer.from([0]));
+
+    fs.writeFileSync(
+      path.join(tmp, 'page.html'),
+      `<!doctype html><html><body><img src="page_files/spin.gif"></body></html>`
+    );
+
+    const r = await importOfflinePath(path.join(tmp, 'page.html'));
+    expect(r.items).toHaveLength(1);
+    expect(r.items[0].kind).toBe('gif');
   });
 
   it('drops references whose target file is missing', async () => {
@@ -108,7 +173,7 @@ describe('importOfflinePath — html + sibling _files/', () => {
       path.join(tmp, 'page.html'),
       `<!doctype html><html><body><img src="missing.jpg"></body></html>`
     );
-    const r = await importOfflinePath(path.join(tmp, 'page.html'));
+    const r = await importOfflinePath(path.join(tmp, 'page.html'), { includeStaticImages: true });
     expect(r.items).toHaveLength(0);
     expect(r.warnings.length).toBeGreaterThan(0);
   });
@@ -118,7 +183,7 @@ describe('importOfflinePath — html + sibling _files/', () => {
       path.join(tmp, 'page.html'),
       `<!doctype html><html><body><img src="https://cdn.example.com/x.jpg"></body></html>`
     );
-    const r = await importOfflinePath(path.join(tmp, 'page.html'));
+    const r = await importOfflinePath(path.join(tmp, 'page.html'), { includeStaticImages: true });
     expect(r.items).toHaveLength(1);
     expect(r.items[0].url).toBe('https://cdn.example.com/x.jpg');
   });
@@ -132,7 +197,7 @@ describe('importOfflinePath — html + sibling _files/', () => {
         <img src="/etc/hosts">
       </body></html>`
     );
-    const r = await importOfflinePath(path.join(tmp, 'page.html'));
+    const r = await importOfflinePath(path.join(tmp, 'page.html'), { includeStaticImages: true });
     expect(r.items).toHaveLength(0);
   });
 });
@@ -157,7 +222,7 @@ describe('importOfflinePath — directory input', () => {
 });
 
 describe('importOfflinePath — .mhtml', () => {
-  it('parses a tiny multipart/related archive and rewrites refs to staged file:// URLs', async () => {
+  it('parses a tiny multipart/related archive and rewrites refs to staged giftk-local:// URLs (with includeStaticImages)', async () => {
     // Build a minimal mhtml with one html part and one image part.
     // Both base64-encoded so the test is byte-exact.
     const boundary = '----=_NextPart_test';
@@ -190,13 +255,14 @@ describe('importOfflinePath — .mhtml', () => {
     const mhtmlPath = path.join(tmp, 'archive.mhtml');
     fs.writeFileSync(mhtmlPath, lines.join('\r\n'));
 
-    const r = await importOfflinePath(mhtmlPath);
+    // R-56 — .png is a static image, filtered by default. Opt in.
+    const r = await importOfflinePath(mhtmlPath, { includeStaticImages: true });
     expect(r.title).toBe('MHT');
     expect(r.items).toHaveLength(1);
     expect(r.items[0].kind).toBe('image');
     // The img src in the html points to the absolute URL; offlineImport
-    // should rewrite it to the staged file:// for a.png.
-    expect(r.items[0].url.startsWith('file://')).toBe(true);
+    // should rewrite it to the staged giftk-local:// for a.png.
+    expect(r.items[0].url.startsWith('giftk-local://localhost/')).toBe(true);
     expect(r.items[0].url.endsWith('.png')).toBe(true);
   });
 

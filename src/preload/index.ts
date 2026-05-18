@@ -95,10 +95,19 @@ const api = {
    *
    * If `absPath` is omitted, a native file/directory picker pops up.
    * If the picker is cancelled, returns `null`.
+   *
+   * R-56 — `opts.includeStaticImages` (default `false`) controls
+   * whether <img>-sourced .png/.jpg/.webp/.bmp/.avif references make
+   * it into the result. GIFs and <video>/og:video are always kept.
+   * The renderer surfaces this as a checkbox in the offline-import
+   * trigger so by-default-empty saved pages can opt back in.
    */
-  async importOfflinePage(absPath?: string): Promise<SniffResult | null> {
+  async importOfflinePage(
+    absPath?: string,
+    opts?: { includeStaticImages?: boolean }
+  ): Promise<SniffResult | null> {
     if (typeof absPath === 'string') ensureString(absPath, 'absPath');
-    return ipcRenderer.invoke('sniff:offlineImport', absPath);
+    return ipcRenderer.invoke('sniff:offlineImport', absPath, opts ?? {});
   },
   // R-52 — yt-dlp direct sniff. No webview involved at all; the page URL
   // is handed straight to yt-dlp's 1900+ extractors. Returns the same

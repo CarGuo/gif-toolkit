@@ -510,7 +510,9 @@ export async function sniffViaSystemChrome(
       pageUrl,
       title: pageTitle,
       items,
-      warnings: opts.signal?.aborted ? ['用户取消;仅返回截至取消前网络日志命中的媒体'] : []
+      warnings: (opts.signal?.aborted && !finalizedByUser)
+        ? ['用户取消;仅返回截至取消前网络日志命中的媒体']
+        : []
     };
   } finally {
     await cleanup();
