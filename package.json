@@ -83,7 +83,7 @@
         "provider": "github",
         "owner": "CarGuo",
         "repo": "gif-toolkit",
-        "releaseType": "release"
+        "releaseType": "draft"
       }
     ],
     "files": [

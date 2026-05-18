@@ -773,50 +773,22 @@ const App: React.FC = () => {
   }, [processable, progress]);
 
   /**
-   * R-72 — Internal "actually submit" worker. Originally the whole
-   * body of dispatchBatch; extracted so the size-guard modal can
-   * resume dispatch with the user's verdict (which is a Set of media
-   * ids that get forceAllowSmallSide=true on this dispatch only).
-   *
-   * Tasks NOT in `forceAllowIds` keep their original options. Tasks
-   * that were originally flagged as "will-fail" but are NOT in
-   * `forceAllowIds` are dropped from the task list before submit —
-   * the user explicitly opted to skip them. `dropIds` carries that
-   * skip set so we can log it for visibility.
+   * Internal "actually submit" worker. Extracted from `dispatchBatch`
+   * so the prepare-tasks step (apply per-id selections, R-22 long-video
+   * truncation) is decoupled from the IPC plumbing. Earlier revisions
+   * (R-72 modal, R-74 pre-flight banner) needed a way to resume dispatch
+   * with a user-supplied force-allow / skip set; R-75 dropped both
+   * surfaces in favour of the bottom-toolbar bulk button, so this
+   * worker is now a straight pass-through.
    */
   const runDispatch = useCallback(async (
-    tasksIn: ProcessTask[],
-    forceAllowIds: Set<string>,
-    dropIds: Set<string>
+    tasks: ProcessTask[]
   ) => {
     if (!giftk) return;
     const dir = baseOutputDir || outputDir;
-    // Apply the size-guard verdict: drop fully-skipped ids, mark
-    // force-allowed ids on a per-task basis. We don't mutate the
-    // input array — it might be reused if the caller wants to retry.
-    const tasks: ProcessTask[] = tasksIn
-      .filter((t) => !dropIds.has(t.id))
-      .map((t) => {
-        if (forceAllowIds.has(t.id)) {
-          return { ...t, options: { ...t.options, forceAllowSmallSide: true } };
-        }
-        return t;
-      });
     if (tasks.length === 0) {
       setLogs((prev) => [...prev, `[batch] 全部任务被跳过,无可派发项`].slice(-300));
       return;
-    }
-    if (dropIds.size > 0) {
-      setLogs((prev) => [
-        ...prev,
-        `[batch-size-guard] ${dropIds.size} 个尺寸不符任务被用户跳过,实际派发 ${tasks.length} 个`
-      ].slice(-300));
-    }
-    if (forceAllowIds.size > 0) {
-      setLogs((prev) => [
-        ...prev,
-        `[batch-size-guard] ${forceAllowIds.size} 个任务以「强制允许」继续(短边将低于 minSize)`
-      ].slice(-300));
     }
     // R-29 (P1-I): bind taskId → record id BEFORE awaiting startBatch
     // so the very first `process:progress` event from main is routed
@@ -980,8 +952,13 @@ const App: React.FC = () => {
       let willFailCount = 0;
       let unknownCount = 0;
       for (const t of tasks) {
-        const w = t.media.resolved?.width ?? t.media.width ?? 0;
-        const h = t.media.resolved?.height ?? t.media.height ?? 0;
+        // `||` (not `??`) is intentional: some sniffers emit `0` as a
+        // sentinel for "I tried but failed to read the dimension", so
+        // we want to treat 0 the same as missing and fall through to
+        // the next source. `??` would short-circuit on `0` and mask
+        // the still-valid sniffed fields.
+        const w = (t.media.resolved?.width || t.media.width || 0);
+        const h = (t.media.resolved?.height || t.media.height || 0);
         const v = evaluateSizeGuard({ width: w, height: h }, t.options);
         if (v.state === 'will-fail') willFailCount++;
         else if (v.state === 'unknown') unknownCount++;
@@ -993,7 +970,7 @@ const App: React.FC = () => {
         ].slice(-300));
       }
     }
-    await runDispatch(tasks, new Set(), new Set());
+    await runDispatch(tasks);
   }, [processable, options, baseOutputDir, outputDir, runDispatch]);
 
   const onStart = useCallback(async () => {
@@ -1636,28 +1613,44 @@ const App: React.FC = () => {
   // re-running unrelated runtime / network failures with
   // `forceAllowSmallSide=true` would be misleading (the flag only
   // bypasses minSide; it doesn't fix bad URLs).
+  //
+  // Why only `failed` and not `cancelled`? `errorCode` is closed-union
+  // typed and only emitted from the `failed` branch in
+  // [src/main/processor.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor.ts).
+  // `cancelled` rows never carry it, so adding that status here would
+  // be dead-branch noise that confuses future readers.
   const forceAllowFailedMedia = items.filter((m) => {
     const p = progress[m.id];
     return p
-      && (p.status === 'failed' || p.status === 'cancelled')
+      && p.status === 'failed'
       && p.errorCode === 'ASPECT_RATIO_OUT_OF_RANGE';
   });
   const forceAllowFailedCount = forceAllowFailedMedia.length;
+  // Single source-of-truth callback for both the per-row 「强制允许」
+  // button (TaskTable.onForceAllow) and the bulk
+  // 「⚡ 强制全部失败项」 button. Centralising the call shape means
+  // any future override (e.g. an extra log line, a confirm dialog,
+  // a per-row throttle) lands in exactly one place.
+  const forceAllowOne = useCallback(
+    (media: SniffedMedia) => onProcessOne(media, { forceAllowSmallSide: true }),
+    [onProcessOne]
+  );
   const onForceAllowAllFailed = useCallback(async () => {
     if (forceAllowFailedMedia.length === 0) return;
     setLogs((prev) => [
       ...prev,
       `[batch] 一键强制重跑 ${forceAllowFailedMedia.length} 项尺寸不达标任务`
     ].slice(-300));
-    for (const m of forceAllowFailedMedia) {
-      // Fire-and-forget: each call enters the same per-row pipeline
-      // the manual button uses, so progress events update one row
-      // at a time without us needing to track them here. We DO
-      // await sequentially to avoid spamming N concurrent
-      // ffprobe-then-encode pipelines on the main process.
-      await onProcessOne(m, { forceAllowSmallSide: true });
-    }
-  }, [forceAllowFailedMedia, onProcessOne]);
+    // Snapshot the list before iterating: `onProcessOne` flips each
+    // row to `pending`, which removes it from `forceAllowFailedMedia`
+    // on the next render. Since this useCallback closes over the
+    // pre-snapshot array we won't lose entries mid-loop. We also use
+    // Promise.allSettled so a single transient IPC failure doesn't
+    // halt the rest of the bulk operation — main-side concurrency
+    // limits already cap the actual ffprobe-encode pipeline width.
+    const targets = [...forceAllowFailedMedia];
+    await Promise.allSettled(targets.map((m) => forceAllowOne(m)));
+  }, [forceAllowFailedMedia, forceAllowOne]);
   const forceAllowAllTitle = forceAllowFailedCount === 0
     ? '当前没有因尺寸规格被拒的任务;一旦有任务以 ASPECT_RATIO_OUT_OF_RANGE 失败,这里就可以一键全部强制放行重跑'
     : `把 ${forceAllowFailedCount} 项因尺寸规格被拒的任务一次性全部强制重跑(等同逐项点击「强制允许」)`;
@@ -2694,7 +2687,7 @@ const App: React.FC = () => {
               items={items}
               progress={progress}
               onRetry={(m) => onProcessOne(m)}
-              onForceAllow={(m) => onProcessOne(m, { forceAllowSmallSide: true })}
+              onForceAllow={forceAllowOne}
               onManualOptimize={onManualOptimize}
               onCancelOne={onCancelOne}
               onUploadOne={onUploadOne}
@@ -2778,14 +2771,6 @@ const App: React.FC = () => {
           }}
         />
       ) : null}
-
-      {/* R-72 / R-74 / R-75 — earlier revisions experimented with a
-          modal (R-72) and an inline pre-flight banner (R-74) for the
-          size-guard. R-75 replaced both with a passive log warning at
-          dispatch time and a 「⚡ 强制全部失败项」 button in the bottom
-          toolbar. The BatchSizeGuardModal / PreflightBanner files are
-          retained only for backward compatibility with their exported
-          types. */}
 
       {historyDetail ? (
         <HistoryDetailModal

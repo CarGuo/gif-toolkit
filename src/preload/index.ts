@@ -18,9 +18,7 @@ import type {
   UploadStartPayload,
   UploadStartResult,
   UploadTestResult,
-  CapabilityReport,
-  ProbeDimsInput,
-  ProbeDimsResult
+  CapabilityReport
 } from '../shared/types';
 import type { BuildInfo } from '../shared/buildInfo';
 
@@ -207,26 +205,6 @@ const api = {
    */
   async getBuildInfo(): Promise<BuildInfo> {
     return ipcRenderer.invoke('app:buildInfo');
-  },
-  /**
-   * R-74 — Pre-flight ffprobe wrapper. The renderer calls this once
-   * per task BEFORE dispatching the real batch so the size guard can
-   * flag aspect-ratio violations up front and the user can resolve
-   * them with a single 「批量强制允许」 click on the progress banner
-   * instead of clicking 「强制允许」 once per failing task.
-   *
-   * Failures are returned as `{ ok: false, error }` rather than
-   * thrown — see [src/main/index.ts](file:///).
-   */
-  async probeMediaDims(input: ProbeDimsInput): Promise<ProbeDimsResult> {
-    if (!input || typeof input !== 'object') {
-      throw new TypeError('probeMediaDims: input must be an object');
-    }
-    const { input: src, headers, timeoutMs } = input;
-    if (typeof src !== 'string' || !src) {
-      throw new TypeError('probeMediaDims: input.input must be a non-empty string');
-    }
-    return ipcRenderer.invoke('app:probeMediaDims', { input: src, headers, timeoutMs });
   },
   onProgress(cb: (p: TaskProgress) => void): () => void {
     const handler = (_: unknown, payload: TaskProgress) => {
