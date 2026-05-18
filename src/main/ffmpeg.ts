@@ -219,6 +219,28 @@ export async function extractFrameDataUrl(
   const ffmpeg = getFfmpegPath();
   const maxBytes = options.maxBytes ?? 8 * 1024 * 1024;
   const signal = options.signal;
+
+  // R-65 — animated WebP fast path.
+  //
+  // ffmpeg-static's bundled ffmpeg does NOT include a working animated
+  // WebP demuxer: it logs "skipping unsupported chunk: ANIM/ANMF" then
+  // bails with "image data not found". sharp ships its own libwebp and
+  // handles animated WebP natively, so we delegate first-frame extraction
+  // for *.webp inputs to sharp and only fall back to ffmpeg for the
+  // formats it's actually known to decode (gif, video).
+  if (file.toLowerCase().endsWith('.webp')) {
+    if (signal?.aborted) throw makeCancelledError();
+    const buf = await sharp(file, { animated: false, page: 0 })
+      .resize(480, null, { withoutEnlargement: true })
+      .jpeg({ quality: 80 })
+      .toBuffer();
+    if (signal?.aborted) throw makeCancelledError();
+    if (buf.length > maxBytes) {
+      throw new Error(`extract frame failed: output exceeds ${maxBytes} bytes`);
+    }
+    return `data:image/jpeg;base64,${buf.toString('base64')}`;
+  }
+
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       const ce = new Error('cancelled');
@@ -478,7 +500,7 @@ export async function gifsicleOptimize(
   // transcode wrapper so the user gets the same optimisation knobs and
   // a webp output (matching their input format).
   if (!isGifPath(input) || !isGifPath(output)) {
-    return withGifsicleOnPossiblyWebp(input, output, (gifIn, gifOut) =>
+    return withWebpAsGif(input, output, (gifIn, gifOut) =>
       gifsicleOptimize(gifIn, gifOut, lossy, colors, signal)
     );
   }
@@ -530,7 +552,7 @@ export async function gifsicleMethod(
   // rationale. We route the work into a tmp .gif round-trip so the
   // gifsicle CLI is always handed a real gif.
   if (!isGifPath(input) || !isGifPath(output)) {
-    return withGifsicleOnPossiblyWebp(input, output, (gifIn, gifOut) =>
+    return withWebpAsGif(input, output, (gifIn, gifOut) =>
       gifsicleMethod(gifIn, gifOut, method, opts)
     );
   }
@@ -967,8 +989,16 @@ function isGifLikePath(p: string): boolean {
  * cleaned up (success or failure) in the finally block. We never leak
  * temp gifs because the user could be processing many large clips in a
  * row.
+ *
+ * R-65 — the wrapper is now also used by the ffmpeg-only toolbox helpers
+ * (reverse / rotate / crop / trim / speed) because ffmpeg-static's
+ * bundled ffmpeg cannot decode animated WebP at all (it skips ANIM/ANMF
+ * chunks and bails with "image data not found"). Routing webp inputs
+ * through sharp → tmp.gif → ffmpeg/gifsicle → tmp.gif → sharp → webp
+ * sidesteps the broken webp demuxer entirely while keeping the
+ * non-webp fast paths unchanged.
  */
-async function withGifsicleOnPossiblyWebp(
+async function withWebpAsGif(
   input: string,
   output: string,
   work: (gifIn: string, gifOut: string) => Promise<void>
@@ -1049,6 +1079,16 @@ export async function toolboxTrim(
     throw new Error('toolboxTrim: endSec must be greater than startSec');
   }
 
+  // R-65 — animated webp inputs cannot be decoded by ffmpeg-static, so
+  // we route them through the sharp ⇄ tmp.gif wrapper and reuse the
+  // gifsicle frame-range path.
+  if (isWebpPath(input)) {
+    await withWebpAsGif(input, output, (gifIn, gifOut) =>
+      toolboxTrim(gifIn, gifOut, startSec, endSec, opts)
+    );
+    return;
+  }
+
   if (isGifPath(input)) {
     // Trim a gif in the frame domain via gifsicle. We need to translate
     // (startSec, endSec) → frame indices using `gifsicle -I` to read
@@ -1077,7 +1117,11 @@ export async function toolboxTrim(
       if (typeof endSec === 'number' && acc >= endSec) { endIdx = i; break; }
     }
     if (endIdx < startIdx) endIdx = startIdx;
-    await run(gifsicle, ['-O3', `${input}#${startIdx}-${endIdx}`, '-o', output], { signal: opts.signal });
+    // R-65 — gifsicle parses `path#range` as a literal filename, not as
+    // a frame selection. The frame range must be a separate argv entry
+    // following the input file path. Without this split gifsicle bails
+    // with "No such file or directory" on every range.
+    await run(gifsicle, ['-O3', input, `#${startIdx}-${endIdx}`, '-o', output], { signal: opts.signal });
     return;
   }
 
@@ -1103,6 +1147,13 @@ export async function toolboxSpeed(
   const f = clampSpeedFactor(factor);
   if (Math.abs(f - 1) < 1e-3) {
     await fsp.copyFile(input, output);
+    return;
+  }
+  // R-65 — see toolboxTrim for rationale.
+  if (isWebpPath(input)) {
+    await withWebpAsGif(input, output, (gifIn, gifOut) =>
+      toolboxSpeed(gifIn, gifOut, factor, opts)
+    );
     return;
   }
   if (isGifPath(input)) {
@@ -1155,14 +1206,26 @@ export async function toolboxReverse(
 ): Promise<void> {
   if (!REVERSE_AUDIO_MODES.has(audioMode)) audioMode = 'mute';
 
+  // R-65 — see toolboxTrim for rationale.
+  if (isWebpPath(input)) {
+    await withWebpAsGif(input, output, (gifIn, gifOut) =>
+      toolboxReverse(gifIn, gifOut, audioMode, opts)
+    );
+    return;
+  }
+
   if (isGifPath(input)) {
     const gifsicle = getGifsiclePath();
     // Probe frame count, then build an explicit descending range.
     const info = await runCapture(gifsicle, ['-I', input], { signal: opts.signal });
     const count = (info.match(/^\s*\+\s+image\s+#\d+/gm) ?? []).length || 1;
+    // R-65 — gifsicle expects `[input, '#N']` as two argv entries, not
+    // `path#N`. We open the input once at the start and prepend the file
+    // arg, then the per-frame `#N` selectors copy frames in descending
+    // order.
     const frames: string[] = [];
-    for (let i = count - 1; i >= 0; i -= 1) frames.push(`${input}#${i}`);
-    await run(gifsicle, ['-O3', '-U', ...frames, '-o', output], { signal: opts.signal });
+    for (let i = count - 1; i >= 0; i -= 1) frames.push(`#${i}`);
+    await run(gifsicle, ['-O3', '-U', input, ...frames, '-o', output], { signal: opts.signal });
     return;
   }
 
@@ -1208,6 +1271,14 @@ export async function toolboxRotate(
 
   if (deg === 0 && !flipH && !flipV) {
     await fsp.copyFile(input, output);
+    return;
+  }
+
+  // R-65 — see toolboxTrim for rationale.
+  if (isWebpPath(input)) {
+    await withWebpAsGif(input, output, (gifIn, gifOut) =>
+      toolboxRotate(gifIn, gifOut, degrees, flip, opts)
+    );
     return;
   }
 
@@ -1271,6 +1342,14 @@ export async function toolboxCrop(
   const h = Math.max(2, Math.floor(rect.h / 2) * 2);
   // ffmpeg crop filter — note the (w:h:x:y) ordering.
   const vf = `crop=${w}:${h}:${x}:${y}`;
+
+  // R-65 — see toolboxTrim for rationale.
+  if (isWebpPath(input)) {
+    await withWebpAsGif(input, output, (gifIn, gifOut) =>
+      toolboxCrop(gifIn, gifOut, rect, opts)
+    );
+    return;
+  }
 
   const ffmpeg = getFfmpegPath();
   if (isGifPath(input)) {
