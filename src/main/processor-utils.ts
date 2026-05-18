@@ -31,16 +31,16 @@ export function clampConcurrency(n: number | undefined): number {
 /* ------------------------- Aspect-ratio math ------------------------- */
 
 /**
- * Given an image with `(longestSide, shortestSide)` and a target longest
- * side, return what the shortest side will become (rounded) while preserving
- * aspect ratio. Returns 0 when shape is unknown / inputs invalid. When the
- * longest side already fits under the cap, returns the original short side.
+ * Re-exported from shared/sizeGuard.ts so the main process and the
+ * renderer share a single source of truth for the aspect-ratio
+ * projection used by both processor.ts (post-probe) and the R-72
+ * batch pre-flight modal (pre-dispatch).
+ *
+ * If you tweak the formula, change it in shared/sizeGuard.ts only;
+ * the existing tests/main/processor-utils.test.ts and the new
+ * tests/shared/sizeGuard.test.ts both pin the boundary behaviour.
  */
-export function shortSideAfterCap(longest: number, shortest: number, cap: number): number {
-  if (longest <= 0 || shortest <= 0 || cap <= 0) return 0;
-  if (longest <= cap) return shortest;
-  return Math.max(1, Math.round(shortest * (cap / longest)));
-}
+export { shortSideAfterCap } from '../shared/sizeGuard';
 
 /* ------------------------- Compression cache key ------------------------- */
 

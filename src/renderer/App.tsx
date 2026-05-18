@@ -20,6 +20,11 @@ import { PreviewModal } from './components/PreviewModal';
 import { TaskTable } from './components/TaskTable';
 import { LogBox } from './components/LogBox';
 import { BatchSegmentModal, type BatchSegmentEntry } from './components/BatchSegmentModal';
+import {
+  BatchSizeGuardModal,
+  type BatchSizeGuardEntry
+} from './components/BatchSizeGuardModal';
+import { evaluateSizeGuard } from '../shared/sizeGuard';
 import { HistoryPanel } from './components/HistoryPanel';
 import { HistoryDetailModal } from './components/HistoryDetailModal';
 import { ToolboxPanel } from './components/ToolboxPanel';
@@ -136,6 +141,23 @@ const App: React.FC = () => {
     entries: BatchSegmentEntry[];
     list: SniffedMedia[];
     mode: 'fresh' | 'append';
+  } | null>(null);
+  /**
+   * R-72 — pre-flight size-guard modal. Populated by dispatchBatch
+   * when at least one task in the dispatch list would be rejected by
+   * processor.ts' AspectRatioConstraintError check (longest > maxSide
+   * AND projected short side < minSide). The modal lets the user
+   * one-shot 「全部强制允许」 instead of clicking 强制允许 N times in
+   * the task table after the batch fails.
+   *
+   * `pending` carries the tasks already prepared by dispatchBatch so
+   * we can resume the dispatch with the user's verdict without
+   * re-deriving anything (avoids race conditions if `processable`
+   * shifted while the modal was open).
+   */
+  const [sizeGuardModal, setSizeGuardModal] = useState<{
+    entries: BatchSizeGuardEntry[];
+    pendingTasks: ProcessTask[];
   } | null>(null);
   // R-28 #2: which history record (if any) is currently shown in the
   // detail modal. A non-null value mounts <HistoryDetailModal /> over
@@ -771,40 +793,52 @@ const App: React.FC = () => {
     return processable.filter((m) => !progress[m.id]);
   }, [processable, progress]);
 
-  const dispatchBatch = useCallback(async (
-    perIdSelection: Record<string, number[]> | null,
-    // R-43 — override the default `processable` list. When the user
-    // clicks "▶ 追加排队" while a batch is already running, we pass
-    // the `appendable` subset so previously-queued rows aren't
-    // double-submitted. When omitted (the original entry from
-    // onStart / dispatchOnceConfirmed) we still process the full
-    // selection.
-    mediaListOverride?: SniffedMedia[]
+  /**
+   * R-72 — Internal "actually submit" worker. Originally the whole
+   * body of dispatchBatch; extracted so the size-guard modal can
+   * resume dispatch with the user's verdict (which is a Set of media
+   * ids that get forceAllowSmallSide=true on this dispatch only).
+   *
+   * Tasks NOT in `forceAllowIds` keep their original options. Tasks
+   * that were originally flagged as "will-fail" but are NOT in
+   * `forceAllowIds` are dropped from the task list before submit —
+   * the user explicitly opted to skip them. `dropIds` carries that
+   * skip set so we can log it for visibility.
+   */
+  const runDispatch = useCallback(async (
+    tasksIn: ProcessTask[],
+    forceAllowIds: Set<string>,
+    dropIds: Set<string>
   ) => {
     if (!giftk) return;
     const dir = baseOutputDir || outputDir;
-    const sourceList = mediaListOverride ?? processable;
-    const tasks: ProcessTask[] = sourceList.map((m) => {
-      const opt: ProcessOptions = { ...options, outDir: dir };
-      const dur = m.resolved?.durationSec ?? m.durationSec ?? 0;
-      const tooLong = m.kind === 'video' && dur > options.maxSegmentSec;
-      const userExplicit =
-        opt.startSec !== undefined ||
-        opt.endSec !== undefined ||
-        (opt.selectedSegments && opt.selectedSegments.length > 0);
-      // Priority order:
-      // 1. Modal-confirmed selection wins (explicit user choice this batch).
-      // 2. Per-task options.selectedSegments / startSec / endSec already set
-      //    in the OptionsForm or PreviewPanel are honoured untouched.
-      // 3. Long video without any explicit pick → R-22 fallback to [0].
-      if (perIdSelection && perIdSelection[m.id] && perIdSelection[m.id].length > 0) {
-        opt.selectedSegments = perIdSelection[m.id];
-      } else if (tooLong && !userExplicit) {
-        opt.selectedSegments = [0];
-      }
-      return { id: m.id, media: m, options: opt };
-    });
-    if (tasks.length === 0) return;
+    // Apply the size-guard verdict: drop fully-skipped ids, mark
+    // force-allowed ids on a per-task basis. We don't mutate the
+    // input array — it might be reused if the caller wants to retry.
+    const tasks: ProcessTask[] = tasksIn
+      .filter((t) => !dropIds.has(t.id))
+      .map((t) => {
+        if (forceAllowIds.has(t.id)) {
+          return { ...t, options: { ...t.options, forceAllowSmallSide: true } };
+        }
+        return t;
+      });
+    if (tasks.length === 0) {
+      setLogs((prev) => [...prev, `[batch] 全部任务被跳过,无可派发项`].slice(-300));
+      return;
+    }
+    if (dropIds.size > 0) {
+      setLogs((prev) => [
+        ...prev,
+        `[batch-size-guard] ${dropIds.size} 个尺寸不符任务被用户跳过,实际派发 ${tasks.length} 个`
+      ].slice(-300));
+    }
+    if (forceAllowIds.size > 0) {
+      setLogs((prev) => [
+        ...prev,
+        `[batch-size-guard] ${forceAllowIds.size} 个任务以「强制允许」继续(短边将低于 minSize)`
+      ].slice(-300));
+    }
     // R-29 (P1-I): bind taskId → record id BEFORE awaiting startBatch
     // so the very first `process:progress` event from main is routed
     // to the right record. dispatchBatch used to set this AFTER the
@@ -909,7 +943,81 @@ const App: React.FC = () => {
         taskRecordMapRef.current.delete(t.id);
       }
     }
-  }, [processable, options, baseOutputDir, outputDir, result, patchHistory, progress]);
+  }, [options, baseOutputDir, outputDir, result, patchHistory, progress]);
+
+  const dispatchBatch = useCallback(async (
+    perIdSelection: Record<string, number[]> | null,
+    // R-43 — override the default `processable` list. When the user
+    // clicks "▶ 追加排队" while a batch is already running, we pass
+    // the `appendable` subset so previously-queued rows aren't
+    // double-submitted. When omitted (the original entry from
+    // onStart / dispatchOnceConfirmed) we still process the full
+    // selection.
+    mediaListOverride?: SniffedMedia[]
+  ) => {
+    if (!giftk) return;
+    const dir = baseOutputDir || outputDir;
+    const sourceList = mediaListOverride ?? processable;
+    const tasks: ProcessTask[] = sourceList.map((m) => {
+      const opt: ProcessOptions = { ...options, outDir: dir };
+      const dur = m.resolved?.durationSec ?? m.durationSec ?? 0;
+      const tooLong = m.kind === 'video' && dur > options.maxSegmentSec;
+      const userExplicit =
+        opt.startSec !== undefined ||
+        opt.endSec !== undefined ||
+        (opt.selectedSegments && opt.selectedSegments.length > 0);
+      // Priority order:
+      // 1. Modal-confirmed selection wins (explicit user choice this batch).
+      // 2. Per-task options.selectedSegments / startSec / endSec already set
+      //    in the OptionsForm or PreviewPanel are honoured untouched.
+      // 3. Long video without any explicit pick → R-22 fallback to [0].
+      if (perIdSelection && perIdSelection[m.id] && perIdSelection[m.id].length > 0) {
+        opt.selectedSegments = perIdSelection[m.id];
+      } else if (tooLong && !userExplicit) {
+        opt.selectedSegments = [0];
+      }
+      return { id: m.id, media: m, options: opt };
+    });
+    if (tasks.length === 0) return;
+    // R-72 — Pre-flight aspect-ratio guard. For every task that has
+    // sniffed dims, evaluate whether the processor would reject it
+    // (longest > maxSide AND projected short < minSide). Skip the
+    // check entirely when the user has globally pre-set
+    // forceAllowSmallSide on options (an explicit "I know" override
+    // that should not be re-asked). Tasks where dims are unknown
+    // simply pass through — the runtime guard remains the source of
+    // truth and the modal would only be guessing.
+    if (!options.forceAllowSmallSide) {
+      const guardEntries: BatchSizeGuardEntry[] = [];
+      for (const t of tasks) {
+        // Prefer resolved dims (HEAD/probe-confirmed) over sniffed
+        // ones. Either may be missing depending on source.
+        const w = t.media.resolved?.width ?? t.media.width;
+        const h = t.media.resolved?.height ?? t.media.height;
+        const verdict = evaluateSizeGuard({ width: w, height: h }, options);
+        if (verdict.state === 'will-fail') {
+          guardEntries.push({
+            media: t.media,
+            origW: verdict.origW,
+            origH: verdict.origH,
+            maxSide: verdict.maxSide,
+            minSide: verdict.minSide,
+            shortSideAtMax: verdict.shortSideAtMax
+          });
+        }
+      }
+      if (guardEntries.length > 0) {
+        // Park the prepared tasks; user verdict from the modal
+        // resumes via setSizeGuardModal(null) + runDispatch.
+        setSizeGuardModal({
+          entries: guardEntries,
+          pendingTasks: tasks
+        });
+        return;
+      }
+    }
+    await runDispatch(tasks, new Set(), new Set());
+  }, [processable, options, baseOutputDir, outputDir, runDispatch]);
 
   const onStart = useCallback(async () => {
     if (!giftk) return;
@@ -2621,6 +2729,39 @@ const App: React.FC = () => {
             } else {
               void dispatchBatch(perId);
             }
+          }}
+        />
+      ) : null}
+
+      {/* R-72 — Pre-flight aspect-ratio modal. Mounted by dispatchBatch
+          when one or more tasks would be rejected by the processor's
+          short-side-after-cap < minSize check. Lets the user one-shot
+          the「全部强制允许」flow instead of clicking 强制允许 N times
+          on individual rows after the batch fails. The modal owns its
+          own selection state; on confirm we receive the set of media
+          ids that opted in to forceAllowSmallSide. Ids in pendingTasks
+          but absent from forceAllowIds are dropped from the dispatch
+          (the user explicitly opted out of those items). */}
+      {sizeGuardModal ? (
+        <BatchSizeGuardModal
+          entries={sizeGuardModal.entries}
+          totalTasks={sizeGuardModal.pendingTasks.length}
+          onCancel={() => setSizeGuardModal(null)}
+          onConfirm={(forceAllowIds) => {
+            const pending = sizeGuardModal.pendingTasks;
+            const flaggedIds = new Set(
+              sizeGuardModal.entries.map((e) => e.media.id)
+            );
+            // Drop set = "tasks that the modal flagged as will-fail
+            // AND the user did NOT tick force-allow for". Tasks not
+            // in flaggedIds (the size-compliant majority) always
+            // proceed regardless of the modal verdict.
+            const dropIds = new Set<string>();
+            for (const id of flaggedIds) {
+              if (!forceAllowIds.has(id)) dropIds.add(id);
+            }
+            setSizeGuardModal(null);
+            void runDispatch(pending, forceAllowIds, dropIds);
           }}
         />
       ) : null}
