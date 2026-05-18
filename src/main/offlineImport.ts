@@ -39,6 +39,7 @@ import * as fsp from 'fs/promises';
 import * as os from 'os';
 import * as path from 'path';
 import type { SniffResult, SniffedMedia, MediaKind, SniffProgress } from '../shared/types';
+import { classifyByExt as _classifyByExt } from '../shared/mediaKind';
 import { log } from './logger';
 import { matchEmbedProvider } from './sniffer';
 
@@ -76,9 +77,7 @@ function pathToGiftkLocalURL(absPath: string): string {
   return `giftk-local://localhost${joined}`;
 }
 
-const VIDEO_EXTS = new Set(['.mp4', '.webm', '.m4v', '.mov', '.mkv']);
 const GIF_EXTS = new Set(['.gif']);
-const IMG_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.avif']);
 const HTML_EXTS = new Set(['.html', '.htm']);
 const MHTML_EXTS = new Set(['.mhtml', '.mht']);
 
@@ -114,11 +113,17 @@ function shortId(input: string): string {
 }
 
 function classifyByExt(p: string): MediaKind | null {
-  const ext = path.extname(p).toLowerCase();
-  if (VIDEO_EXTS.has(ext)) return 'video';
-  if (GIF_EXTS.has(ext)) return 'gif';
-  if (IMG_EXTS.has(ext)) return 'image';
-  return null;
+  // R-63 — Delegate to the unified `classifyByExt` over in
+  // `src/shared/mediaKind.ts`. The local helper is retained as a thin
+  // adapter because other call sites in this file (handlers for the
+  // single-file path, html scraper, mhtml part scanner) call it via the
+  // local symbol — replacing every call site would have been a much
+  // wider blast radius. Note the unified version classifies `.webp` as
+  // `'gif'` (animated container), where the pre-R-63 local copy
+  // classified it as `'image'`. For offline import this is the more
+  // correct behaviour: a saved page's `<img src="anim.webp">` should
+  // surface as an animated candidate, not a static image we drop.
+  return _classifyByExt(p);
 }
 
 /**

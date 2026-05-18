@@ -63,18 +63,28 @@ function candidateDirs(): string[] {
   // 1) Packaged: electron-builder asarUnpack mirrors node_modules into
   //    app.asar.unpacked. require.resolve points into app.asar; we replace
   //    the segment so fs operations go to the unpacked copy.
+  //
+  // R-63 — `require.resolve('ytdlp-nodejs/package.json')` throws
+  // ERR_PACKAGE_PATH_NOT_EXPORTED on Node 16+ because ytdlp-nodejs's
+  // `exports` field does not list `./package.json` (the package is
+  // ESM-only and only publicises the main entry). The outer try/catch
+  // swallowed the throw and `dirs` ended up containing only
+  // `userData/bin` — which on a fresh install is empty, so capability
+  // probe + `findInstalledBinary` both reported the binary as missing
+  // and triggered a misleading "yt-dlp 未就绪" toast despite the
+  // bundled `node_modules/ytdlp-nodejs/bin/yt-dlp_macos` (etc.)
+  // existing on disk. Walk the parent dirs instead.
   try {
-    // Resolve via require so it works whether the renderer/main path layout
-    // is `dist/main/...` or `build/...` — we only need the package.json's
-    // directory, not the JS entry.
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const pkgPath = require.resolve('ytdlp-nodejs/package.json');
-    const pkgDir = path.dirname(pkgPath);
-    const unpacked = pkgDir.replace(/[\\/]app\.asar[\\/]/, path.sep + 'app.asar.unpacked' + path.sep);
-    dirs.push(path.join(unpacked, 'bin'));
-    if (unpacked !== pkgDir) {
-      // Dev / unbundled: also keep the original location.
-      dirs.push(path.join(pkgDir, 'bin'));
+    const { findPackageDir } = require('../binaries') as { findPackageDir: (n: string, s?: string) => string | null };
+    const pkgDir = findPackageDir('ytdlp-nodejs');
+    if (pkgDir) {
+      const unpacked = pkgDir.replace(/[\\/]app\.asar[\\/]/, path.sep + 'app.asar.unpacked' + path.sep);
+      dirs.push(path.join(unpacked, 'bin'));
+      if (unpacked !== pkgDir) {
+        // Dev / unbundled: also keep the original location.
+        dirs.push(path.join(pkgDir, 'bin'));
+      }
     }
   } catch { /* ignore — package not resolvable, fall through */ }
   // 2) helpers.BIN_DIR — what `helpers.downloadYtDlp()` would write into
@@ -121,6 +131,42 @@ export function ytdlpBinaryPath(): string {
   if (cachedBinPath) return cachedBinPath;
   const dirs = candidateDirs();
   return path.join(dirs[0] || userBinDir(), platformCandidates()[0]);
+}
+
+/**
+ * R-63 — Synchronous "is any yt-dlp binary present on disk?" probe.
+ *
+ * `ytdlpBinaryPath()` only returns one canonical path which may not be
+ * the one that actually exists (Linux ships `yt-dlp_linux_aarch64`
+ * separately from `yt-dlp`, and the bundled location varies between
+ * dev / packaged / userData fallback). This helper iterates every
+ * candidate dir × platform-candidate filename, returning the first
+ * existing absolute path or null. Used by `getCapabilityReport()` so
+ * capability probe stops emitting a false "yt-dlp 未就绪" toast when
+ * the binary is sitting one directory over from `ytdlpBinaryPath()`.
+ *
+ * Sync (statSync) on purpose — capability probe is a synchronous
+ * boot-time call. The directory tree is shallow so the cost is sub-ms.
+ */
+export function findYtdlpBinarySync(): string | null {
+  if (cachedBinPath) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { statSync } = require('fs') as typeof import('fs');
+      if (statSync(cachedBinPath).isFile()) return cachedBinPath;
+    } catch { /* fall through */ }
+  }
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { statSync } = require('fs') as typeof import('fs');
+  for (const dir of candidateDirs()) {
+    for (const name of platformCandidates()) {
+      const p = path.join(dir, name);
+      try {
+        if (statSync(p).isFile()) return p;
+      } catch { /* not present */ }
+    }
+  }
+  return null;
 }
 
 async function downloadYtDlpInner(targetDir: string): Promise<string> {

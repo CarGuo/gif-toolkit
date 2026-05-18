@@ -422,7 +422,10 @@ export async function sniffViaSystemChrome(
       if (!cand) return;
       const byMime = classifyByContentType(cand.mime);
       const byExt = classifyByExt(cand.url);
-      const accepted = acceptWebviewMedia(byMime || byExt, cand.mime);
+      // R-63 — Pass the URL so `acceptWebviewMedia` can let the
+      // extension override a transcoding-CDN mime header (a `.png`
+      // resource with `Content-Type: image/webp` is image, not gif).
+      const accepted = acceptWebviewMedia(byMime || byExt, cand.mime, cand.url);
       if (!accepted) return;
       const key = webviewDedupKey(cand.url);
       if (captured.has(key)) return;
@@ -735,7 +738,7 @@ export async function sniffViaSystemChrome(
     );
     const dom: Array<{ url: string; kind: MediaKind; pageUrl: string }> = [];
     for (const u of lastDom.media) {
-      const accepted = acceptWebviewMedia(classifyByExt(u), null);
+      const accepted = acceptWebviewMedia(classifyByExt(u), null, u);
       if (!accepted) continue;
       dom.push({ url: u, kind: accepted, pageUrl });
     }

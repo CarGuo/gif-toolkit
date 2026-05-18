@@ -15,10 +15,13 @@
  */
 import crypto from 'crypto';
 import type { SniffedMedia, MediaKind } from '../shared/types';
+import { acceptSniffedKind, classifyByContentType } from '../shared/mediaKind';
 
 const VIDEO_MIME = /^video\//i;
-const GIF_MIME = /^image\/gif$/i;
-const IMAGE_MIME = /^image\//i;
+// Note: GIF_MIME / IMAGE_MIME used to be referenced by the local
+// classifyByContentType / acceptWebviewMedia bodies; in R-63 we
+// delegate both to `src/shared/mediaKind.ts`, leaving only the
+// `VIDEO_MIME` regex as a backstop in the legacy fallback branch.
 
 /** Hard ceiling shared with `webviewSniff.ts` so a hostile auto-loaded
  *  page cannot grow the result set unboundedly. */
@@ -216,40 +219,38 @@ export const FINGERPRINT_PATCH_SCRIPT = `(() => { try {
 } catch (_) { /* swallow — page rendering must continue regardless */ } })();`;
 
 /**
- * R-50 — Strict "what counts as a useful capture" filter.
+ * R-50 (rev R-63) — Strict "what counts as a useful capture" filter.
  *
- * Earlier revisions accepted any `MediaKind` the classifiers returned,
- * which let through bare images (png / jpg / svg / static webp / avif)
- * — useful for general media discovery but distracting in this app
- * whose entire pipeline targets gif and video output. The user
- * explicitly asked for "only gif and video" with a fallback path for
- * URLs that have no extension (decide via mime).
+ * The pre-R-63 implementation took `kind = byMime || byExt` from the
+ * caller, which let `image/webp` mime upgrade a `.png` URL to `'gif'`
+ * (the user reported "明明是 png,结果进来了还写了 gif"). We now route
+ * the decision through the unified `decideAcceptedKind` so the URL
+ * extension is the authoritative source whenever it disagrees with the
+ * Content-Type header.
  *
- * Rules, in order:
- *  1. If `kind` is `'video'` or `'gif'` we already trust the upstream
- *     classifier and accept verbatim.
- *  2. If `kind` is `'image'` we drop it. Static images are not what
- *     this pipeline produces and surface as noise in the grid.
- *  3. If `kind` is `null` (no extension match, e.g. CDN URLs that are
- *     all opaque base64 path segments + query tokens), we fall back
- *     to the response Content-Type:
- *       - any `video/*` → 'video'
- *       - `image/gif` / `image/webp` / `image/apng` → 'gif'
- *         (animated webp/apng are funneled into the gif branch
- *          throughout the rest of the app)
- *       - everything else → reject
- *
- * Returns the resolved kind to use, or `null` if the candidate must be
- * dropped. Pulled out for unit tests.
+ * Public contract is unchanged:
+ *  - returns `'video'` / `'gif'` to keep, `null` to drop
+ *  - the legacy `kind` argument is honoured ONLY when it's `'video'` or
+ *    `'gif'` (DOM-scan path that already trusted its own classifier);
+ *    `'image'` is always dropped, and `null` means "decide for me".
  */
 export function acceptWebviewMedia(
   kind: MediaKind | null,
-  mime: string | null | undefined
+  mime: string | null | undefined,
+  url?: string
 ): 'video' | 'gif' | null {
   if (kind === 'video') return 'video';
   if (kind === 'gif') return 'gif';
   if (kind === 'image') return null;
-  // kind === null branch: rely entirely on the mime header.
+  // kind === null branch: defer to the unified decision so the URL
+  // extension can override a transcoding-CDN mime header.
+  if (typeof url === 'string' && url) {
+    return acceptSniffedKind(null, url, mime ?? null);
+  }
+  // Legacy fallback: callers that don't yet pass the URL still get the
+  // mime-only behaviour (kept for backwards compatibility with one
+  // call site in the DOM-scan path that always supplies a real
+  // `MediaKind` and never reaches this branch).
   if (!mime) return null;
   const head = mime.split(';')[0].trim().toLowerCase();
   if (!head) return null;
@@ -261,25 +262,13 @@ export function acceptWebviewMedia(
 /**
  * Translate a `Content-Type` response header into our 3-way `MediaKind`.
  *
- * We deliberately split GIF out before the generic image branch because
- * the rest of the app branches between gif-only and image-only flows;
- * `image/gif` would otherwise be lumped with stills and lose the
- * animated-resize toolbox affordance.
- *
- * `image/webp` and `image/apng` are also reported as `gif` so the
- * renderer surfaces the animated branch by default — still images get
- * filtered out by the calling code via the `byMime !== 'image'` guard.
+ * R-63 — Now a thin re-export of the unified helper in
+ * `src/shared/mediaKind.ts`. The legacy implementation in this file
+ * was kept identical in semantics; consolidating it removes the risk
+ * that future tweaks to the gif/webp/apng heuristics drift between the
+ * sniffer and the webview helpers.
  */
-export function classifyByContentType(contentType: string | undefined | null): MediaKind | null {
-  if (!contentType) return null;
-  const head = contentType.split(';')[0].trim().toLowerCase();
-  if (!head) return null;
-  if (VIDEO_MIME.test(head)) return 'video';
-  if (GIF_MIME.test(head)) return 'gif';
-  if (head === 'image/webp' || head === 'image/apng') return 'gif';
-  if (IMAGE_MIME.test(head)) return 'image';
-  return null;
-}
+export { classifyByContentType };
 
 /**
  * Pick a deterministic id for a webview-sourced media. Uses sha256 of the

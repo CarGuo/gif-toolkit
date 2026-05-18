@@ -3,17 +3,14 @@ import * as cheerio from 'cheerio';
 import crypto from 'crypto';
 import PQueue from 'p-queue';
 import { URL } from 'url';
-import type { SniffResult, SniffedMedia, MediaKind, SniffProgress } from '../shared/types';
+import type { SniffResult, SniffedMedia, SniffProgress } from '../shared/types';
+import { classifyByExt as _classifyByExt } from '../shared/mediaKind';
 import { log } from './logger';
 import { isPrivateHost } from './helpers';
 import { fetchRenderedDom } from './headlessFetch';
 
 const UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
-
-const VIDEO_EXT = ['.mp4', '.webm', '.m4v', '.mov', '.mkv'];
-const GIF_EXT = ['.gif'];
-const IMG_EXT = ['.png', '.jpg', '.jpeg', '.webp'];
 
 const MAX_HTML_BYTES = 5 * 1024 * 1024;
 const MAX_ITEMS = 200;
@@ -33,13 +30,11 @@ function abs(base: string, link: string): string | null {
   }
 }
 
-export function classifyByExt(url: string): MediaKind | null {
-  const lower = url.split('?')[0].toLowerCase();
-  if (VIDEO_EXT.some((e) => lower.endsWith(e))) return 'video';
-  if (GIF_EXT.some((e) => lower.endsWith(e))) return 'gif';
-  if (IMG_EXT.some((e) => lower.endsWith(e))) return 'image';
-  return null;
-}
+// R-63 — `classifyByExt` is now defined once in `src/shared/mediaKind.ts`
+// and re-exported here so existing call sites (extractFromHtml,
+// systemChromeSniff, webviewSniff) keep working without each
+// independently re-implementing the (url → MediaKind) mapping.
+export const classifyByExt = _classifyByExt;
 
 /**
  * Match well-known video-embed iframe sources by host (and optionally a path

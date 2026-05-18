@@ -1,4 +1,5 @@
-export type MediaKind = 'video' | 'gif' | 'image';
+import type { MediaKind } from './mediaKind';
+export type { MediaKind };
 
 export interface ResolvedMedia {
   /** Direct streamable URL (mp4/m4s/webm/etc) extracted by the resolver. */

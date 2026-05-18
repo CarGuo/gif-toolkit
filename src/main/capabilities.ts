@@ -3,8 +3,8 @@ import path from 'path';
 import { spawnSync } from 'child_process';
 import { app } from 'electron';
 import { log } from './logger';
-import { getFfmpegPath, getFfprobePath, getGifsiclePath } from './binaries';
-import { ytdlpBinaryPath } from './resolver/ytdlp';
+import { getFfmpegPath, getFfprobePath, getGifsiclePath, findPackageDir } from './binaries';
+import { ytdlpBinaryPath, findYtdlpBinarySync } from './resolver/ytdlp';
 import type { CapabilityIssue, CapabilityReport } from '../shared/types';
 
 /**
@@ -74,18 +74,21 @@ function resolveIconPaths(): { png: string | null; ico: string | null } {
  * copy AND whether the per-platform/arch sub-folder physically exists.
  * On ARM Linux the @343dev/gifsicle vendor tree may not include
  * `linux/gifsicle_arm64`, in which case we fall back to system PATH.
+ *
+ * R-63 — Use the walk-up `findPackageDir` helper instead of
+ * `require.resolve('@343dev/gifsicle/package.json')`. The package's
+ * `exports` map omits `./package.json`, so the legacy require throws
+ * ERR_PACKAGE_PATH_NOT_EXPORTED even when the vendor binary is
+ * physically present in `node_modules/@343dev/gifsicle/vendor/<plat>/`.
+ * That false negative was the trigger for the "gifsicle 不可用" toast
+ * in the user's screenshot.
  */
 function gifsicleVendorExists(): boolean {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const pkgJson = require.resolve('@343dev/gifsicle/package.json');
-    const pkgDir = path.dirname(pkgJson);
-    const binaryName = `gifsicle_${process.arch}${process.platform === 'win32' ? '.exe' : ''}`;
-    const binPath = path.join(pkgDir, 'vendor', process.platform, binaryName);
-    return fileExists(binPath);
-  } catch {
-    return false;
-  }
+  const pkgDir = findPackageDir('@343dev/gifsicle');
+  if (!pkgDir) return false;
+  const binaryName = `gifsicle_${process.arch}${process.platform === 'win32' ? '.exe' : ''}`;
+  const binPath = path.join(pkgDir, 'vendor', process.platform, binaryName);
+  return fileExists(binPath);
 }
 
 function buildIssues(opts: {
@@ -223,7 +226,12 @@ export function getCapabilityReport(): CapabilityReport {
   const ffmpegPath = getFfmpegPath();
   const ffprobePath = getFfprobePath();
   const gifsiclePath = getGifsiclePath();
-  const ytdlpPath = ytdlpBinaryPath();
+  // R-63 — Use the iterating sync finder so the probe sees the bundled
+  // binary regardless of which candidate dir it ended up in. Falls back
+  // to the canonical "expected" path for the diagnostics field if
+  // nothing is on disk yet.
+  const ytdlpFound = findYtdlpBinarySync();
+  const ytdlpPath = ytdlpFound ?? ytdlpBinaryPath();
 
   const ffmpeg = probeBinary('ffmpeg', ffmpegPath, ['-version']);
   const ffprobe = probeBinary('ffprobe', ffprobePath, ['-version']);

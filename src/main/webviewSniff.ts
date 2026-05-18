@@ -83,7 +83,11 @@ function attachNetworkRecorder(out: Map<string, CapturedResource>, partition: st
     // extension fall back to the Content-Type header so opaque CDN
     // URLs (`https://cdn.example.com/abc123?token=...`) that serve
     // gifs / mp4s still make it through.
-    const accepted = acceptWebviewMedia(byMime || byExt, ct);
+    // R-63 — pass the URL through so a `.png` request whose CDN
+    // returned `Content-Type: image/webp` (transcoding edge servers do
+    // this) is still rejected as a static image instead of being
+    // promoted to gif.
+    const accepted = acceptWebviewMedia(byMime || byExt, ct, url);
     if (!accepted) return;
     const key = webviewDedupKey(url);
     if (out.has(key)) return;
@@ -552,7 +556,7 @@ export async function openWebviewSniff(
           const dom: Array<{ url: string; kind: MediaKind; pageUrl: string }> = [];
           for (const u of mediaUrls) {
             if (typeof u !== 'string') continue;
-            const accepted = acceptWebviewMedia(classifyByExt(u), null);
+            const accepted = acceptWebviewMedia(classifyByExt(u), null, u);
             if (!accepted) continue;
             dom.push({ url: u, kind: accepted, pageUrl });
           }

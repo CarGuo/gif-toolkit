@@ -1,4 +1,5 @@
 import path from 'path';
+import { existsSync } from 'fs';
 import { spawnSync } from 'child_process';
 import { app } from 'electron';
 import { log } from './logger';
@@ -9,6 +10,35 @@ function resolveBin(staticPath: string | null | undefined, fallbackName: string)
     return staticPath.replace(/app\.asar([\\/]|$)/, 'app.asar.unpacked$1');
   }
   return staticPath;
+}
+
+/**
+ * R-63 — Locate an ESM-only npm package's directory without going
+ * through `require.resolve('<pkg>/package.json')`.
+ *
+ * Why: Node's CJS loader checks the package's `exports` map BEFORE
+ * trying any literal file path. If `exports` doesn't list
+ * `./package.json` (`@343dev/gifsicle` and `ytdlp-nodejs` both omit it),
+ * the call throws ERR_PACKAGE_PATH_NOT_EXPORTED — even though the file
+ * is sitting right there on disk. The thrown error was being swallowed
+ * by an outer try/catch and we were silently falling through to the
+ * "system PATH" branch, which produced spurious "gifsicle 不可用" /
+ * "yt-dlp 未就绪" capability toasts on machines where the bundled
+ * binaries actually existed.
+ *
+ * Walk-up search instead: from `__dirname` (or any caller-provided
+ * start dir) look for `node_modules/<scope>/<name>` going up the tree.
+ * Returns the first match's absolute directory, or `null` if none.
+ */
+export function findPackageDir(pkgName: string, startFrom: string = __dirname): string | null {
+  let cur = startFrom;
+  for (;;) {
+    const candidate = path.join(cur, 'node_modules', ...pkgName.split('/'));
+    if (existsSync(candidate)) return candidate;
+    const parent = path.dirname(cur);
+    if (parent === cur) return null;
+    cur = parent;
+  }
 }
 
 let cachedFfmpeg: string | null = null;
@@ -54,14 +84,27 @@ export function getGifsiclePath(): string {
   // Tier 2: legacy `gifsicle` (imagemin/gifsicle-bin, binary 1.92.x,
   //         lossy support is binary-version dependent — kept only as a
   //         fallback for installs that still have it).
+  //
+  // R-63 — The previous implementation used
+  // `require.resolve('@343dev/gifsicle/package.json')` to find the
+  // package directory. That call throws ERR_PACKAGE_PATH_NOT_EXPORTED
+  // because @343dev/gifsicle's `exports` field does NOT publicise
+  // `./package.json` to CJS consumers — Node 16+ honours the field
+  // strictly. The throw was caught by the outer try/catch and we
+  // silently fell through to the "system PATH" branch, leading to a
+  // false "gifsicle 不可用" capability toast despite the vendor binary
+  // sitting in node_modules. We now do a directory walk-up via
+  // `findPackageDir` which doesn't need a working subpath.
   try {
-    const pkgJson = require.resolve('@343dev/gifsicle/package.json');
-    const pkgDir = path.dirname(pkgJson);
-    const binaryName = `gifsicle_${process.arch}${process.platform === 'win32' ? '.exe' : ''}`;
-    const binPath = path.join(pkgDir, 'vendor', process.platform, binaryName);
-    cachedGifsicle = resolveBin(binPath, 'gifsicle');
-    log(`gifsicle: using @343dev/gifsicle -> ${cachedGifsicle}`);
-    return cachedGifsicle;
+    const pkgDir = findPackageDir('@343dev/gifsicle');
+    if (pkgDir) {
+      const binaryName = `gifsicle_${process.arch}${process.platform === 'win32' ? '.exe' : ''}`;
+      const binPath = path.join(pkgDir, 'vendor', process.platform, binaryName);
+      cachedGifsicle = resolveBin(binPath, 'gifsicle');
+      log(`gifsicle: using @343dev/gifsicle -> ${cachedGifsicle}`);
+      return cachedGifsicle;
+    }
+    log(`gifsicle: @343dev/gifsicle directory not found in node_modules tree`);
   } catch (e) {
     log(`gifsicle: @343dev/gifsicle resolve failed: ${(e as Error).message}`);
   }
