@@ -1,6 +1,6 @@
 import path from 'path';
 import { existsSync } from 'fs';
-import { spawnSync } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import { app } from 'electron';
 import { log } from './logger';
 
@@ -176,6 +176,56 @@ function probeBinary(label: string, bin: string, args: string[]): { ok: boolean;
   }
 }
 
+/**
+ * R-66 — Async, non-blocking variant of `probeBinary`. Used by
+ * `printPathsAsync` so that the diagnostic probe at app startup does
+ * NOT freeze the main process event loop while ETIMEDOUT-prone
+ * binaries (e.g. macOS arm64 ffprobe on first launch) burn through
+ * their 5s timeout — that synchronous wait was what produced the
+ * "彩虹 loading 卡 5 秒" symptom in R-66.
+ */
+function probeBinaryAsync(label: string, bin: string, args: string[]): Promise<{ ok: boolean; version: string }> {
+  return new Promise((resolve) => {
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const finish = (res: { ok: boolean; version: string }): void => {
+      if (settled) return;
+      settled = true;
+      resolve(res);
+    };
+    try {
+      const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      const t = setTimeout(() => {
+        try { child.kill('SIGKILL'); } catch { /* ignore */ }
+        log(`probe ${label}: timeout (path=${bin})`);
+        finish({ ok: false, version: '' });
+      }, 5000);
+      child.stdout?.on('data', (d) => { stdout += d.toString('utf8'); });
+      child.stderr?.on('data', (d) => { stderr += d.toString('utf8'); });
+      child.on('error', (e) => {
+        clearTimeout(t);
+        log(`probe ${label}: spawn error ${e.message} (path=${bin})`);
+        finish({ ok: false, version: '' });
+      });
+      child.on('close', (code) => {
+        clearTimeout(t);
+        const out = `${stdout}\n${stderr}`;
+        const firstLine = out.split(/\r?\n/).find((s) => s.trim().length > 0) || '';
+        if (code === 0 || /version/i.test(firstLine)) {
+          finish({ ok: true, version: firstLine.trim() });
+          return;
+        }
+        log(`probe ${label}: exit ${code} (path=${bin})`);
+        finish({ ok: false, version: firstLine.trim() });
+      });
+    } catch (e) {
+      log(`probe ${label}: throw ${(e as Error).message}`);
+      finish({ ok: false, version: '' });
+    }
+  });
+}
+
 export function printPaths(): { ffmpeg: { path: string; ok: boolean; version: string }; ffprobe: { path: string; ok: boolean; version: string }; gifsicle: { path: string; ok: boolean; version: string } } {
   const ffmpegPath = getFfmpegPath();
   const ffprobePath = getFfprobePath();
@@ -183,6 +233,32 @@ export function printPaths(): { ffmpeg: { path: string; ok: boolean; version: st
   const ffmpeg = probeBinary('ffmpeg', ffmpegPath, ['-version']);
   const ffprobe = probeBinary('ffprobe', ffprobePath, ['-version']);
   const gifsicle = probeBinary('gifsicle', gifsiclePath, ['--version']);
+  log(`binaries: ffmpeg=${ffmpegPath} ok=${ffmpeg.ok} ${ffmpeg.version}`);
+  log(`binaries: ffprobe=${ffprobePath} ok=${ffprobe.ok} ${ffprobe.version}`);
+  log(`binaries: gifsicle=${gifsiclePath} ok=${gifsicle.ok} ${gifsicle.version}`);
+  return {
+    ffmpeg: { path: ffmpegPath, ...ffmpeg },
+    ffprobe: { path: ffprobePath, ...ffprobe },
+    gifsicle: { path: gifsiclePath, ...gifsicle }
+  };
+}
+
+/**
+ * R-66 — Async, non-blocking variant of `printPaths`. Use this from
+ * the app startup chain so the main process event loop isn't frozen
+ * by ETIMEDOUT-prone `--version` probes (the user-reported "彩虹
+ * loading 卡 5 秒" symptom). The synchronous `printPaths` is kept
+ * for tests that want a deterministic snapshot.
+ */
+export async function printPathsAsync(): Promise<{ ffmpeg: { path: string; ok: boolean; version: string }; ffprobe: { path: string; ok: boolean; version: string }; gifsicle: { path: string; ok: boolean; version: string } }> {
+  const ffmpegPath = getFfmpegPath();
+  const ffprobePath = getFfprobePath();
+  const gifsiclePath = getGifsiclePath();
+  const [ffmpeg, ffprobe, gifsicle] = await Promise.all([
+    probeBinaryAsync('ffmpeg', ffmpegPath, ['-version']),
+    probeBinaryAsync('ffprobe', ffprobePath, ['-version']),
+    probeBinaryAsync('gifsicle', gifsiclePath, ['--version'])
+  ]);
   log(`binaries: ffmpeg=${ffmpegPath} ok=${ffmpeg.ok} ${ffmpeg.version}`);
   log(`binaries: ffprobe=${ffprobePath} ok=${ffprobe.ok} ${ffprobe.version}`);
   log(`binaries: gifsicle=${gifsiclePath} ok=${gifsicle.ok} ${gifsicle.version}`);

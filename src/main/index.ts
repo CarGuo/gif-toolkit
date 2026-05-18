@@ -10,7 +10,7 @@ import { sniffViaYtdlp } from './ytdlpDirectSniff';
 import { previewMedia, startBatch, cancelAllTasks, cancelTask, prefetchThumbnail, startToolbox } from './processor';
 import { killAllProcs, probe as probeMedia, extractFrameDataUrl } from './ffmpeg';
 import { log } from './logger';
-import { printPaths } from './binaries';
+import { printPathsAsync } from './binaries';
 import { getCapabilityReport } from './capabilities';
 import { registerUploaderIpc } from './uploader';
 import { DEFAULT_OPTIONS, TOOLBOX_INPUT_EXTENSIONS } from '../shared/types';
@@ -562,6 +562,7 @@ function resolveAppIconPath(): string | undefined {
 }
 
 async function createWindow(): Promise<void> {
+  const t0 = Date.now();
   const iconPath = resolveAppIconPath();
 
   // R-64 — `show: false` + `ready-to-show` so the user never sees an
@@ -594,6 +595,7 @@ async function createWindow(): Promise<void> {
   });
 
   mainWindow.once('ready-to-show', () => {
+    log(`createWindow: ready-to-show after ${Date.now() - t0}ms`);
     mainWindow?.show();
   });
 
@@ -638,10 +640,21 @@ async function createWindow(): Promise<void> {
   session.defaultSession.setPermissionRequestHandler((_wc, _perm, cb) => cb(false));
 
   if (process.env.NODE_ENV === 'development') {
-    await mainWindow.loadURL('http://localhost:5173');
+    // R-66 — Fire-and-forget: do NOT await loadURL. The renderer is
+    // hidden by `show: false` until `ready-to-show` fires anyway, so
+    // awaiting Vite's cold compile (1-3s) only blocks the
+    // `whenReady` chain unnecessarily and prolongs the macOS bouncing-
+    // dock-icon / "rainbow cursor" window. Errors are logged but
+    // never thrown — there's no graceful recovery from a missing dev
+    // server in dev mode anyway.
+    mainWindow.loadURL('http://localhost:5173').catch((e) => {
+      log(`loadURL failed: ${(e as Error).message}`);
+    });
     mainWindow.webContents.openDevTools({ mode: 'detach' });
   } else {
-    await mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
+    mainWindow.loadFile(path.join(__dirname, '../renderer/index.html')).catch((e) => {
+      log(`loadFile failed: ${(e as Error).message}`);
+    });
   }
 }
 
@@ -1084,7 +1097,7 @@ ipcMain.handle('app:defaultDir', async () => {
  * on startup and renders one toast per `issues[]` entry.
  */
 ipcMain.handle('system:capabilities', async () => {
-  return getCapabilityReport();
+  return await getCapabilityReport();
 });
 
 /**
@@ -1340,6 +1353,11 @@ if (!gotLock) {
   });
 
   app.whenReady().then(async () => {
+    const T0 = Date.now();
+    const tick = (label: string): void => {
+      log(`whenReady[+${Date.now() - T0}ms] ${label}`);
+    };
+    tick('start');
     // R-64 — Set the macOS Dock icon SYNCHRONOUSLY at the very top of
     // `whenReady` so the user never sees the Electron atom logo. The
     // setIcon inside `createWindow()` is too late: by the time await
@@ -1353,9 +1371,12 @@ if (!gotLock) {
         try {
           const dock = (app as unknown as { dock?: { setIcon: (p: string) => void } }).dock;
           dock?.setIcon(ico);
+          tick(`dock.setIcon ok ${ico}`);
         } catch (e) {
           log(`early dock.setIcon failed: ${(e as Error).message}`);
         }
+      } else {
+        tick(`dock.setIcon skipped (icon=${ico ?? 'none'})`);
       }
     }
 
@@ -1364,6 +1385,7 @@ if (!gotLock) {
       await fsp.mkdir(def, { recursive: true }).catch(() => undefined);
       allowedOutputDirs.add(def);
     }
+    tick('mkdir + allowedOutputDirs');
 
     // R-56 — Register the giftk-local:// fetch handler. Resolves
     // `giftk-local://localhost/<urlencoded-abs-path>` back to a real
@@ -1403,6 +1425,7 @@ if (!gotLock) {
         return new Response(`giftk-local: ${(e as Error).message}`, { status: 500 });
       }
     });
+    tick('protocol.handle giftk-local');
 
     // R-45 — wire upload IPC (settings persistence + per-job upload
     // streaming). Shares the same `allowedOutputDirs` set so upload
@@ -1412,6 +1435,7 @@ if (!gotLock) {
       isPathInside,
       defaultOutDir
     });
+    tick('registerUploaderIpc');
 
     // Strict CSP for renderer — packaged uses tight policy; dev keeps loose.
     // R-56 — `giftk-local:` is allow-listed for img-src / media-src so
@@ -1428,17 +1452,25 @@ if (!gotLock) {
         }
       });
     });
+    tick('CSP middleware registered');
 
     await createWindow();
+    tick('createWindow returned');
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
     log('app ready');
-    try {
-      printPaths();
-    } catch (e) {
+    // R-66 — Run the binary diagnostic probe in a non-blocking way so
+    // the main process event loop isn't frozen while ETIMEDOUT-prone
+    // binaries (e.g. macOS arm64 ffprobe-static first-launch) burn
+    // their 5s timeout. The previous synchronous `printPaths()` was
+    // exactly the source of the user-reported "彩虹 loading 卡 5 秒"
+    // — it ran inside `whenReady` after window creation but its
+    // spawnSync calls froze webContents painting until the timeouts
+    // settled.
+    void printPathsAsync().catch((e) => {
       log(`binaries probe failed: ${(e as Error).message}`);
-    }
+    });
   });
 }
 
