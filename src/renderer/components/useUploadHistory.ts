@@ -22,6 +22,7 @@ import type {
   UploadProgress,
   UploadStatus
 } from '../../shared/types';
+import { readVersionedStorage, writeVersionedStorage } from './storageSchema';
 
 export const UPLOAD_HISTORY_STORAGE_KEY = 'giftk.uploadHistory.v1';
 // R-54 — Per the user's product feedback we now保存 ALL upload history
@@ -34,6 +35,15 @@ export const UPLOAD_HISTORY_PAGE_SIZE = 20;
 /** @deprecated R-54 — use {@link UPLOAD_HISTORY_PAGE_SIZE} for paging. */
 export const UPLOAD_HISTORY_MAX_ENTRIES = Number.POSITIVE_INFINITY;
 
+/**
+ * R-79b — see [storageSchema.ts](./storageSchema.ts) for the full
+ * version-contract rationale. Currently version 1 with no migrations
+ * defined; the existing on-disk shape *is* v1 and legacy bare-array
+ * blobs are accepted as v0 by the shared reader.
+ */
+export const UPLOAD_HISTORY_SCHEMA_VERSION = 1;
+const UPLOAD_HISTORY_MIGRATORS: ReadonlyArray<(prev: unknown[]) => unknown[]> = [];
+
 function genId(): string {
   const r = Math.floor(Math.random() * 0xffffffff).toString(16).padStart(8, '0');
   return `up-${Date.now()}-${r}`;
@@ -41,13 +51,16 @@ function genId(): string {
 
 function readAll(): UploadHistoryRecord[] {
   if (typeof window === 'undefined') return [];
+  // R-79b — same envelope-aware read as useHistory; legacy bare
+  // arrays are auto-lifted to v0 → current.
+  const { payload } = readVersionedStorage<unknown>({
+    key: UPLOAD_HISTORY_STORAGE_KEY,
+    currentVersion: UPLOAD_HISTORY_SCHEMA_VERSION,
+    migrators: UPLOAD_HISTORY_MIGRATORS
+  });
   try {
-    const raw = window.localStorage.getItem(UPLOAD_HISTORY_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
     const out: UploadHistoryRecord[] = [];
-    for (const e of parsed) {
+    for (const e of payload) {
       if (!e || typeof e !== 'object') continue;
       const r = e as Partial<UploadHistoryRecord>;
       if (typeof r.id !== 'string' || typeof r.backend !== 'string' || !Array.isArray(r.items)) continue;
@@ -67,12 +80,11 @@ function readAll(): UploadHistoryRecord[] {
 }
 
 function writeAll(list: UploadHistoryRecord[]): void {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(UPLOAD_HISTORY_STORAGE_KEY, JSON.stringify(list));
-  } catch {
-    try { window.localStorage.removeItem(UPLOAD_HISTORY_STORAGE_KEY); } catch { /* swallow */ }
-  }
+  writeVersionedStorage({
+    key: UPLOAD_HISTORY_STORAGE_KEY,
+    currentVersion: UPLOAD_HISTORY_SCHEMA_VERSION,
+    payload: list
+  });
 }
 
 export interface UseUploadHistoryApi {

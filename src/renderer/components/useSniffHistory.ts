@@ -21,9 +21,18 @@
  *    sniffs doesn't thrash the disk.
  */
 import { useCallback, useEffect, useState } from 'react';
+import { readVersionedStorage, writeVersionedStorage } from './storageSchema';
 
 export const SNIFF_HISTORY_STORAGE_KEY = 'giftk.sniffHistory.v1';
 export const SNIFF_HISTORY_MAX_ENTRIES = 30;
+
+/**
+ * R-79b — see [storageSchema.ts](./storageSchema.ts) for rationale.
+ * Currently version 1 with no migrations defined; legacy bare-array
+ * blobs are accepted as v0 by the shared reader.
+ */
+export const SNIFF_HISTORY_SCHEMA_VERSION = 1;
+const SNIFF_HISTORY_MIGRATORS: ReadonlyArray<(prev: unknown[]) => unknown[]> = [];
 
 /** One entry per *unique URL*. `addOrPromote` dedupes by URL. */
 export interface SniffHistoryEntry {
@@ -43,14 +52,15 @@ export interface SniffHistoryEntry {
 
 function readAll(): SniffHistoryEntry[] {
   if (typeof window === 'undefined') return [];
+  const { payload } = readVersionedStorage<unknown>({
+    key: SNIFF_HISTORY_STORAGE_KEY,
+    currentVersion: SNIFF_HISTORY_SCHEMA_VERSION,
+    migrators: SNIFF_HISTORY_MIGRATORS
+  });
   try {
-    const raw = window.localStorage.getItem(SNIFF_HISTORY_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
     const out: SniffHistoryEntry[] = [];
     const seen = new Set<string>();
-    for (const e of parsed) {
+    for (const e of payload) {
       if (!e || typeof e !== 'object') continue;
       const r = e as Partial<SniffHistoryEntry>;
       if (typeof r.url !== 'string' || !r.url) continue;
@@ -75,19 +85,11 @@ function readAll(): SniffHistoryEntry[] {
 }
 
 function writeAll(list: SniffHistoryEntry[]): void {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(SNIFF_HISTORY_STORAGE_KEY, JSON.stringify(list));
-  } catch {
-    // QuotaExceeded etc. — best-effort recovery (same pattern as
-    // useHistory.ts). The in-memory list is still authoritative.
-    try {
-      window.localStorage.removeItem(SNIFF_HISTORY_STORAGE_KEY);
-      window.localStorage.setItem(SNIFF_HISTORY_STORAGE_KEY, JSON.stringify(list));
-    } catch {
-      /* truly out of room */
-    }
-  }
+  writeVersionedStorage({
+    key: SNIFF_HISTORY_STORAGE_KEY,
+    currentVersion: SNIFF_HISTORY_SCHEMA_VERSION,
+    payload: list
+  });
 }
 
 export interface UseSniffHistoryApi {

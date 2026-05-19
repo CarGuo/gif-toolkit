@@ -1821,20 +1821,145 @@ input[type="text"]:focus { border-color: var(--accent); }
   overflow-y: auto;
 }
 .hist-detail-bottom {
-  flex: 0 0 220px;
+  flex: 0 0 260px;
   display: flex;
+  flex-direction: column;
   border-top: 1px solid var(--border);
   background: var(--panel);
   min-height: 0;
 }
 .hist-detail-bottom > .tasks {
-  flex: 2;
+  flex: 1 1 auto;
   overflow-y: auto;
-  border-right: 1px solid var(--border);
+  min-height: 0;
 }
-.hist-detail-bottom > .logs {
+
+/* R-79b — UploadsSection inside HistoryDetailModal.
+   Replaces the previous inline-style "patch" block so it sits in the
+   same visual language as the rest of the panel (tokens / .ghost
+   button styling / muted typography). Lays out as a slim section
+   with a header row + a scrollable per-output list. */
+.upload-section {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-2);
+  max-height: 180px;
+  min-height: 0;
+}
+.upload-section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.upload-section-title {
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+.upload-section-meta {
+  font-size: 11px;
+  color: var(--muted);
+}
+.upload-section-spacer {
   flex: 1;
+}
+.upload-section-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   overflow-y: auto;
+  min-height: 0;
+}
+.upload-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+.upload-row:hover { background: var(--panel-2); }
+.upload-row-icon {
+  width: 16px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted);
+}
+.upload-row-icon.done { color: var(--good); }
+.upload-row-icon.failed { color: var(--bad); }
+.upload-row-icon.cancelled { color: var(--warn); }
+.upload-row-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.upload-row-backend {
+  font-size: 10px;
+  color: var(--muted);
+}
+.upload-row-reused {
+  font-size: 10px;
+  color: var(--good);
+  padding: 1px 6px;
+  background: rgba(63, 191, 127, 0.14);
+  border-radius: 4px;
+}
+.upload-row-error {
+  font-size: 11px;
+  color: var(--bad);
+}
+.upload-row .ghost {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  padding: 2px 8px;
+  font-size: 11px;
+  border-radius: 4px;
+}
+.upload-row .ghost:hover {
+  background: var(--panel);
+  color: var(--text);
+}
+
+/* R-79b — collapsible log strip inside HistoryDetailModal.
+   Mirrors the home-view `.bottom-toolbar` toggle pattern:
+   a slim header row with a `📋 日志 (N) ▾/▸` button, the LogBox
+   only renders when expanded. Persisted to localStorage under
+   `giftk.histDetailLogsVisible`. */
+.hist-detail-logbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  font-size: 12px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-2);
+}
+.hist-detail-logbar .ghost {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  padding: 2px 8px;
+  font-size: 11px;
+  border-radius: 4px;
+}
+.hist-detail-logbar .ghost:hover {
+  background: var(--panel);
+  color: var(--text);
+}
+.hist-detail-bottom .logs {
+  flex: 0 0 auto;
+  max-height: 180px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
 }
 
 /* R-33 — manual two-stage optimize modal */

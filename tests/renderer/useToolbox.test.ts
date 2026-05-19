@@ -443,12 +443,14 @@ describe('useToolbox', () => {
     expect(result.current.toolboxHistory).toHaveLength(1);
 
     // Persisted blob lives in localStorage under the well-known key.
+    // R-79b: now wrapped in `{version, payload}` envelope.
     const raw = window.localStorage.getItem(TOOLBOX_HISTORY_STORAGE_KEY);
     expect(raw).toBeTruthy();
     const parsed = JSON.parse(raw as string);
-    expect(Array.isArray(parsed)).toBe(true);
-    expect(parsed).toHaveLength(1);
-    expect(parsed[0]).toMatchObject({ inputPath: '/a/clip.mp4', status: 'done' });
+    expect(parsed.version).toBe(1);
+    expect(Array.isArray(parsed.payload)).toBe(true);
+    expect(parsed.payload).toHaveLength(1);
+    expect(parsed.payload[0]).toMatchObject({ inputPath: '/a/clip.mp4', status: 'done' });
 
     unmount();
     // Re-mount; the new hook instance reads localStorage on init.
@@ -484,7 +486,7 @@ describe('useToolbox', () => {
     });
     expect(result.current.toolboxHistory).toHaveLength(0);
     const raw = window.localStorage.getItem(TOOLBOX_HISTORY_STORAGE_KEY);
-    expect(raw).toBe('[]');
+    expect(raw).toBe('{"version":1,"payload":[]}');
   });
 
   it('duplicate done events for the same id are idempotent', async () => {

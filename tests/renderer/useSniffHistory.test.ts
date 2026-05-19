@@ -132,7 +132,7 @@ describe('useSniffHistory', () => {
     expect(result.current.entries).toEqual([]);
     await flushPersist();
     const raw = window.localStorage.getItem(SNIFF_HISTORY_STORAGE_KEY);
-    expect(raw).toBe('[]');
+    expect(raw).toBe('{"version":1,"payload":[]}');
   });
 
   it('persists across remount', async () => {

@@ -204,10 +204,12 @@ describe('useHistory hook', () => {
       first.result.current.pushOrReplace(rec('b', 2000));
     });
     await flushPersist();
-    // Confirm raw storage shape.
+    // Confirm raw storage shape — R-79b wraps in `{version, payload}` envelope.
     const raw = window.localStorage.getItem(HISTORY_STORAGE_KEY);
     expect(raw).toBeTruthy();
-    expect(JSON.parse(raw as string)).toHaveLength(2);
+    const env = JSON.parse(raw as string);
+    expect(env.version).toBe(1);
+    expect(env.payload).toHaveLength(2);
     // New mount reads back the same list.
     const second = renderHook(() => useHistory());
     expect(second.result.current.history.map((r) => r.id)).toEqual(['b', 'a']);
@@ -237,7 +239,7 @@ describe('useHistory hook', () => {
     act(() => result.current.clear());
     expect(result.current.history).toEqual([]);
     await flushPersist();
-    expect(window.localStorage.getItem(HISTORY_STORAGE_KEY)).toBe('[]');
+    expect(window.localStorage.getItem(HISTORY_STORAGE_KEY)).toBe('{"version":1,"payload":[]}');
   });
 
   it('drops malformed entries during hydration', () => {
@@ -300,6 +302,6 @@ describe('useHistory hook', () => {
     // Disk should now also have it (reload's flush wrote it through).
     const raw = window.localStorage.getItem(HISTORY_STORAGE_KEY);
     expect(raw).toBeTruthy();
-    expect(JSON.parse(raw as string).map((r: { id: string }) => r.id)).toEqual(['a']);
+    expect(JSON.parse(raw as string).payload.map((r: { id: string }) => r.id)).toEqual(['a']);
   });
 });

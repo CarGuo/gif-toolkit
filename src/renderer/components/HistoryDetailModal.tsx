@@ -66,6 +66,13 @@ import { backendLabel } from './useUploadHistory';
 
 const giftk = (typeof window !== 'undefined' ? window.giftk : undefined);
 
+// R-79b — separate localStorage key from the home view's
+// `giftk.logsVisible` so the two preferences can be remembered
+// independently. The history detail panel is a transient modal where
+// the user usually only wants logs on demand, while the home view's
+// preference is more "always on / always off".
+const HIST_DETAIL_LOGS_VISIBLE_KEY = 'giftk.histDetailLogsVisible';
+
 export interface HistoryDetailModalProps {
   rec: HistoryRecord;
   /** Live progress map shared with the rest of the app. The modal
@@ -157,6 +164,28 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
     return next;
   });
   const [activeId, setActiveId] = useState<string | null>(null);
+
+  // R-79b — collapsible log strip. Default *collapsed* so the modal
+  // body can give all 220-260px of bottom space to the TaskTable +
+  // UploadsSection (which the user actually wants to see). Persists
+  // the user's choice independently from the home view's logsVisible.
+  const [logsVisible, setLogsVisible] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      return window.localStorage.getItem(HIST_DETAIL_LOGS_VISIBLE_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
+  const toggleLogs = useCallback(() => {
+    setLogsVisible((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem(HIST_DETAIL_LOGS_VISIBLE_KEY, next ? '1' : '0');
+      } catch { /* ignore */ }
+      return next;
+    });
+  }, []);
 
   // R-29 (P0-D): the embedded PreviewModal needs its own copy of the
   // options so per-item tweaks (cropRect, startSec/endSec, etc.) made
@@ -431,7 +460,23 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
               onUpload={onUploadFromRecord}
               uploadConfigured={isUploadConfigured}
             />
-            <LogBox lines={recordLogs} />
+            {/* R-79b — log strip mirrors the home view's bottom
+                toolbar pattern: a slim header row with a toggle
+                button + an optional LogBox below. Default collapsed
+                so the modal body keeps real estate for the things
+                the user actually wants (TaskTable + uploads). */}
+            <div className="hist-detail-logbar">
+              <button
+                type="button"
+                className="ghost"
+                onClick={toggleLogs}
+                aria-pressed={logsVisible}
+                title={logsVisible ? '隐藏日志面板' : '展开日志面板'}
+              >
+                📋 日志{recordLogs.length > 0 ? ` (${recordLogs.length})` : ''}{logsVisible ? ' ▾' : ' ▸'}
+              </button>
+            </div>
+            {logsVisible ? <LogBox lines={recordLogs} /> : null}
           </div>
         </div>
       </div>
@@ -505,6 +550,16 @@ void giftk;
  * Pure-presentational: receives an `onUpload` callback the parent
  * piped down, so the modal stays decoupled from the dispatchUpload
  * implementation in App.tsx.
+ *
+ * R-79b — Visual rewrite. The previous build used inline `style={…}`
+ * for every node, which gave a jarring "stuck-on UI block" look that
+ * didn't match the rest of the modal. We now route everything through
+ * `.upload-section` / `.upload-row` / `.ghost` classes in styles.css,
+ * so the section uses the same design tokens (--bg-2 / --border /
+ * --muted / --good / --bad) and button styling as the home view's
+ * bottom toolbar. Functional behaviour is unchanged — the same
+ * onUpload callback, the same enable/disable logic, the same bulk
+ * action.
  */
 const UploadsSection: React.FC<{
   rec: HistoryRecord;
@@ -555,24 +610,16 @@ const UploadsSection: React.FC<{
         : `把本记录里 ${pendingPlan.length} 个未上传的产物全部派发到当前默认图床`;
 
   return (
-    <div
-      style={{
-        marginTop: 8,
-        padding: 8,
-        border: '1px solid rgba(255,255,255,0.08)',
-        borderRadius: 6,
-        background: 'rgba(255,255,255,0.02)'
-      }}
-      role="region"
-      aria-label="上传记录"
-    >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-        <strong style={{ fontSize: 12 }}>📤 上传记录</strong>
-        <span style={{ fontSize: 11, color: 'var(--muted)' }}>
+    <div className="upload-section" role="region" aria-label="上传记录">
+      <div className="upload-section-header">
+        <span className="upload-section-title">📤 上传记录</span>
+        <span className="upload-section-meta">
           {flat.length} 个产物 · {flat.length - pendingPlan.length} 已上传 / {pendingPlan.length} 未传
         </span>
-        <span style={{ flex: 1 }} />
+        <span className="upload-section-spacer" />
         <button
+          type="button"
+          className="ghost"
           onClick={onUploadAllPending}
           disabled={!onUpload || !uploadConfigured || allUploadDone}
           aria-disabled={!onUpload || !uploadConfigured || allUploadDone}
@@ -581,7 +628,7 @@ const UploadsSection: React.FC<{
           ⚡ 一键上传未传产物
         </button>
       </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <div className="upload-section-list">
         {flat.map((row) => {
           const u = ups[row.filePath];
           const fileName = row.filePath.split(/[\\/]/).pop() || row.filePath;
@@ -595,66 +642,59 @@ const UploadsSection: React.FC<{
             if (!onUpload) return;
             onUpload(rec, [row]);
           };
+          const iconClass =
+            u?.status === 'done' ? 'done'
+              : u?.status === 'failed' ? 'failed'
+                : u?.status === 'cancelled' ? 'cancelled'
+                  : '';
+          const iconText =
+            u?.status === 'done' ? '☁'
+              : u?.status === 'failed' ? '✖'
+                : u?.status === 'cancelled' ? '⊘'
+                  : '·';
           return (
-            <div
-              key={row.filePath}
-              style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}
-            >
-              <span style={{ width: 14 }}>
-                {u?.status === 'done' ? '☁' : u?.status === 'failed' ? '✖' : u?.status === 'cancelled' ? '⊘' : '·'}
+            <div key={row.filePath} className="upload-row">
+              <span className={`upload-row-icon ${iconClass}`} aria-hidden>
+                {iconText}
               </span>
-              <span
-                style={{
-                  flex: 1,
-                  minWidth: 0,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap'
-                }}
-                title={row.filePath}
-              >
+              <span className="upload-row-name" title={row.filePath}>
                 {fileName}
               </span>
               {u && u.status === 'done' && u.url ? (
                 <>
                   <span
+                    className="upload-row-backend"
                     title={`已上传到 ${backendLabel(u.backend)} · ${new Date(u.uploadedAt).toLocaleString()}`}
-                    style={{ fontSize: 10, color: 'var(--muted)' }}
                   >
                     {backendLabel(u.backend)}
                   </span>
                   {u.reused ? (
                     <span
+                      className="upload-row-reused"
                       title={`hash 命中,复用了上次的远程地址${u.fileHash ? ` (sha ${u.fileHash.slice(0, 8)}…)` : ''}`}
-                      style={{
-                        fontSize: 10,
-                        color: '#7bd47b',
-                        padding: '1px 5px',
-                        background: 'rgba(123,212,123,0.12)',
-                        borderRadius: 4
-                      }}
                     >
                       ♻️ 复用
                     </span>
                   ) : null}
-                  <button onClick={onCopyUrl} style={{ fontSize: 10, padding: '2px 6px' }} title="复制 URL">
+                  <button type="button" className="ghost" onClick={onCopyUrl} title="复制 URL">
                     复制 url
                   </button>
                   {u.markdown ? (
-                    <button onClick={onCopyMd} style={{ fontSize: 10, padding: '2px 6px' }} title="复制 markdown">
+                    <button type="button" className="ghost" onClick={onCopyMd} title="复制 markdown">
                       复制 md
                     </button>
                   ) : null}
                 </>
               ) : u && u.status !== 'done' ? (
                 <>
-                  <span style={{ fontSize: 11, color: '#ef5b6e' }} title={u.status}>
+                  <span className="upload-row-error" title={u.status}>
                     上传 {u.status}
                   </span>
                   <button
+                    type="button"
+                    className="ghost"
                     onClick={onUploadOne}
                     disabled={!onUpload || !uploadConfigured}
-                    style={{ fontSize: 10, padding: '2px 6px' }}
                     title={!uploadConfigured ? '先去「📤 上传设置」里配置可用图床' : '重新上传该产物'}
                   >
                     📤 重传
@@ -662,9 +702,10 @@ const UploadsSection: React.FC<{
                 </>
               ) : (
                 <button
+                  type="button"
+                  className="ghost"
                   onClick={onUploadOne}
                   disabled={!onUpload || !uploadConfigured}
-                  style={{ fontSize: 10, padding: '2px 6px' }}
                   title={!uploadConfigured ? '先去「📤 上传设置」里配置可用图床' : '把该产物上传到当前默认图床'}
                 >
                   📤 上传

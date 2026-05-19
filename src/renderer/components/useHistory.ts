@@ -34,9 +34,35 @@ import type {
   UploadStatus
 } from '../../shared/types';
 import { DEFAULT_OPTIONS } from '../../shared/types';
+import { readVersionedStorage, writeVersionedStorage } from './storageSchema';
 
 export const HISTORY_STORAGE_KEY = 'giftk.history.v1';
 export const HISTORY_MAX_ENTRIES = 30;
+
+/**
+ * R-79b — Schema version of the on-disk envelope. The localStorage
+ * key suffix `.v1` is a *legacy* indicator (it groups all keys we
+ * own under the giftk.* namespace and gives us room for a future
+ * `.v2` *key* if we ever do an incompatible breaking change). The
+ * actual upgrade contract lives in this in-payload `version` field
+ * + the `migrators` array below; bumping `HISTORY_SCHEMA_VERSION`
+ * and adding a new entry to `migrators` is how we evolve the shape
+ * without orphaning user data.
+ *
+ * Currently version 1 (no migrations defined) — the existing on-
+ * disk shape *is* the v1 shape; legacy bare-array blobs are
+ * accepted by `readVersionedStorage` as v0 and lifted to v1 with
+ * no transformation needed (R-54's `uploadsByOutputPath` is
+ * optional and the per-row defensive parser handles missing keys).
+ */
+export const HISTORY_SCHEMA_VERSION = 1;
+const HISTORY_MIGRATORS: ReadonlyArray<(prev: unknown[]) => unknown[]> = [
+  // index 0 — unused (no "upgrade to v0").
+  // index 1 — would be `(rows) => rows.map(legacyToV1)` once we
+  //   define a v0 → v1 transformation. For now the lift is the
+  //   identity function, handled implicitly by the per-row parser
+  //   in readAll below (it normalises optional fields).
+];
 
 /**
  * R-54 — One upload's outcome, indexed inside HistoryRecord by the
@@ -110,17 +136,23 @@ function genId(): string {
 
 function readAll(): HistoryRecord[] {
   if (typeof window === 'undefined') return [];
+  // R-79b — route through the shared envelope reader. Legacy bare-
+  // array blobs (pre-R-79b writes) are still accepted: the helper
+  // returns them as v0 → migrated to current version. The per-row
+  // defensive parse below is unchanged from the pre-R-79b code so
+  // existing tests still pass with the same fixture data.
+  const { payload } = readVersionedStorage<unknown>({
+    key: HISTORY_STORAGE_KEY,
+    currentVersion: HISTORY_SCHEMA_VERSION,
+    migrators: HISTORY_MIGRATORS
+  });
   try {
-    const raw = window.localStorage.getItem(HISTORY_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
     // Defensive: drop entries missing required shape so a partially
     // corrupted blob doesn't crash the panel. Also normalise optional
     // sub-objects (outputsByTaskId / taskStatus / options) so
     // mergeProgressIntoRecord can safely index them later.
     const out: HistoryRecord[] = [];
-    for (const e of parsed) {
+    for (const e of payload) {
       if (!e || typeof e !== 'object') continue;
       const r = e as Partial<HistoryRecord>;
       if (typeof r.id !== 'string' || typeof r.pageUrl !== 'string' || !Array.isArray(r.items)) {
@@ -155,21 +187,14 @@ function readAll(): HistoryRecord[] {
 }
 
 function writeAll(list: HistoryRecord[]): void {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(list));
-  } catch {
-    // QuotaExceeded / TypeError on circular refs etc. — silently drop.
-    // Best-effort recovery: nuke the key once so the next setItem with
-    // an even smaller list has a clean slate.
-    try {
-      window.localStorage.removeItem(HISTORY_STORAGE_KEY);
-      window.localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(list));
-    } catch {
-      // Truly out of room or storage disabled (privacy mode); the
-      // in-memory copy is still authoritative for this session.
-    }
-  }
+  // R-79b — write the new envelope shape. The shared helper handles
+  // QuotaExceeded (one-shot key delete + retry) so we no longer need
+  // the bespoke recovery branch the pre-R-79b code carried.
+  writeVersionedStorage({
+    key: HISTORY_STORAGE_KEY,
+    currentVersion: HISTORY_SCHEMA_VERSION,
+    payload: list
+  });
 }
 
 export interface UseHistoryApi {

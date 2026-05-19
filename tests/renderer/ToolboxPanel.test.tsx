@@ -448,6 +448,6 @@ describe('ToolboxPanel', () => {
       fireEvent.click(screen.getByText('清空历史'));
     });
     expect(screen.getByText(/历史结果 · 0/)).toBeInTheDocument();
-    expect(window.localStorage.getItem('giftk.toolbox.history.v1')).toBe('[]');
+    expect(window.localStorage.getItem('giftk.toolbox.history.v1')).toBe('{"version":1,"payload":[]}');
   });
 });

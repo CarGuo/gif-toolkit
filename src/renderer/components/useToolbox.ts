@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { TaskProgress, ToolboxJob, ToolboxKind, ToolboxParams } from '../../shared/types';
 import { TOOLBOX_INPUT_EXTENSIONS } from '../../shared/types';
+import { readVersionedStorage, writeVersionedStorage } from './storageSchema';
 
 /**
  * R-35 / R-39 — useToolbox.
@@ -53,6 +54,15 @@ export interface ToolboxHistoryEntry {
 
 export const TOOLBOX_HISTORY_STORAGE_KEY = 'giftk.toolbox.history.v1';
 const TOOLBOX_HISTORY_LIMIT = 200;
+
+/**
+ * R-79b — see [storageSchema.ts](./storageSchema.ts) for the full
+ * version-contract rationale. Currently version 1 with no migrations
+ * defined; the existing on-disk shape *is* v1 and legacy bare-array
+ * blobs are accepted as v0 by the shared reader.
+ */
+export const TOOLBOX_HISTORY_SCHEMA_VERSION = 1;
+const TOOLBOX_HISTORY_MIGRATORS: ReadonlyArray<(prev: unknown[]) => unknown[]> = [];
 
 export interface UseToolboxResult {
   kind: ToolboxKind;
@@ -135,15 +145,18 @@ function genJobId(): string {
 }
 
 /** R-39 — best-effort load. Treats every parse / shape error as "no
- *  history" so a corrupted entry never blocks the panel from booting. */
+ *  history" so a corrupted entry never blocks the panel from booting.
+ *  R-79b — read goes through the shared envelope helper; legacy bare
+ *  arrays are still accepted as v0. */
 function loadHistoryFromStorage(): ToolboxHistoryEntry[] {
   if (typeof window === 'undefined' || !window.localStorage) return [];
+  const { payload } = readVersionedStorage<unknown>({
+    key: TOOLBOX_HISTORY_STORAGE_KEY,
+    currentVersion: TOOLBOX_HISTORY_SCHEMA_VERSION,
+    migrators: TOOLBOX_HISTORY_MIGRATORS
+  });
   try {
-    const raw = window.localStorage.getItem(TOOLBOX_HISTORY_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((e): e is ToolboxHistoryEntry => {
+    return payload.filter((e): e is ToolboxHistoryEntry => {
       if (!e || typeof e !== 'object') return false;
       const x = e as Record<string, unknown>;
       return typeof x.id === 'string' &&
@@ -160,12 +173,11 @@ function loadHistoryFromStorage(): ToolboxHistoryEntry[] {
 }
 
 function saveHistoryToStorage(list: ToolboxHistoryEntry[]): void {
-  if (typeof window === 'undefined' || !window.localStorage) return;
-  try {
-    window.localStorage.setItem(TOOLBOX_HISTORY_STORAGE_KEY, JSON.stringify(list));
-  } catch {
-    /* quota exceeded or storage disabled — silently drop */
-  }
+  writeVersionedStorage({
+    key: TOOLBOX_HISTORY_STORAGE_KEY,
+    currentVersion: TOOLBOX_HISTORY_SCHEMA_VERSION,
+    payload: list
+  });
 }
 
 const TERMINAL: ReadonlySet<TaskProgress['status']> = new Set([
