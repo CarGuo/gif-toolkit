@@ -18,8 +18,7 @@ import type { GifOptimizeLevel, GifDither } from '../shared/types/process';
 import { MediaGrid } from './components/MediaGrid';
 import { OptionsForm } from './components/OptionsForm';
 import { PreviewModal } from './components/PreviewModal';
-import { TaskTable } from './components/TaskTable';
-import { LogBox } from './components/LogBox';
+import { ProgressDock } from './components/ProgressDock';
 import { BatchSegmentModal, type BatchSegmentEntry } from './components/BatchSegmentModal';
 import { HistoryPanel } from './components/HistoryPanel';
 import { HistoryDetailModal } from './components/HistoryDetailModal';
@@ -2182,7 +2181,7 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className={`app${view !== 'home' ? ' app-no-bottom' : ''}`} style={{ ['--bottom-h' as string]: `${bottomH}px` } as React.CSSProperties}>
+    <div className="app" style={{ ['--bottom-h' as string]: `${bottomH}px` } as React.CSSProperties}>
       <div className="titlebar">
         <h1>Gif Toolkit · 网页媒体抓取 · 转换 · 上传</h1>
         <div className="tabs">
@@ -2252,6 +2251,11 @@ const App: React.FC = () => {
       {view === 'home' ? (
       <div className="body">
         <div className="left">
+          {/* R-83 — Sidebar split into [.left-scroll: input/sniff/params/advanced]
+              + [.left-resize-handle] + [<ProgressDock />] so the dock no
+              longer covers the right column. The progress dock height is
+              still driven by --bottom-h via the persisted resize handler. */}
+          <div className="left-scroll">
           <div className="section fixed">
             <h2>1. 输入文章 URL</h2>
             <div className="url-bar">
@@ -2677,6 +2681,45 @@ const App: React.FC = () => {
               </div>
             ) : null}
           </div>
+          </div>
+          {/* R-83 — Sidebar internal splitter. ns-resize handle persists
+              the dock height to localStorage via onBottomResizeStart;
+              double-click resets to BOTTOM_H_DEFAULT. The handler /
+              storage key are kept for backwards compatibility. */}
+          <div
+            className="left-resize-handle"
+            onMouseDown={onBottomResizeStart}
+            onDoubleClick={() => {
+              setBottomH(BOTTOM_H_DEFAULT);
+              try { window.localStorage.setItem(BOTTOM_H_KEY, String(BOTTOM_H_DEFAULT)); } catch { /* ignore */ }
+            }}
+            title="拖动调节高度,双击恢复默认"
+            role="separator"
+            aria-orientation="horizontal"
+          />
+          <ProgressDock
+            title={isHomeBatchProcessing ? '处理进度(运行中)' : '处理进度'}
+            items={items}
+            progress={progress}
+            onRetry={(m) => onProcessOne(m)}
+            onForceAllow={forceAllowOne}
+            onManualOptimize={onManualOptimize}
+            onCancelOne={onCancelOne}
+            onUploadOne={onUploadOne}
+            logs={logs}
+            logsVisible={logsVisible}
+            onToggleLogs={toggleLogs}
+            headerExtras={isHomeBatchProcessing ? (
+              <button
+                className="ghost"
+                onClick={onCancel}
+                title="取消当前批处理与未开始的排队任务"
+                style={{ marginLeft: 8 }}
+              >
+                ✕ 取消批处理
+              </button>
+            ) : null}
+          />
         </div>
 
         <div className="right">
@@ -2699,6 +2742,38 @@ const App: React.FC = () => {
                 }
               >
                 {lastBatchDir ? '打开本次目录' : '打开目录'}
+              </button>
+              {/* R-83 — 产物级批量动作,从底部 ProgressDock toolbar
+                  上移到这里。 ProgressDock 现在专注于「单条任务进度」,
+                  这三个按钮关心的是「全部输出已完成后干嘛」,放在媒体
+                  网格的标题栏更靠近用户的注意力轨迹。 */}
+              <button
+                className="ghost"
+                onClick={() => void onForceAllowAllFailed()}
+                title={forceAllowAllTitle}
+                disabled={forceAllowFailedCount === 0}
+                aria-disabled={forceAllowFailedCount === 0}
+                style={{ marginLeft: 8 }}
+              >
+                ⚡ 强制全部失败项{forceAllowFailedCount > 0 ? ` (${forceAllowFailedCount})` : ''}
+              </button>
+              <button
+                className="ghost"
+                onClick={() => void onUploadAll()}
+                title={uploadAllTitle}
+                disabled={!uploadAllReady}
+                aria-disabled={!uploadAllReady}
+                style={{ marginLeft: 8 }}
+              >
+                ⚡ 上传所有产物{items.length > 0 ? ` (${uploadAllStats.doneCount}/${uploadAllStats.total})` : ''}
+              </button>
+              <button
+                className="ghost"
+                onClick={() => setUploadSettingsOpen(true)}
+                title="配置图床后端(自定义 Web / GitHub / 七牛 / 阿里云 OSS / 腾讯 COS)"
+                style={{ marginLeft: 4 }}
+              >
+                📤 上传设置
               </button>
             </div>
             <div className="grid-scroll">
@@ -2740,97 +2815,6 @@ const App: React.FC = () => {
 
       {view === 'home' ? (
         <>
-          <div
-            className="bottom-resize-handle"
-            onMouseDown={onBottomResizeStart}
-            onDoubleClick={() => {
-              setBottomH(BOTTOM_H_DEFAULT);
-              try { window.localStorage.setItem(BOTTOM_H_KEY, String(BOTTOM_H_DEFAULT)); } catch { /* ignore */ }
-            }}
-            title="拖动调节高度,双击恢复默认"
-            role="separator"
-            aria-orientation="horizontal"
-          />
-          <div className={`bottom${logsVisible ? '' : ' bottom-no-logs'}`}>
-            {/* R-43.1 — 底部工具栏:取消批处理 + 日志开关合并到一行,
-                替代之前那条独立的 "处理进度" header。空闲时仅显示日志
-                toggle;运行批处理时左侧出现取消按钮。 */}
-            <div className="bottom-toolbar">
-              <span className="bottom-toolbar-title">
-                {isHomeBatchProcessing ? '处理进度(运行中)' : '处理进度'}
-              </span>
-              {isHomeBatchProcessing ? (
-                <button
-                  className="ghost"
-                  onClick={onCancel}
-                  title="取消当前批处理与未开始的排队任务"
-                  style={{ marginLeft: 8 }}
-                >
-                  ✕ 取消批处理
-                </button>
-              ) : null}
-              <button
-                className="ghost"
-                onClick={toggleLogs}
-                aria-pressed={logsVisible}
-                title={logsVisible ? '隐藏日志面板' : '展开日志面板'}
-                style={{ marginLeft: 'auto' }}
-              >
-                📋 日志{logs.length > 0 ? ` (${logs.length})` : ''}{logsVisible ? ' ▾' : ' ▸'}
-              </button>
-              {/* R-75 — 「⚡ 强制全部失败项」 bulk force-allow button.
-                  Lives next to 「⚡ 上传所有产物」 in the bottom toolbar
-                  so the user always knows where to find it. The button
-                  becomes clickable the moment one or more tasks fail
-                  with `ASPECT_RATIO_OUT_OF_RANGE` and reverts to
-                  disabled when the queue is fully resolved. Per-row
-                  「强制允许」 still works as the precision tool;
-                  this is just the one-click bulk variant. */}
-              <button
-                className="ghost"
-                onClick={() => void onForceAllowAllFailed()}
-                title={forceAllowAllTitle}
-                disabled={forceAllowFailedCount === 0}
-                aria-disabled={forceAllowFailedCount === 0}
-                style={{ marginLeft: 8 }}
-              >
-                ⚡ 强制全部失败项{forceAllowFailedCount > 0 ? ` (${forceAllowFailedCount})` : ''}
-              </button>
-              {/* R-45 / R-54 — 「⚡ 上传所有产物」+「📤 上传设置」按钮。
-                  R-54 严控 disabled:仅当所有任务都 done 且至少有一个
-                  可上传输出时才可点。未配置图床时按钮仍允许点击,
-                  click handler 会弹「📤 上传设置」并在日志里写明。
-                  这样用户得到的是即时引导,而不是无声禁用。 */}
-              <button
-                className="ghost"
-                onClick={() => void onUploadAll()}
-                title={uploadAllTitle}
-                disabled={!uploadAllReady}
-                aria-disabled={!uploadAllReady}
-                style={{ marginLeft: 8 }}
-              >
-                ⚡ 上传所有产物{items.length > 0 ? ` (${uploadAllStats.doneCount}/${uploadAllStats.total})` : ''}
-              </button>
-              <button
-                className="ghost"
-                onClick={() => setUploadSettingsOpen(true)}
-                title="配置图床后端(自定义 Web / GitHub / 七牛 / 阿里云 OSS / 腾讯 COS)"
-                style={{ marginLeft: 4 }}
-              >
-                📤 上传设置
-              </button>
-            </div>
-            <TaskTable
-              items={items}
-              progress={progress}
-              onRetry={(m) => onProcessOne(m)}
-              onForceAllow={forceAllowOne}
-              onManualOptimize={onManualOptimize}
-              onCancelOne={onCancelOne}
-              onUploadOne={onUploadOne}
-            />
-            {logsVisible ? <LogBox lines={logs} /> : null}
-          </div>
           {/* R-50 — Floating "Start" action button.
               旧的内嵌主按钮已被移除(原位于 .section.fixed.left-bottom),
               这个 FAB 完全继承了它的所有判断逻辑:idle 时显示

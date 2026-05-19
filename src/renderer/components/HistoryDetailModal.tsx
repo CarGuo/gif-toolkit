@@ -58,8 +58,7 @@ import type {
 } from '../../shared/types';
 import { MediaGrid } from './MediaGrid';
 import { OptionsForm } from './OptionsForm';
-import { TaskTable } from './TaskTable';
-import { LogBox } from './LogBox';
+import { ProgressDock } from './ProgressDock';
 import { PreviewModal } from './PreviewModal';
 import type { HistoryRecord } from './useHistory';
 import { backendLabel } from './useUploadHistory';
@@ -393,6 +392,12 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
         <div className="modal-body" style={{ overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
           <div className="layout" style={{ flex: 1, minHeight: 0 }}>
             <div className="left">
+              {/* R-83 — left column: scrollable cards on top, shared
+                  <ProgressDock /> at the bottom (replacing the old
+                  .hist-detail-bottom strip that lived under the layout).
+                  Mirrors the home view layout so the modal feels like
+                  the home page rather than a separate dialect. */}
+              <div className="hist-detail-modal-cards">
               <div className="card">
                 <h2>1. 来源</h2>
                 <div style={{ fontSize: 12, color: 'var(--muted)', wordBreak: 'break-all' }}>
@@ -422,6 +427,24 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
                   提示:单条卡片的 处理此项 始终使用本条记录原始参数(即 &quot;重跑&quot;);批量重跑使用上方编辑后的参数。
                 </div>
               </div>
+              </div>
+              <ProgressDock
+                title="处理进度"
+                items={items}
+                progress={recordProgress}
+                onRetry={(m) => onProcessOneFromRecord(rec, m)}
+                onForceAllow={(m) => onProcessOneFromRecord(rec, m)}
+                logs={recordLogs}
+                logsVisible={logsVisible}
+                onToggleLogs={toggleLogs}
+                uploadsSlot={
+                  <UploadsSection
+                    rec={rec}
+                    onUpload={onUploadFromRecord}
+                    uploadConfigured={isUploadConfigured}
+                  />
+                }
+              />
             </div>
 
             <div className="right">
@@ -446,37 +469,6 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
                 </div>
               </div>
             </div>
-          </div>
-
-          <div className="hist-detail-bottom">
-            <TaskTable
-              items={items}
-              progress={recordProgress}
-              onRetry={(m) => onProcessOneFromRecord(rec, m)}
-              onForceAllow={(m) => onProcessOneFromRecord(rec, m)}
-            />
-            <UploadsSection
-              rec={rec}
-              onUpload={onUploadFromRecord}
-              uploadConfigured={isUploadConfigured}
-            />
-            {/* R-79b — log strip mirrors the home view's bottom
-                toolbar pattern: a slim header row with a toggle
-                button + an optional LogBox below. Default collapsed
-                so the modal body keeps real estate for the things
-                the user actually wants (TaskTable + uploads). */}
-            <div className="hist-detail-logbar">
-              <button
-                type="button"
-                className="ghost"
-                onClick={toggleLogs}
-                aria-pressed={logsVisible}
-                title={logsVisible ? '隐藏日志面板' : '展开日志面板'}
-              >
-                📋 日志{recordLogs.length > 0 ? ` (${recordLogs.length})` : ''}{logsVisible ? ' ▾' : ' ▸'}
-              </button>
-            </div>
-            {logsVisible ? <LogBox lines={recordLogs} /> : null}
           </div>
         </div>
       </div>

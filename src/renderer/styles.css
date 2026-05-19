@@ -55,54 +55,18 @@ input[type="text"]:focus { border-color: var(--accent); }
 
 .app {
   display: grid;
-  /* Rows: titlebar | body | bottom-resize-handle | bottom panel.
-     The bottom panel height is driven by `--bottom-h` (default 180px),
-     set inline by App.tsx and persisted to localStorage.
-     The handle row is fixed at 6px and acts as a draggable separator. */
-  grid-template-rows: 56px 1fr 6px var(--bottom-h, 180px);
+  /* R-83 — Rows: titlebar | body. The progress dock used to live in a
+     dedicated bottom row; it is now docked inside the left sidebar
+     (.body > .left > .progress-dock) so it no longer covers the
+     right-hand grid + form columns. The custom property --bottom-h
+     still drives the dock height (and is dragged via the in-sidebar
+     splitter), kept for backwards-compatible persistence. */
+  grid-template-rows: 56px 1fr;
   height: 100vh;
 }
-/* R-34 — history view doesn't render the resize handle or bottom panel
-   (TaskTable + LogBox are home-only concepts). Collapse the grid to
-   two rows so the history body claims the full remaining viewport
-   instead of leaving an empty 6px+180px track at the bottom. */
-.app.app-no-bottom {
-  grid-template-rows: 56px 1fr;
-}
-/* Draggable separator between the main body and the bottom panel.
-   - 6px tall but with a 1px visible accent line on top for affordance.
-   - ns-resize cursor; visual highlight on hover/active.
-   - Sits in its own grid row so dragging never reflows the body width. */
-.bottom-resize-handle {
-  height: 6px;
-  background: transparent;
-  border-top: 1px solid var(--border);
-  cursor: ns-resize;
-  user-select: none;
-  position: relative;
-  z-index: 5;
-  transition: background-color 0.12s ease;
-}
-.bottom-resize-handle::after {
-  content: '';
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 36px;
-  height: 2px;
-  margin-left: -18px;
-  margin-top: -1px;
-  border-radius: 1px;
-  background: var(--border);
-  transition: background-color 0.12s ease;
-}
-.bottom-resize-handle:hover {
-  background: rgba(120, 140, 200, 0.12);
-}
-.bottom-resize-handle:hover::after,
-.bottom-resize-handle:active::after {
-  background: var(--accent);
-}
+/* R-83 — the historic global splitter row (.bottom-resize-handle) was
+   removed when the dock moved into the sidebar. See .left-resize-handle
+   above for the replacement. */
 .titlebar {
   display: flex;
   align-items: center;
@@ -141,6 +105,47 @@ input[type="text"]:focus { border-color: var(--accent); }
   min-height: 0;
   overflow: hidden;
 }
+/* R-83 — left sidebar is now split vertically:
+     [.left-scroll: URL / sniff / params / advanced — flex 1, scrollable]
+     [.left-resize-handle: ns-resize, persisted via --bottom-h]
+     [.progress-dock: TaskTable + optional LogBox, height = var(--bottom-h)]
+   The dock used to be a sibling of .body sitting at the bottom of the
+   viewport, covering the right-hand media grid. Moving it into the
+   sidebar gives the right column the entire vertical run. */
+.left-scroll {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.left-resize-handle {
+  flex: 0 0 6px;
+  background: transparent;
+  border-top: 1px solid var(--border);
+  cursor: ns-resize;
+  user-select: none;
+  position: relative;
+  z-index: 5;
+  transition: background-color 0.12s ease;
+}
+.left-resize-handle::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 36px;
+  height: 2px;
+  margin-left: -18px;
+  margin-top: -1px;
+  border-radius: 1px;
+  background: var(--border);
+  transition: background-color 0.12s ease;
+}
+.left-resize-handle:hover { background: rgba(120, 140, 200, 0.12); }
+.left-resize-handle:hover::after,
+.left-resize-handle:active::after { background: var(--accent); }
 .right {
   display: flex;
   flex-direction: column;
@@ -1242,24 +1247,24 @@ details.advanced-gif > summary {
   background: black;
 }
 
-.bottom {
+.progress-dock {
   border-top: 1px solid var(--border);
   background: var(--bg-2);
   display: grid;
-  /* R-43.1 — 改为行布局:工具栏(自适应) / TaskTable(填满) / LogBox(自适应)
-     原先的 `1fr 240px` 双栏把 LogBox 钉在底部右侧,挤占 TaskTable 视觉
-     空间。新布局让 TaskTable 默认拥有底部面板的全部宽度。 */
+  /* R-83 — Same row layout as the legacy .bottom dock (toolbar /
+     TaskTable / optional LogBox) but mounted inside the left sidebar
+     as flex-basis = var(--bottom-h, 180px). Width fills the parent. */
   grid-template-rows: auto 1fr auto;
   grid-template-columns: 1fr;
-  height: 100%;
+  flex: 0 0 var(--bottom-h, 180px);
+  min-height: 120px;
+  max-height: 70vh;
   overflow: hidden;
 }
-.bottom-no-logs {
-  /* 用户折叠了日志面板:第三行尺寸归零(LogBox 已条件性卸载,这里
-     只是在隐藏过渡阶段保险地不预留空间)。 */
+.progress-dock-no-logs {
   grid-template-rows: auto 1fr 0;
 }
-.bottom-toolbar {
+.progress-dock-toolbar {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1268,11 +1273,12 @@ details.advanced-gif > summary {
   font-size: 12px;
   color: var(--muted);
   background: var(--bg-2);
+  flex-wrap: wrap;
 }
-.bottom-toolbar-title {
+.progress-dock-title {
   font-weight: 500;
 }
-.bottom-toolbar .ghost {
+.progress-dock-toolbar .ghost {
   background: transparent;
   border: 1px solid var(--border);
   color: var(--muted);
@@ -1281,9 +1287,14 @@ details.advanced-gif > summary {
   border-radius: 4px;
   cursor: pointer;
 }
-.bottom-toolbar .ghost:hover {
+.progress-dock-toolbar .ghost:hover {
   background: var(--panel);
   color: var(--text);
+}
+.progress-dock-toolbar .ghost:disabled,
+.progress-dock-toolbar .ghost[aria-disabled='true'] {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 .tasks {
   overflow-y: auto;
@@ -1828,11 +1839,34 @@ details.advanced-gif > summary {
   padding: 12px;
 }
 .hist-detail-modal .layout > .left {
-  flex: 0 0 320px;
+  flex: 0 0 360px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  /* R-83 — left column hosts source/params cards (top, scrollable) +
+     <ProgressDock /> (bottom, fixed). Inner scroll lives on
+     .hist-detail-modal-cards so the dock stays in view as the user
+     scrolls the cards. Remove the global .left border that would
+     otherwise clash with modal padding. */
+  border-right: none;
+  background: transparent;
+  overflow: hidden;
+}
+.hist-detail-modal-cards {
+  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
   gap: 12px;
   overflow-y: auto;
+  min-height: 0;
+}
+.hist-detail-modal .progress-dock {
+  flex: 0 0 280px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-2);
+  max-height: 60vh;
 }
 .hist-detail-modal .layout > .right {
   flex: 1 1 auto;
@@ -1850,19 +1884,9 @@ details.advanced-gif > summary {
   flex: 1 1 auto;
   overflow-y: auto;
 }
-.hist-detail-bottom {
-  flex: 0 0 260px;
-  display: flex;
-  flex-direction: column;
-  border-top: 1px solid var(--border);
-  background: var(--panel);
-  min-height: 0;
-}
-.hist-detail-bottom > .tasks {
-  flex: 1 1 auto;
-  overflow-y: auto;
-  min-height: 0;
-}
+/* R-83 — .hist-detail-bottom (the modal's old footer dock) was removed
+   when ProgressDock relocated into the modal's left column. Selector
+   intentionally dropped; nothing references it any more. */
 
 /* R-79b — UploadsSection inside HistoryDetailModal.
    Replaces the previous inline-style "patch" block so it sits in the
@@ -1958,39 +1982,10 @@ details.advanced-gif > summary {
   color: var(--text);
 }
 
-/* R-79b — collapsible log strip inside HistoryDetailModal.
-   Mirrors the home-view `.bottom-toolbar` toggle pattern:
-   a slim header row with a `📋 日志 (N) ▾/▸` button, the LogBox
-   only renders when expanded. Persisted to localStorage under
-   `giftk.histDetailLogsVisible`. */
-.hist-detail-logbar {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 12px;
-  font-size: 12px;
-  border-top: 1px solid var(--border);
-  background: var(--bg-2);
-}
-.hist-detail-logbar .ghost {
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--muted);
-  padding: 2px 8px;
-  font-size: 11px;
-  border-radius: 4px;
-}
-.hist-detail-logbar .ghost:hover {
-  background: var(--panel);
-  color: var(--text);
-}
-.hist-detail-bottom .logs {
-  flex: 0 0 auto;
-  max-height: 180px;
-  overflow-y: auto;
-  border-top: 1px solid var(--border);
-}
+/* R-83 — Modal log toggle was inlined into ProgressDock's toolbar;
+   .hist-detail-logbar / .hist-detail-bottom .logs are no longer
+   rendered. The classes are intentionally removed (no references
+   remain in TSX). */
 
 /* R-33 — manual two-stage optimize modal */
 .manual-opt-modal {
