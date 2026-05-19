@@ -40,6 +40,7 @@ import { UploadHistoryPanel } from './components/UploadHistoryPanel';
 import { UploadResultModal } from './components/UploadResultModal';
 import { Toaster, useToaster } from './components/Toast';
 import { evaluateSizeGuard } from '../shared/sizeGuard';
+import { bootstrapImportFromLocalStorage } from './components/storageSchema';
 
 const giftk = (typeof window !== 'undefined' ? window.giftk : undefined);
 
@@ -52,6 +53,40 @@ const App: React.FC = () => {
   // notifications. The hook returns a stable `pushCapability`
   // imperative we wire into the bottom-right Toaster instance.
   const toaster = useToaster();
+  // R-80 — On first mount, run the legacy localStorage → SQLite
+  // import. The helper is idempotent (a `bootstrap.done` marker plus
+  // INSERT OR IGNORE on every row) so re-running on every launch is
+  // safe; we only kick it off here to ensure it happens once per
+  // process lifetime. Hooks below register their own readAll effects
+  // independently and will pick up imported rows on subsequent
+  // mounts; for the very first launch after upgrade we issue a
+  // reload() on each hook once the import promise settles so the
+  // user sees their pre-R-80 history immediately without restarting.
+  useEffect(() => {
+    let cancelled = false;
+    bootstrapImportFromLocalStorage()
+      .then((result) => {
+        if (cancelled || !result) return;
+        const total = result.history + result.uploadHistory + result.sniffHistory + result.toolboxHistory;
+        if (total > 0) {
+          // Force each hook to re-pull from disk now that legacy
+          // rows are committed. reloadHistory is the only hook with
+          // a public reload — sniff/upload/toolbox hooks instead get
+          // implicitly refreshed on next mount; the panels are
+          // already mounted, so we trust the bootstrap-then-reload
+          // pattern of the history hook and accept that the other
+          // three lists may need a tab toggle for very-first-launch
+          // visibility (idempotent on subsequent restarts).
+          try { reloadHistory(); } catch { /* best-effort. */ }
+        }
+      })
+      .catch((e) => {
+        // eslint-disable-next-line no-console
+        console.warn('[bootstrap] legacy import failed (will retry next launch):', e);
+      });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // R-62 — On first mount, ask main for the platform capability
   // report and surface one toast per issue (skipping ones the user
   // has previously dismissed via "不再提醒"). Run once — capabilities
@@ -151,7 +186,7 @@ const App: React.FC = () => {
   // life-cycle hooks that create/append records. We track the *current*
   // record id in a ref so progress events can locate the right record
   // without forcing a re-render or recreating any callback.
-  const { history, pushOrReplace, patch: patchHistory, remove: removeHistory, clear: clearHistory, reload: reloadHistory } = useHistory();
+  const { history, isLoading: isHistoryLoading, pushOrReplace, patch: patchHistory, remove: removeHistory, clear: clearHistory, reload: reloadHistory } = useHistory();
   // R-32 — independent LRU of *URLs the user has sniffed* (capped at 30).
   // This is intentionally orthogonal to useHistory above — that hook
   // remembers full batch sessions, this one is the "address book" of
@@ -160,6 +195,7 @@ const App: React.FC = () => {
   // below; the picker reads it via the popover state.
   const {
     entries: sniffHistory,
+    isLoading: isSniffHistoryLoading,
     addOrPromote: addSniffHistory,
     remove: removeSniffHistory,
     clear: clearSniffHistory
@@ -305,7 +341,7 @@ const App: React.FC = () => {
   // ipc; the modal updates them in place. The upload-history hook owns
   // localStorage persistence; we only forward main-process progress
   // emits into it via uploadRecordRef (jobId → recordId mapping).
-  const { history: uploadHistory, start: startUploadRecord, applyProgress: applyUploadProgress, remove: removeUploadHistory, clear: clearUploadHistory } = useUploadHistory();
+  const { history: uploadHistory, isLoading: isUploadHistoryLoading, start: startUploadRecord, applyProgress: applyUploadProgress, remove: removeUploadHistory, clear: clearUploadHistory } = useUploadHistory();
   const [uploadConfigs, setUploadConfigs] = useState<UploadConfigs | null>(null);
   const [uploadSettingsOpen, setUploadSettingsOpen] = useState(false);
   const [uploadResult, setUploadResult] = useState<string | null>(null); // recordId
@@ -2399,6 +2435,7 @@ const App: React.FC = () => {
                   setSniffHistoryOpen(false);
                 }}
                 onClose={() => setSniffHistoryOpen(false)}
+                isLoading={isSniffHistoryLoading}
               />
             </div>
             {urlError ? (
@@ -2612,6 +2649,7 @@ const App: React.FC = () => {
             onOpenOutputDir={onOpenHistoryDir}
             onRemove={removeHistory}
             onClear={clearHistory}
+            isLoading={isHistoryLoading}
           />
         </div>
       ) : view === 'toolbox' ? (
@@ -2620,7 +2658,7 @@ const App: React.FC = () => {
         </div>
       ) : (
         <div className="body body-uploads" role="region" aria-label="uploads">
-          <UploadHistoryPanel history={uploadHistory} onRemove={removeUploadHistory} onClear={clearUploadHistory} />
+          <UploadHistoryPanel history={uploadHistory} onRemove={removeUploadHistory} onClear={clearUploadHistory} isLoading={isUploadHistoryLoading} />
         </div>
       )}
 

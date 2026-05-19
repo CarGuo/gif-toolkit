@@ -1,5 +1,5 @@
 /**
- * R-45 — Upload-history hook (renderer side, localStorage-backed).
+ * R-45 — Upload-history hook (renderer side).
  *
  * Mirrors the design of useHistory.ts but with a much simpler shape:
  * a flat reverse-chrono list of UploadHistoryRecord. We DON'T merge
@@ -12,8 +12,13 @@
  *     grid that processing history uses;
  *  3) keeping schemas separate avoids forward-compatibility issues
  *     when one of the two histories evolves.
+ *
+ * R-80 — storage moved from localStorage to a main-process SQLite
+ * store. The hook still owns an in-memory mirror so the panel can
+ * render without an extra round-trip; mutations are optimistic +
+ * fire-and-forget IPC. Initial load is async, gated on `isLoading`.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
   UploadBackend,
   UploadConfigs,
@@ -22,7 +27,6 @@ import type {
   UploadProgress,
   UploadStatus
 } from '../../shared/types';
-import { readVersionedStorage, writeVersionedStorage } from './storageSchema';
 
 export const UPLOAD_HISTORY_STORAGE_KEY = 'giftk.uploadHistory.v1';
 // R-54 — Per the user's product feedback we now保存 ALL upload history
@@ -42,53 +46,30 @@ export const UPLOAD_HISTORY_MAX_ENTRIES = Number.POSITIVE_INFINITY;
  * blobs are accepted as v0 by the shared reader.
  */
 export const UPLOAD_HISTORY_SCHEMA_VERSION = 1;
-const UPLOAD_HISTORY_MIGRATORS: ReadonlyArray<(prev: unknown[]) => unknown[]> = [];
 
 function genId(): string {
   const r = Math.floor(Math.random() * 0xffffffff).toString(16).padStart(8, '0');
   return `up-${Date.now()}-${r}`;
 }
 
-function readAll(): UploadHistoryRecord[] {
-  if (typeof window === 'undefined') return [];
-  // R-79b — same envelope-aware read as useHistory; legacy bare
-  // arrays are auto-lifted to v0 → current.
-  const { payload } = readVersionedStorage<unknown>({
-    key: UPLOAD_HISTORY_STORAGE_KEY,
-    currentVersion: UPLOAD_HISTORY_SCHEMA_VERSION,
-    migrators: UPLOAD_HISTORY_MIGRATORS
-  });
-  try {
-    const out: UploadHistoryRecord[] = [];
-    for (const e of payload) {
-      if (!e || typeof e !== 'object') continue;
-      const r = e as Partial<UploadHistoryRecord>;
-      if (typeof r.id !== 'string' || typeof r.backend !== 'string' || !Array.isArray(r.items)) continue;
-      out.push({
-        id: r.id,
-        createdAt: typeof r.createdAt === 'number' ? r.createdAt : Date.now(),
-        backend: r.backend as UploadBackend,
-        items: (r.items as UploadHistoryItem[]).filter(
-          (it) => it && typeof it === 'object' && typeof it.jobId === 'string'
-        )
-      });
-    }
-    return out;
-  } catch {
-    return [];
-  }
-}
-
-function writeAll(list: UploadHistoryRecord[]): void {
-  writeVersionedStorage({
-    key: UPLOAD_HISTORY_STORAGE_KEY,
-    currentVersion: UPLOAD_HISTORY_SCHEMA_VERSION,
-    payload: list
-  });
+function parseRecord(e: unknown): UploadHistoryRecord | null {
+  if (!e || typeof e !== 'object') return null;
+  const r = e as Partial<UploadHistoryRecord>;
+  if (typeof r.id !== 'string' || typeof r.backend !== 'string' || !Array.isArray(r.items)) return null;
+  return {
+    id: r.id,
+    createdAt: typeof r.createdAt === 'number' ? r.createdAt : Date.now(),
+    backend: r.backend as UploadBackend,
+    items: (r.items as UploadHistoryItem[]).filter(
+      (it) => it && typeof it === 'object' && typeof it.jobId === 'string'
+    )
+  };
 }
 
 export interface UseUploadHistoryApi {
   history: UploadHistoryRecord[];
+  /** R-80 — true while the initial DB read is in flight. */
+  isLoading: boolean;
   /** Push a brand-new record. Returns its id. */
   start(args: { backend: UploadBackend; items: UploadHistoryItem[] }): string;
   /** Fold an UploadProgress emit into a record. Idempotent across
@@ -168,26 +149,97 @@ export function applyProgressToRecord(
 }
 
 export function useUploadHistory(): UseUploadHistoryApi {
-  const [history, setHistory] = useState<UploadHistoryRecord[]>(() => readAll());
+  const [history, setHistory] = useState<UploadHistoryRecord[]>([]);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const mountedRef = useRef<boolean>(true);
+  // R-80 — coalesce upsert IPC calls per recordId. A burst of
+  // applyProgress() emits (e.g. 100ms percent ticks) would otherwise
+  // hit `db:uploadHistory:upsert` once per emit, doing a full DELETE +
+  // re-INSERT of the items child table. We keep a per-record latest-
+  // value queue and flush after a 250ms idle window, mirroring the
+  // pre-R-80 localStorage debounce.
+  const upsertQueueRef = useRef<Map<string, UploadHistoryRecord>>(new Map());
+  const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const flushUpserts = useCallback(() => {
+    const api = typeof window !== 'undefined' ? window.giftk?.db?.uploadHistory : undefined;
+    const pending = upsertQueueRef.current;
+    upsertQueueRef.current = new Map();
+    flushTimerRef.current = null;
+    if (!api) return;
+    for (const rec of pending.values()) {
+      api.upsert(rec).catch(() => {
+        /* best-effort. */
+      });
+    }
+  }, []);
+
+  const scheduleUpsert = useCallback((rec: UploadHistoryRecord) => {
+    upsertQueueRef.current.set(rec.id, rec);
+    if (flushTimerRef.current) return;
+    flushTimerRef.current = setTimeout(flushUpserts, 250);
+  }, [flushUpserts]);
+
+  // Initial DB load.
   useEffect(() => {
-    const t = setTimeout(() => writeAll(history), 250);
-    return () => clearTimeout(t);
-  }, [history]);
+    mountedRef.current = true;
+    const api = typeof window !== 'undefined' ? window.giftk?.db?.uploadHistory : undefined;
+    if (!api) {
+      setIsLoading(false);
+      return () => {
+        mountedRef.current = false;
+        if (flushTimerRef.current) {
+          clearTimeout(flushTimerRef.current);
+          flushTimerRef.current = null;
+        }
+      };
+    }
+    api
+      .readAll()
+      .then((rows) => {
+        if (!mountedRef.current) return;
+        const out: UploadHistoryRecord[] = [];
+        for (const r of rows) {
+          const rec = parseRecord(r);
+          if (rec) out.push(rec);
+        }
+        setHistory(out);
+      })
+      .catch(() => {
+        /* keep empty. */
+      })
+      .finally(() => {
+        if (mountedRef.current) setIsLoading(false);
+      });
+    return () => {
+      mountedRef.current = false;
+      // Flush any pending upserts on unmount so a brief panel close
+      // mid-upload doesn't lose the most recent percent/status emit.
+      if (flushTimerRef.current) {
+        clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
+        flushUpserts();
+      }
+    };
+  }, [flushUpserts]);
 
   const start = useCallback((args: { backend: UploadBackend; items: UploadHistoryItem[] }): string => {
     const id = genId();
+    const rec: UploadHistoryRecord = {
+      id,
+      createdAt: Date.now(),
+      backend: args.backend,
+      items: args.items
+    };
     setHistory((prev) => {
       // R-54 — keep ALL upload history. Past 30-cap LRU lost long-tail
       // links the user wanted weeks/months later. Paging in the panel
       // makes the unbounded list usable.
-      return [
-        { id, createdAt: Date.now(), backend: args.backend, items: args.items },
-        ...prev
-      ];
+      return [rec, ...prev];
     });
+    scheduleUpsert(rec);
     return id;
-  }, []);
+  }, [scheduleUpsert]);
 
   const applyProgress = useCallback((recordId: string, p: UploadProgress): void => {
     setHistory((prev) => {
@@ -197,19 +249,34 @@ export function useUploadHistory(): UseUploadHistoryApi {
       if (updated === prev[i]) return prev;
       const next = prev.slice();
       next[i] = updated;
+      scheduleUpsert(updated);
       return next;
     });
-  }, []);
+  }, [scheduleUpsert]);
 
   const remove = useCallback((id: string): void => {
     setHistory((prev) => prev.filter((r) => r.id !== id));
+    upsertQueueRef.current.delete(id);
+    const api = typeof window !== 'undefined' ? window.giftk?.db?.uploadHistory : undefined;
+    if (api) {
+      api.remove(id).catch(() => { /* best-effort. */ });
+    }
   }, []);
 
   const clear = useCallback((): void => {
     setHistory([]);
+    upsertQueueRef.current.clear();
+    if (flushTimerRef.current) {
+      clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
+    }
+    const api = typeof window !== 'undefined' ? window.giftk?.db?.uploadHistory : undefined;
+    if (api) {
+      api.clear().catch(() => { /* best-effort. */ });
+    }
   }, []);
 
-  return { history, start, applyProgress, remove, clear };
+  return { history, isLoading, start, applyProgress, remove, clear };
 }
 
 /** R-45 — Pretty backend label for UI display. */

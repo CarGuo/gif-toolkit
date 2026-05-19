@@ -34,6 +34,11 @@ export interface SniffHistoryPickerProps {
   onRemove: (url: string) => void;
   onClear: () => void;
   onClose: () => void;
+  /** R-80 — true while the SQLite read on first mount is in flight.
+   *  Only affects the empty-state copy: a freshly-opened picker on
+   *  first launch would otherwise read "(无解析历史)" before rows
+   *  finish loading. */
+  isLoading?: boolean;
 }
 
 function fmtRelative(ts: number, now: number = Date.now()): string {
@@ -58,7 +63,8 @@ export const SniffHistoryPicker: React.FC<SniffHistoryPickerProps> = ({
   onPick,
   onRemove,
   onClear,
-  onClose
+  onClose,
+  isLoading
 }) => {
   const ref = useRef<HTMLDivElement | null>(null);
 
@@ -102,7 +108,7 @@ export const SniffHistoryPicker: React.FC<SniffHistoryPickerProps> = ({
         <span className="sniff-hist-count muted">{entries.length} / 30</span>
       </div>
       {entries.length === 0 ? (
-        <div className="sniff-hist-empty muted">(无解析历史)</div>
+        <div className="sniff-hist-empty muted">{isLoading ? '加载中…' : '(无解析历史)'}</div>
       ) : (
         <ul className="sniff-hist-list" role="listbox">
           {entries.map((e) => (

@@ -46,6 +46,10 @@ export interface HistoryPanelProps {
   onRemove: (id: string) => void;
   /** Wipe all records (with confirmation in the caller). */
   onClear: () => void;
+  /** R-80 — true while the SQLite read on first mount is in flight.
+   *  We render a distinct empty-state copy so users don't briefly
+   *  see "还没有历史记录" before their actual rows appear. */
+  isLoading?: boolean;
 }
 
 function fmtTime(ts: number): string {
@@ -168,7 +172,8 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
   onOpenDetail,
   onOpenOutputDir,
   onRemove,
-  onClear
+  onClear,
+  isLoading
 }) => {
   if (history.length === 0) {
     return (
@@ -176,12 +181,14 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
         <div className="hist-toolbar">
           <span className="hist-count">0 / 30</span>
           <span className="hist-tip muted">
-            还没有历史记录;每次嗅探或批处理完成后会自动出现在这里(最多保留 30 条)。
+            {isLoading
+              ? '正在从本地数据库加载历史…'
+              : '还没有历史记录;每次嗅探或批处理完成后会自动出现在这里(最多保留 30 条)。'}
           </span>
         </div>
         <div className="hist-empty">
-          <p>还没有历史记录</p>
-          <p className="muted">嗅探一个 URL 后回到这里看看吧。</p>
+          <p>{isLoading ? '加载中…' : '还没有历史记录'}</p>
+          {!isLoading ? <p className="muted">嗅探一个 URL 后回到这里看看吧。</p> : null}
         </div>
       </div>
     );

@@ -9,22 +9,25 @@
  * output folder, and re-running individual media items without
  * re-sniffing.
  *
- * Storage strategy
- * ----------------
- * - localStorage key `giftk.history.v1` (versioned for future schema
- *   evolution).
- * - Hard cap 30 entries (FIFO eviction). The cap is intentionally
- *   small to keep us under the ~5MB localStorage quota even if every
- *   sniff yields ~50 media items with thumbnails (we DON'T store
- *   thumbnail bytes — only the urls).
- * - Failures during read/write are silently swallowed: history is a
- *   convenience feature, never a hard dependency.
+ * R-80 — Storage moved from localStorage to a main-process SQLite
+ * store. The hook still owns an in-memory mirror so callers can read
+ * the current array synchronously (App.tsx folds progress events
+ * into a record many times per second; awaiting an IPC round-trip on
+ * each emit would crater the renderer). Mutations are optimistic +
+ * fire-and-forget IPC. Initial load is async — `isLoading` stays
+ * true until the first `db:history:readAll` resolves.
  *
- * Mutations are batched through a reducer so concurrent updates from
- * multiple progress events can't lose entries. We also debounce writes
- * so a stream of progress events doesn't thrash localStorage.
+ * High-frequency mutations (a streaming progress feed) are funneled
+ * through a per-record-id 250ms-idle queue so we don't hit
+ * `db:history:upsert` once per emit. Each upsert is a DELETE + re-
+ * INSERT of the items / outputs / status / uploads child rows, so
+ * coalescing is mandatory for sane DB load. Pre-R-80 the same code
+ * path debounced localStorage.setItem with the same window.
+ *
+ * Failures during read/write are silently swallowed: history is a
+ * convenience feature, never a hard dependency.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
   ProcessOptions,
   SniffedMedia,
@@ -34,35 +37,20 @@ import type {
   UploadStatus
 } from '../../shared/types';
 import { DEFAULT_OPTIONS } from '../../shared/types';
-import { readVersionedStorage, writeVersionedStorage } from './storageSchema';
 
 export const HISTORY_STORAGE_KEY = 'giftk.history.v1';
 export const HISTORY_MAX_ENTRIES = 30;
 
 /**
- * R-79b — Schema version of the on-disk envelope. The localStorage
- * key suffix `.v1` is a *legacy* indicator (it groups all keys we
- * own under the giftk.* namespace and gives us room for a future
- * `.v2` *key* if we ever do an incompatible breaking change). The
- * actual upgrade contract lives in this in-payload `version` field
- * + the `migrators` array below; bumping `HISTORY_SCHEMA_VERSION`
- * and adding a new entry to `migrators` is how we evolve the shape
- * without orphaning user data.
- *
- * Currently version 1 (no migrations defined) — the existing on-
- * disk shape *is* the v1 shape; legacy bare-array blobs are
- * accepted by `readVersionedStorage` as v0 and lifted to v1 with
- * no transformation needed (R-54's `uploadsByOutputPath` is
- * optional and the per-row defensive parser handles missing keys).
+ * R-79b / R-80 — schema version. The on-disk SQLite migrations
+ * (`src/main/db/migrations/`) are the source of truth post-R-80; this
+ * constant survives because it's still re-exported in tests and
+ * because the preload-side bootstrap import keys off it when reading
+ * the legacy localStorage envelope. Bumping this number alone has no
+ * runtime effect today — schema evolution lives in main-side
+ * migration scripts.
  */
 export const HISTORY_SCHEMA_VERSION = 1;
-const HISTORY_MIGRATORS: ReadonlyArray<(prev: unknown[]) => unknown[]> = [
-  // index 0 — unused (no "upgrade to v0").
-  // index 1 — would be `(rows) => rows.map(legacyToV1)` once we
-  //   define a v0 → v1 transformation. For now the lift is the
-  //   identity function, handled implicitly by the per-row parser
-  //   in readAll below (it normalises optional fields).
-];
 
 /**
  * R-54 — One upload's outcome, indexed inside HistoryRecord by the
@@ -134,71 +122,53 @@ function genId(): string {
   return `hist-${Date.now()}-${r}`;
 }
 
-function readAll(): HistoryRecord[] {
-  if (typeof window === 'undefined') return [];
-  // R-79b — route through the shared envelope reader. Legacy bare-
-  // array blobs (pre-R-79b writes) are still accepted: the helper
-  // returns them as v0 → migrated to current version. The per-row
-  // defensive parse below is unchanged from the pre-R-79b code so
-  // existing tests still pass with the same fixture data.
-  const { payload } = readVersionedStorage<unknown>({
-    key: HISTORY_STORAGE_KEY,
-    currentVersion: HISTORY_SCHEMA_VERSION,
-    migrators: HISTORY_MIGRATORS
-  });
-  try {
-    // Defensive: drop entries missing required shape so a partially
-    // corrupted blob doesn't crash the panel. Also normalise optional
-    // sub-objects (outputsByTaskId / taskStatus / options) so
-    // mergeProgressIntoRecord can safely index them later.
-    const out: HistoryRecord[] = [];
-    for (const e of payload) {
-      if (!e || typeof e !== 'object') continue;
-      const r = e as Partial<HistoryRecord>;
-      if (typeof r.id !== 'string' || typeof r.pageUrl !== 'string' || !Array.isArray(r.items)) {
-        continue;
-      }
-      out.push({
-        id: r.id,
-        createdAt: typeof r.createdAt === 'number' ? r.createdAt : Date.now(),
-        pageUrl: r.pageUrl,
-        title: typeof r.title === 'string' ? r.title : undefined,
-        items: r.items as SniffedMedia[],
-        options: (r.options && typeof r.options === 'object' ? r.options : DEFAULT_OPTIONS) as ProcessOptions,
-        outputDir: typeof r.outputDir === 'string' ? r.outputDir : undefined,
-        outputsByTaskId:
-          r.outputsByTaskId && typeof r.outputsByTaskId === 'object'
-            ? (r.outputsByTaskId as Record<string, string[]>)
-            : {},
-        taskStatus:
-          r.taskStatus && typeof r.taskStatus === 'object'
-            ? (r.taskStatus as Record<string, TaskStatus>)
-            : {},
-        uploadsByOutputPath:
-          r.uploadsByOutputPath && typeof r.uploadsByOutputPath === 'object'
-            ? (r.uploadsByOutputPath as Record<string, UploadRefForHistory>)
-            : undefined
-      });
-    }
-    return out;
-  } catch {
-    return [];
+/**
+ * R-80 — best-effort parse of one row from the DB. Drops entries
+ * missing required shape so a partially corrupted blob doesn't
+ * crash the panel. Also normalises optional sub-objects
+ * (outputsByTaskId / taskStatus / options) so mergeProgressIntoRecord
+ * can safely index them later.
+ *
+ * The defensive shape is intentionally identical to the pre-R-80
+ * `readAll()` per-row parser — same fixtures keep passing in the
+ * unit tests post-DB migration.
+ */
+function parseRecord(e: unknown): HistoryRecord | null {
+  if (!e || typeof e !== 'object') return null;
+  const r = e as Partial<HistoryRecord>;
+  if (typeof r.id !== 'string' || typeof r.pageUrl !== 'string' || !Array.isArray(r.items)) {
+    return null;
   }
-}
-
-function writeAll(list: HistoryRecord[]): void {
-  // R-79b — write the new envelope shape. The shared helper handles
-  // QuotaExceeded (one-shot key delete + retry) so we no longer need
-  // the bespoke recovery branch the pre-R-79b code carried.
-  writeVersionedStorage({
-    key: HISTORY_STORAGE_KEY,
-    currentVersion: HISTORY_SCHEMA_VERSION,
-    payload: list
-  });
+  return {
+    id: r.id,
+    createdAt: typeof r.createdAt === 'number' ? r.createdAt : Date.now(),
+    pageUrl: r.pageUrl,
+    title: typeof r.title === 'string' ? r.title : undefined,
+    items: r.items as SniffedMedia[],
+    options: (r.options && typeof r.options === 'object' ? r.options : DEFAULT_OPTIONS) as ProcessOptions,
+    outputDir: typeof r.outputDir === 'string' ? r.outputDir : undefined,
+    outputsByTaskId:
+      r.outputsByTaskId && typeof r.outputsByTaskId === 'object'
+        ? (r.outputsByTaskId as Record<string, string[]>)
+        : {},
+    taskStatus:
+      r.taskStatus && typeof r.taskStatus === 'object'
+        ? (r.taskStatus as Record<string, TaskStatus>)
+        : {},
+    uploadsByOutputPath:
+      r.uploadsByOutputPath && typeof r.uploadsByOutputPath === 'object'
+        ? (r.uploadsByOutputPath as Record<string, UploadRefForHistory>)
+        : undefined
+  };
 }
 
 export interface UseHistoryApi {
   history: HistoryRecord[];
+  /** R-80 — true while the initial DB read is in flight. App.tsx
+   *  defers the on-mount `registerOutputDir` rehydration until this
+   *  flips to false, since the loop walks `history` and would no-op
+   *  on the empty-during-load list otherwise. */
+  isLoading: boolean;
   /** Push a new record OR replace an existing one for the same pageUrl
    *  ROUND. We replace when the new record's id matches; we push when
    *  the id is new. The most recent entry is at index 0. Returns the
@@ -210,38 +180,129 @@ export interface UseHistoryApi {
   remove(id: string): void;
   /** Wipe everything (with the user's confirmation in the UI). */
   clear(): void;
-  /** R-34 — force-resync from localStorage.
+  /** R-34 — force-resync from the persistent store.
    *  Use case: the history tab is opened and the user expects to see
    *  the *current* truth, including any (a) in-flight progress that
    *  the 250ms debounce hasn't flushed yet, and (b) external mutations
-   *  from another renderer/tab/window that wrote to the same key.
-   *  We flush our in-memory state to disk first so we never overwrite
-   *  newer-in-memory rows with stale-on-disk rows, then we reread.
-   *  If readback === current, we skip the setState to avoid a wasted
-   *  re-render. */
+   *  (other windows / tools) that wrote to the same DB.
+   *  We flush our pending in-memory upserts to disk first so we never
+   *  overwrite newer-in-memory rows with stale-on-disk rows, then we
+   *  reread. If the readback is a strict subset of memory we keep
+   *  memory; only the presence of new ids triggers an authoritative
+   *  swap. */
   reload(): void;
 }
 
 /**
- * React hook that wraps the localStorage-backed list. Memoised getters
- * are intentionally NOT used — the array is small enough that callers
- * can map over it directly.
+ * React hook that wraps the SQLite-backed list. Memoised getters are
+ * intentionally NOT used — the array is small enough (capped at 30)
+ * that callers can map over it directly.
  */
 export function useHistory(): UseHistoryApi {
-  const [history, setHistory] = useState<HistoryRecord[]>(() => readAll());
+  const [history, setHistory] = useState<HistoryRecord[]>([]);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const mountedRef = useRef<boolean>(true);
+  // R-80 — coalesce upsert IPC calls per recordId. A streaming
+  // progress feed (`mergeProgressIntoRecord` on every TaskProgress
+  // emit) would otherwise hit `db:history:upsert` once per emit,
+  // doing a full DELETE + re-INSERT of the items / outputs / status /
+  // uploads child rows. We keep a per-record latest-value queue and
+  // flush after a 250ms idle window — same shape as
+  // useUploadHistory's debounce, same reasoning as the pre-R-80
+  // localStorage debounce.
+  const upsertQueueRef = useRef<Map<string, HistoryRecord>>(new Map());
+  // Pending deletes are tracked separately so a delete + immediate
+  // re-add (rare but possible during reload) can cancel the delete
+  // instead of running both serially.
+  const removeQueueRef = useRef<Set<string>>(new Set());
+  const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // R-27 (post-review): debounce persistence so a high-frequency
-  // progress stream doesn't synchronously hit localStorage.setItem on
-  // every emit. setItem on a 30-record blob is ~tens of KB synchronous
-  // disk write that competes with the renderer's main thread; a 250ms
-  // trailing-edge debounce gives ~4 writes/sec at most while still
-  // surviving an unexpected reload (the next mount reads back from
-  // disk; in-flight changes within 250ms of a crash are accepted as
-  // lost — history is a convenience feature, never a hard dependency).
+  const flushPending = useCallback(() => {
+    const upserts = upsertQueueRef.current;
+    const removals = removeQueueRef.current;
+    upsertQueueRef.current = new Map();
+    removeQueueRef.current = new Set();
+    flushTimerRef.current = null;
+    const api = typeof window !== 'undefined' ? window.giftk?.db?.history : undefined;
+    if (!api) return;
+    // Order: removes first, then upserts. A user-driven delete is
+    // higher-priority signal than the trailing edge of a debounced
+    // patch on the *same* id (we'd cancel the upsert on remove
+    // anyway, but the explicit ordering keeps the serial DB log
+    // easy to reason about).
+    for (const id of removals) {
+      api.remove(id).catch(() => { /* best-effort. */ });
+    }
+    for (const rec of upserts.values()) {
+      api.upsert(rec).catch(() => { /* best-effort. */ });
+    }
+  }, []);
+
+  const schedule = useCallback(() => {
+    if (flushTimerRef.current) return;
+    flushTimerRef.current = setTimeout(flushPending, 250);
+  }, [flushPending]);
+
+  const enqueueUpsert = useCallback((rec: HistoryRecord): void => {
+    // A previously-queued remove on the same id is superseded by an
+    // upsert (re-pushing a record after deleting it from another
+    // window is the only realistic path to this branch).
+    removeQueueRef.current.delete(rec.id);
+    upsertQueueRef.current.set(rec.id, rec);
+    schedule();
+  }, [schedule]);
+
+  const enqueueRemove = useCallback((id: string): void => {
+    upsertQueueRef.current.delete(id);
+    removeQueueRef.current.add(id);
+    schedule();
+  }, [schedule]);
+
+  // R-80 — initial DB load. History is convenience-only so a bridge
+  // / IPC failure leaves the in-memory list empty rather than
+  // crashing the panel.
   useEffect(() => {
-    const t = setTimeout(() => writeAll(history), 250);
-    return () => clearTimeout(t);
-  }, [history]);
+    mountedRef.current = true;
+    const api = typeof window !== 'undefined' ? window.giftk?.db?.history : undefined;
+    if (!api) {
+      setIsLoading(false);
+      return () => {
+        mountedRef.current = false;
+        if (flushTimerRef.current) {
+          clearTimeout(flushTimerRef.current);
+          flushTimerRef.current = null;
+        }
+      };
+    }
+    api
+      .readAll()
+      .then((rows) => {
+        if (!mountedRef.current) return;
+        const out: HistoryRecord[] = [];
+        for (const r of rows) {
+          const rec = parseRecord(r);
+          if (rec) out.push(rec);
+        }
+        out.sort((a, b) => b.createdAt - a.createdAt);
+        setHistory(out.slice(0, HISTORY_MAX_ENTRIES));
+      })
+      .catch(() => {
+        /* keep empty. */
+      })
+      .finally(() => {
+        if (mountedRef.current) setIsLoading(false);
+      });
+    return () => {
+      mountedRef.current = false;
+      // Flush any pending upserts on unmount so a brief panel close
+      // mid-batch doesn't lose the most recent progress emit.
+      if (flushTimerRef.current) {
+        clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
+        flushPending();
+      }
+    };
+  }, [flushPending]);
 
   const pushOrReplace = useCallback((rec: HistoryRecord): string => {
     setHistory((prev) => {
@@ -262,68 +323,80 @@ export function useHistory(): UseHistoryApi {
       }
       return next;
     });
+    enqueueUpsert(rec);
     return rec.id;
-  }, []);
+  }, [enqueueUpsert]);
 
   const patch = useCallback((id: string, mutator: (r: HistoryRecord) => HistoryRecord): void => {
     setHistory((prev) => {
       const idx = prev.findIndex((r) => r.id === id);
       if (idx < 0) return prev;
       const next = [...prev];
-      next[idx] = mutator(prev[idx]);
+      const updated = mutator(prev[idx]);
+      next[idx] = updated;
+      // We schedule the upsert from inside the functional updater so
+      // the queued payload reflects the *post-mutation* shape. Doing
+      // it after the setHistory call would race with React's batching.
+      enqueueUpsert(updated);
       return next;
     });
-  }, []);
+  }, [enqueueUpsert]);
 
   const remove = useCallback((id: string): void => {
     setHistory((prev) => prev.filter((r) => r.id !== id));
-  }, []);
+    enqueueRemove(id);
+  }, [enqueueRemove]);
 
   const clear = useCallback((): void => {
     setHistory([]);
+    upsertQueueRef.current.clear();
+    removeQueueRef.current.clear();
+    if (flushTimerRef.current) {
+      clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
+    }
+    const api = typeof window !== 'undefined' ? window.giftk?.db?.history : undefined;
+    if (api) {
+      api.clear().catch(() => { /* best-effort. */ });
+    }
   }, []);
 
   const reload = useCallback((): void => {
-    // R-34 — implemented inside a functional setHistory so the
-    // updater's `prev` is guaranteed to be the most recent state
-    // React knows about, even when reload is called in the same act
-    // batch as a previous setHistory call. Capturing `history` from
-    // the surrounding closure (or via a useEffect-synced ref) would
-    // observe a stale snapshot in that scenario.
+    // R-34 / R-80 — async re-pull from the DB. We flush any pending
+    // upserts first so the readback can't observe stale-on-disk rows
+    // for ids that memory has newer values for. The async then-block
+    // checks mountedRef to avoid setState on an unmounted hook.
     //
-    // Two real-world scenarios drive the merge logic:
-    //
-    //   A. EXTERNAL writer (another renderer / window) updated the
-    //      key while we were mounted. Disk is the freshest source of
-    //      truth — adopt it.
-    //
-    //   B. IN-MEMORY state is newer than disk because the 250ms
-    //      debounce hasn't fired yet (e.g. the user clicks 历史
-    //      immediately after a progress emit). Adopting disk here
-    //      would drop the in-flight update. We instead flush memory
-    //      to disk and keep the same state object.
-    //
-    // Heuristic: if disk has at least one record that the in-memory
-    // list lacks (by id), we treat that as evidence of an external
-    // write and adopt disk wholesale. Otherwise we trust memory and
-    // flush it through. This keeps the API a no-op for the common
-    // single-renderer case while still surfacing external changes.
-    setHistory((prev) => {
-      const fresh = readAll();
-      const prevIds = new Set(prev.map((r) => r.id));
-      const diskHasNewIds = fresh.some((r) => !prevIds.has(r.id));
-      if (!diskHasNewIds) {
-        // Memory is at least as fresh as disk — flush and return prev
-        // so React skips the re-render.
-        writeAll(prev);
-        return prev;
-      }
-      // Disk had ids we've never seen — treat as authoritative.
-      return fresh;
-    });
-  }, []);
+    // Heuristic (unchanged from R-34): if the DB has at least one
+    // record that memory lacks (by id), we treat that as evidence of
+    // an external write (another window / a manual db edit) and
+    // adopt the readback wholesale. Otherwise memory is at least as
+    // fresh and we leave it alone — the trailing 250ms flush is
+    // about to push it through anyway.
+    flushPending();
+    const api = typeof window !== 'undefined' ? window.giftk?.db?.history : undefined;
+    if (!api) return;
+    api
+      .readAll()
+      .then((rows) => {
+        if (!mountedRef.current) return;
+        const fresh: HistoryRecord[] = [];
+        for (const r of rows) {
+          const rec = parseRecord(r);
+          if (rec) fresh.push(rec);
+        }
+        fresh.sort((a, b) => b.createdAt - a.createdAt);
+        setHistory((prev) => {
+          const prevIds = new Set(prev.map((r) => r.id));
+          const diskHasNewIds = fresh.some((r) => !prevIds.has(r.id));
+          if (!diskHasNewIds) return prev;
+          return fresh.slice(0, HISTORY_MAX_ENTRIES);
+        });
+      })
+      .catch(() => { /* best-effort. */ });
+  }, [flushPending]);
 
-  return { history, pushOrReplace, patch, remove, clear, reload };
+  return { history, isLoading, pushOrReplace, patch, remove, clear, reload };
 }
 
 /**

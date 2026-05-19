@@ -19,9 +19,18 @@
  *  - Mutations debounce localStorage writes (250ms trailing) so a
  *    burst of `add` calls during fast user typing or repeated
  *    sniffs doesn't thrash the disk.
+ *
+ * R-80 — storage was migrated from localStorage to a main-process
+ * SQLite store. The hook still owns an in-memory copy for fast
+ * synchronous reads (the panel renders entries directly), but
+ * mutations are now fire-and-forget IPC upserts. Initial load is
+ * asynchronous — `isLoading` is `true` until the first IPC
+ * round-trip resolves so UI can show a placeholder. Bootstrap
+ * import from the legacy localStorage key is handled centrally on
+ * app boot (see App.tsx) so this hook can assume the DB is the
+ * source of truth from mount onward.
  */
-import { useCallback, useEffect, useState } from 'react';
-import { readVersionedStorage, writeVersionedStorage } from './storageSchema';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 export const SNIFF_HISTORY_STORAGE_KEY = 'giftk.sniffHistory.v1';
 export const SNIFF_HISTORY_MAX_ENTRIES = 30;
@@ -32,7 +41,6 @@ export const SNIFF_HISTORY_MAX_ENTRIES = 30;
  * blobs are accepted as v0 by the shared reader.
  */
 export const SNIFF_HISTORY_SCHEMA_VERSION = 1;
-const SNIFF_HISTORY_MIGRATORS: ReadonlyArray<(prev: unknown[]) => unknown[]> = [];
 
 /** One entry per *unique URL*. `addOrPromote` dedupes by URL. */
 export interface SniffHistoryEntry {
@@ -50,50 +58,25 @@ export interface SniffHistoryEntry {
   itemCount?: number;
 }
 
-function readAll(): SniffHistoryEntry[] {
-  if (typeof window === 'undefined') return [];
-  const { payload } = readVersionedStorage<unknown>({
-    key: SNIFF_HISTORY_STORAGE_KEY,
-    currentVersion: SNIFF_HISTORY_SCHEMA_VERSION,
-    migrators: SNIFF_HISTORY_MIGRATORS
-  });
-  try {
-    const out: SniffHistoryEntry[] = [];
-    const seen = new Set<string>();
-    for (const e of payload) {
-      if (!e || typeof e !== 'object') continue;
-      const r = e as Partial<SniffHistoryEntry>;
-      if (typeof r.url !== 'string' || !r.url) continue;
-      // Normalise: drop dup URLs that may have crept in from a
-      // partially-corrupt write; keep the *first* (newer when sorted).
-      if (seen.has(r.url)) continue;
-      seen.add(r.url);
-      out.push({
-        url: r.url,
-        title: typeof r.title === 'string' ? r.title : undefined,
-        ts: typeof r.ts === 'number' ? r.ts : Date.now(),
-        itemCount: typeof r.itemCount === 'number' ? r.itemCount : undefined
-      });
-    }
-    // Sort newest-first; persist may have been interrupted mid-write
-    // and we don't trust on-disk order.
-    out.sort((a, b) => b.ts - a.ts);
-    return out.slice(0, SNIFF_HISTORY_MAX_ENTRIES);
-  } catch {
-    return [];
-  }
-}
-
-function writeAll(list: SniffHistoryEntry[]): void {
-  writeVersionedStorage({
-    key: SNIFF_HISTORY_STORAGE_KEY,
-    currentVersion: SNIFF_HISTORY_SCHEMA_VERSION,
-    payload: list
-  });
+function parseEntry(e: unknown): SniffHistoryEntry | null {
+  if (!e || typeof e !== 'object') return null;
+  const r = e as Partial<SniffHistoryEntry>;
+  if (typeof r.url !== 'string' || !r.url) return null;
+  return {
+    url: r.url,
+    title: typeof r.title === 'string' ? r.title : undefined,
+    ts: typeof r.ts === 'number' ? r.ts : Date.now(),
+    itemCount: typeof r.itemCount === 'number' ? r.itemCount : undefined
+  };
 }
 
 export interface UseSniffHistoryApi {
   entries: SniffHistoryEntry[];
+  /** R-80 — true while the initial DB read is in flight. Panels should
+   *  render a placeholder ("加载中…" / spinner) and avoid the empty-
+   *  state CTA so the user doesn't see a flash of "no history" before
+   *  the IPC round-trip resolves. */
+  isLoading: boolean;
   /** Add a URL (or move it to the front if it already exists),
    *  refreshing its title / itemCount with whatever the latest sniff
    *  reported. Returns the canonical (deduped) entry. */
@@ -135,15 +118,51 @@ export function applyAddOrPromote(
 }
 
 export function useSniffHistory(): UseSniffHistoryApi {
-  const [entries, setEntries] = useState<SniffHistoryEntry[]>(() => readAll());
+  const [entries, setEntries] = useState<SniffHistoryEntry[]>([]);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  // R-80 — guard against late-resolving bootstrap reads writing to an
+  // unmounted component (StrictMode double-invokes the effect). The
+  // ref is checked inside the async then-block.
+  const mountedRef = useRef<boolean>(true);
 
-  // Trailing-edge debounce of disk writes — same rationale as
-  // useHistory.ts (250ms is below human reaction time but coalesces
-  // bursts from rapid sniff retries).
+  // Initial DB load.
   useEffect(() => {
-    const t = setTimeout(() => writeAll(entries), 250);
-    return () => clearTimeout(t);
-  }, [entries]);
+    mountedRef.current = true;
+    const api = typeof window !== 'undefined' ? window.giftk?.db?.sniffHistory : undefined;
+    if (!api) {
+      // No bridge (e.g. test harness without preload) — flip loading
+      // off immediately so the consumer doesn't hang on a spinner.
+      setIsLoading(false);
+      return () => {
+        mountedRef.current = false;
+      };
+    }
+    api
+      .readAll()
+      .then((rows) => {
+        if (!mountedRef.current) return;
+        const out: SniffHistoryEntry[] = [];
+        const seen = new Set<string>();
+        for (const r of rows) {
+          const e = parseEntry(r);
+          if (!e || seen.has(e.url)) continue;
+          seen.add(e.url);
+          out.push(e);
+        }
+        out.sort((a, b) => b.ts - a.ts);
+        setEntries(out.slice(0, SNIFF_HISTORY_MAX_ENTRIES));
+      })
+      .catch(() => {
+        // Sniff history is convenience-only; an IPC failure leaves
+        // the in-memory list empty rather than crashing the panel.
+      })
+      .finally(() => {
+        if (mountedRef.current) setIsLoading(false);
+      });
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const addOrPromote = useCallback(
     (args: { url: string; title?: string; itemCount?: number; ts?: number }): SniffHistoryEntry => {
@@ -153,6 +172,16 @@ export function useSniffHistory(): UseSniffHistoryApi {
         result = next[0];
         return next;
       });
+      // Fire-and-forget DB upsert. We intentionally don't await — the
+      // optimistic in-memory update has already happened and the user
+      // sees the new entry immediately. A later read-back (e.g. after
+      // reload) will pick up whatever main persisted.
+      const api = typeof window !== 'undefined' ? window.giftk?.db?.sniffHistory : undefined;
+      if (api) {
+        api.upsert(result).catch(() => {
+          /* best-effort; sniff history is non-load-bearing. */
+        });
+      }
       return result;
     },
     []
@@ -160,11 +189,23 @@ export function useSniffHistory(): UseSniffHistoryApi {
 
   const remove = useCallback((url: string): void => {
     setEntries((prev) => prev.filter((e) => e.url !== url));
+    const api = typeof window !== 'undefined' ? window.giftk?.db?.sniffHistory : undefined;
+    if (api) {
+      api.remove(url).catch(() => {
+        /* best-effort. */
+      });
+    }
   }, []);
 
   const clear = useCallback((): void => {
     setEntries([]);
+    const api = typeof window !== 'undefined' ? window.giftk?.db?.sniffHistory : undefined;
+    if (api) {
+      api.clear().catch(() => {
+        /* best-effort. */
+      });
+    }
   }, []);
 
-  return { entries, addOrPromote, remove, clear };
+  return { entries, isLoading, addOrPromote, remove, clear };
 }

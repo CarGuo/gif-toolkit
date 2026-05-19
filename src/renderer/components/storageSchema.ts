@@ -183,3 +183,110 @@ export function writeVersionedStorage<T>(args: {
     }
   }
 }
+
+/**
+ * R-80 — Bootstrap import marker. Stored in localStorage once the
+ * one-time SQLite import has completed successfully so subsequent
+ * boots short-circuit out of the import code path entirely (the
+ * four legacy keys may already be deleted, but a paranoid user who
+ * manually re-pasted an old key shouldn't trigger a re-import that
+ * conflicts with rows the user has since edited in the DB).
+ */
+export const DB_BOOTSTRAP_DONE_KEY = 'giftk.db.bootstrap.v1';
+
+/**
+ * R-80 — All four legacy localStorage history keys. Centralised here
+ * so the bootstrap importer + future cleanup tools agree on the
+ * canonical list without each module re-declaring its own constant.
+ */
+export const LEGACY_HISTORY_KEYS = {
+  history: 'giftk.history.v1',
+  uploadHistory: 'giftk.uploadHistory.v1',
+  sniffHistory: 'giftk.sniffHistory.v1',
+  toolboxHistory: 'giftk.toolbox.history.v1'
+} as const;
+
+/**
+ * R-80 — Run the one-time bootstrap import from the four legacy
+ * localStorage keys into the main-process SQLite store.
+ *
+ * Contract:
+ *  - Idempotent across crashes: we set the marker AFTER a successful
+ *    import; a crash before that point re-runs INSERT OR IGNORE on
+ *    next boot.
+ *  - Lossless on read failure: if the legacy key is malformed we
+ *    pass the raw string verbatim and let main's defensive parser
+ *    drop bad rows. We never JSON.parse on the renderer side.
+ *  - Non-blocking on missing bridge: if `window.giftk?.db` is
+ *    unavailable (preload regression, dev-server hot reload mid-
+ *    refresh, …) the function resolves to `null` so callers can
+ *    proceed to read straight from the DB and the import retries
+ *    on the next boot.
+ *  - Cleanup: on a successful resolve we remove the four legacy
+ *    keys so a subsequent boot's read-back from the DB is the only
+ *    source of truth.
+ */
+export async function bootstrapImportFromLocalStorage(): Promise<{
+  history: number;
+  uploadHistory: number;
+  sniffHistory: number;
+  toolboxHistory: number;
+} | null> {
+  if (typeof window === 'undefined' || !window.localStorage) return null;
+  if (!window.giftk?.db?.bootstrapImport) return null;
+  let alreadyDone = false;
+  try {
+    alreadyDone = window.localStorage.getItem(DB_BOOTSTRAP_DONE_KEY) === '1';
+  } catch {
+    /* private mode etc. — proceed and let main de-dup via INSERT OR IGNORE. */
+  }
+  if (alreadyDone) return { history: 0, uploadHistory: 0, sniffHistory: 0, toolboxHistory: 0 };
+
+  const read = (k: string): string | null => {
+    try {
+      return window.localStorage.getItem(k);
+    } catch {
+      return null;
+    }
+  };
+  const payload = {
+    history: read(LEGACY_HISTORY_KEYS.history),
+    uploadHistory: read(LEGACY_HISTORY_KEYS.uploadHistory),
+    sniffHistory: read(LEGACY_HISTORY_KEYS.sniffHistory),
+    toolboxHistory: read(LEGACY_HISTORY_KEYS.toolboxHistory)
+  };
+  // If every slot is empty there's nothing to do — still mark done
+  // so we don't repeat the (cheap but pointless) round-trip on every
+  // boot. Returning zero-counts lets callers distinguish "imported
+  // 0 rows" from "import was skipped because it ran previously".
+  const allEmpty = !payload.history && !payload.uploadHistory && !payload.sniffHistory && !payload.toolboxHistory;
+  let result: {
+    history: number;
+    uploadHistory: number;
+    sniffHistory: number;
+    toolboxHistory: number;
+  };
+  if (allEmpty) {
+    result = { history: 0, uploadHistory: 0, sniffHistory: 0, toolboxHistory: 0 };
+  } else {
+    try {
+      result = await window.giftk.db.bootstrapImport(payload);
+    } catch {
+      // Main rejected — leave the legacy keys in place so a future
+      // boot can retry. Returning null tells the caller to fall back
+      // to a plain DB read (which may yield an empty list, but the
+      // app is still usable).
+      return null;
+    }
+  }
+  // Successful import → remove legacy keys + set the done marker.
+  try {
+    for (const k of Object.values(LEGACY_HISTORY_KEYS)) {
+      window.localStorage.removeItem(k);
+    }
+    window.localStorage.setItem(DB_BOOTSTRAP_DONE_KEY, '1');
+  } catch {
+    /* best-effort; the next boot will re-run INSERT OR IGNORE. */
+  }
+  return result;
+}

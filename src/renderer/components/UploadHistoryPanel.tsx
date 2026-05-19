@@ -29,9 +29,11 @@ interface Props {
   /** Override the page size (defaults to {@link UPLOAD_HISTORY_PAGE_SIZE}).
    *  Exposed so tests can render a deterministic pagination size. */
   pageSize?: number;
+  /** R-80 — true while the SQLite read on first mount is in flight. */
+  isLoading?: boolean;
 }
 
-export const UploadHistoryPanel: React.FC<Props> = ({ history, onRemove, onClear, pageSize = UPLOAD_HISTORY_PAGE_SIZE }) => {
+export const UploadHistoryPanel: React.FC<Props> = ({ history, onRemove, onClear, pageSize = UPLOAD_HISTORY_PAGE_SIZE, isLoading }) => {
   const [open, setOpen] = useState<UploadHistoryRecord | null>(null);
   const [page, setPage] = useState(1);
 
@@ -49,7 +51,9 @@ export const UploadHistoryPanel: React.FC<Props> = ({ history, onRemove, onClear
   if (history.length === 0) {
     return (
       <div style={{ padding: 24, textAlign: 'center', color: 'var(--muted)', fontSize: 12 }}>
-        还没有上传记录。处理完产物后,点列表行尾的「上传」或顶部的「⚡ 上传所有产物」即可发到图床。
+        {isLoading
+          ? '正在从本地数据库加载上传记录…'
+          : '还没有上传记录。处理完产物后,点列表行尾的「上传」或顶部的「⚡ 上传所有产物」即可发到图床。'}
       </div>
     );
   }

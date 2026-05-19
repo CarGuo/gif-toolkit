@@ -1,23 +1,27 @@
 /**
- * R-45 — Tests for the renderer-side upload-history pure helper.
+ * R-45 — Tests for the renderer-side upload-history hook + helpers.
  *
- * Focuses on the folding logic (applyProgressToRecord). Hook
- * lifecycle (localStorage persistence) is exercised indirectly via
- * useHistory.test which already has the same shape.
- *
- * R-54 — Extends coverage to the new pure helpers added with the
- * upload-gating / paged history / hash dedup change set:
- *   - isUploadConfigured
- *   - findUploadByHash
- *   - paginateHistory
- *   - applyProgressToRecord folding new fileHash + reused fields
+ * Covers:
+ *   1. Pure helpers (applyProgressToRecord folding rules incl. R-54
+ *      hash/reused fields and R-73 percent handling, statusBadge,
+ *      summarizeRecord, isUploadConfigured, findUploadByHash,
+ *      paginateHistory).
+ *   2. R-80 — useUploadHistory hook against a mocked
+ *      window.giftk.db.uploadHistory async stub
+ *      (readAll/upsert/remove/clear). The hook now exposes an
+ *      `isLoading` flag that flips false after the initial readAll
+ *      resolves; mutating helpers (start/applyProgress/remove/clear)
+ *      forward to the corresponding DB methods, with start/
+ *      applyProgress coalesced behind a 250ms idle window.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { act, renderHook } from '@testing-library/react';
 import {
   applyProgressToRecord,
   isUploadConfigured,
   findUploadByHash,
-  paginateHistory
+  paginateHistory,
+  useUploadHistory
 } from '../../src/renderer/components/useUploadHistory';
 import { statusBadge, summarizeRecord } from '../../src/renderer/components/UploadResultModal';
 import type { UploadConfigs, UploadHistoryRecord } from '../../src/shared/types';
@@ -32,6 +36,58 @@ function makeRecord(): UploadHistoryRecord {
     ]
   };
 }
+
+interface FakeUploadDb {
+  readAll: ReturnType<typeof vi.fn>;
+  upsert: ReturnType<typeof vi.fn>;
+  remove: ReturnType<typeof vi.fn>;
+  clear: ReturnType<typeof vi.fn>;
+  __rows: UploadHistoryRecord[];
+}
+
+function installFakeUploadDb(seed: UploadHistoryRecord[] = []): FakeUploadDb {
+  const rows: UploadHistoryRecord[] = seed.slice();
+  const fake: FakeUploadDb = {
+    readAll: vi.fn(async () => rows.slice()),
+    upsert: vi.fn(async (rec: UploadHistoryRecord) => {
+      const i = rows.findIndex((r) => r.id === rec.id);
+      if (i >= 0) rows[i] = rec; else rows.unshift(rec);
+    }),
+    remove: vi.fn(async (id: string) => {
+      const i = rows.findIndex((r) => r.id === id);
+      if (i >= 0) rows.splice(i, 1);
+    }),
+    clear: vi.fn(async () => { rows.length = 0; }),
+    __rows: rows
+  };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (window as any).giftk = {
+    ...((window as any).giftk || {}),
+    db: { uploadHistory: fake }
+  };
+  return fake;
+}
+
+async function flushLoad(): Promise<void> {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
+async function flushPersist(): Promise<void> {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+    // 250ms upsert debounce window inside the hook.
+    await new Promise((res) => setTimeout(res, 260));
+  });
+}
+
+beforeEach(() => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  delete (window as any).giftk;
+});
 
 describe('applyProgressToRecord', () => {
   it('updates status / url / markdown on a matching jobId', () => {
@@ -61,7 +117,6 @@ describe('applyProgressToRecord', () => {
     const after = applyProgressToRecord(before, {
       jobId: 'j1', status: 'uploading', percent: 50
     });
-    // Terminal already; should stay done.
     expect(after.items[0].status).toBe('done');
   });
 
@@ -153,10 +208,6 @@ describe('applyProgressToRecord', () => {
       items: [{ jobId: 'j1', fileName: 'a.gif', filePath: '/o/a.gif', status: 'uploading', percent: 30 }]
     };
     const after = applyProgressToRecord(before, {
-      // Some backends emit a status-only event with no percent (e.g.
-      // queued → uploading transition before the first stream tick).
-      // Casting through `as never` to construct the malformed emit on
-      // purpose — TS contract requires `percent: number`.
       jobId: 'j1', status: 'uploading'
     } as never);
     expect(after.items[0].percent).toBe(30);
@@ -309,5 +360,113 @@ describe('R-54 paginateHistory', () => {
     expect(rows).toEqual([]);
     expect(pageCount).toBe(1);
     expect(safePage).toBe(1);
+  });
+});
+
+// R-80 — Hook-lifecycle tests against the mocked DB stub.
+describe('useUploadHistory hook (R-80 DB-backed)', () => {
+  it('starts with isLoading true and flips false after the initial DB read', async () => {
+    installFakeUploadDb();
+    const { result } = renderHook(() => useUploadHistory());
+    expect(result.current.isLoading).toBe(true);
+    expect(result.current.history).toEqual([]);
+    await flushLoad();
+    expect(result.current.isLoading).toBe(false);
+  });
+
+  it('flips isLoading false when the bridge is unavailable', async () => {
+    const { result } = renderHook(() => useUploadHistory());
+    await flushLoad();
+    expect(result.current.isLoading).toBe(false);
+    expect(result.current.history).toEqual([]);
+  });
+
+  it('hydrates from db.uploadHistory.readAll on mount', async () => {
+    const seed: UploadHistoryRecord = {
+      id: 'rec-1', createdAt: 1, backend: 'customWeb',
+      items: [{ jobId: 'j1', fileName: 'a.gif', filePath: '/o/a.gif', status: 'done', url: 'https://x' }]
+    };
+    const fake = installFakeUploadDb([seed]);
+    const { result } = renderHook(() => useUploadHistory());
+    await flushLoad();
+    expect(fake.readAll).toHaveBeenCalledTimes(1);
+    expect(result.current.history.map((r) => r.id)).toEqual(['rec-1']);
+  });
+
+  it('start() prepends a new record and forwards a debounced upsert to the DB', async () => {
+    const fake = installFakeUploadDb();
+    const { result } = renderHook(() => useUploadHistory());
+    await flushLoad();
+    let id = '';
+    act(() => {
+      id = result.current.start({
+        backend: 'customWeb',
+        items: [{ jobId: 'j1', fileName: 'a.gif', filePath: '/o/a.gif', status: 'pending' }]
+      });
+    });
+    expect(result.current.history).toHaveLength(1);
+    expect(result.current.history[0].id).toBe(id);
+    // Debounced — not yet flushed.
+    expect(fake.upsert).not.toHaveBeenCalled();
+    await flushPersist();
+    expect(fake.upsert).toHaveBeenCalledWith(expect.objectContaining({ id }));
+  });
+
+  it('applyProgress folds an emit into the matching record and queues an upsert', async () => {
+    const fake = installFakeUploadDb();
+    const { result } = renderHook(() => useUploadHistory());
+    await flushLoad();
+    let id = '';
+    act(() => {
+      id = result.current.start({
+        backend: 'customWeb',
+        items: [{ jobId: 'j1', fileName: 'a.gif', filePath: '/o/a.gif', status: 'pending' }]
+      });
+    });
+    act(() => {
+      result.current.applyProgress(id, { jobId: 'j1', status: 'done', percent: 100, url: 'https://x' });
+    });
+    expect(result.current.history[0].items[0].status).toBe('done');
+    expect(result.current.history[0].items[0].url).toBe('https://x');
+    await flushPersist();
+    // The post-progress upsert payload reflects the merged shape.
+    const last = fake.upsert.mock.calls[fake.upsert.mock.calls.length - 1][0] as UploadHistoryRecord;
+    expect(last.id).toBe(id);
+    expect(last.items[0].status).toBe('done');
+  });
+
+  it('remove drops the record and forwards to db.uploadHistory.remove', async () => {
+    const fake = installFakeUploadDb();
+    const { result } = renderHook(() => useUploadHistory());
+    await flushLoad();
+    let id = '';
+    act(() => {
+      id = result.current.start({
+        backend: 'customWeb',
+        items: [{ jobId: 'j1', fileName: 'a.gif', filePath: '/o/a.gif', status: 'pending' }]
+      });
+    });
+    act(() => {
+      result.current.remove(id);
+    });
+    expect(result.current.history).toHaveLength(0);
+    expect(fake.remove).toHaveBeenCalledWith(id);
+  });
+
+  it('clear empties memory and calls db.uploadHistory.clear', async () => {
+    const fake = installFakeUploadDb();
+    const { result } = renderHook(() => useUploadHistory());
+    await flushLoad();
+    act(() => {
+      result.current.start({
+        backend: 'customWeb',
+        items: [{ jobId: 'j1', fileName: 'a.gif', filePath: '/o/a.gif', status: 'pending' }]
+      });
+    });
+    act(() => {
+      result.current.clear();
+    });
+    expect(result.current.history).toEqual([]);
+    expect(fake.clear).toHaveBeenCalledTimes(1);
   });
 });

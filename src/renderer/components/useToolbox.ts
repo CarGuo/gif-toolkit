@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { TaskProgress, ToolboxJob, ToolboxKind, ToolboxParams } from '../../shared/types';
 import { TOOLBOX_INPUT_EXTENSIONS } from '../../shared/types';
-import { readVersionedStorage, writeVersionedStorage } from './storageSchema';
+
+/**
+ * R-80 — storage moved from localStorage to a main-process SQLite
+ * store. The hook still owns an in-memory mirror so the panel can
+ * render synchronously; mutations are optimistic + fire-and-forget
+ * IPC. Initial load is async, gated on `isHistoryLoading`.
+ */
 
 /**
  * R-35 / R-39 — useToolbox.
@@ -62,7 +68,6 @@ const TOOLBOX_HISTORY_LIMIT = 200;
  * blobs are accepted as v0 by the shared reader.
  */
 export const TOOLBOX_HISTORY_SCHEMA_VERSION = 1;
-const TOOLBOX_HISTORY_MIGRATORS: ReadonlyArray<(prev: unknown[]) => unknown[]> = [];
 
 export interface UseToolboxResult {
   kind: ToolboxKind;
@@ -87,6 +92,8 @@ export interface UseToolboxResult {
   cancel: () => Promise<void>;
   /** R-39 — completed runs, newest first. */
   toolboxHistory: ToolboxHistoryEntry[];
+  /** R-80 — true while the initial DB read is in flight. */
+  isHistoryLoading: boolean;
   removeHistoryEntry: (id: string) => void;
   clearToolboxHistory: () => void;
 }
@@ -144,40 +151,17 @@ function genJobId(): string {
   return `tb_${Date.now().toString(36)}_${counter}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-/** R-39 — best-effort load. Treats every parse / shape error as "no
- *  history" so a corrupted entry never blocks the panel from booting.
- *  R-79b — read goes through the shared envelope helper; legacy bare
- *  arrays are still accepted as v0. */
-function loadHistoryFromStorage(): ToolboxHistoryEntry[] {
-  if (typeof window === 'undefined' || !window.localStorage) return [];
-  const { payload } = readVersionedStorage<unknown>({
-    key: TOOLBOX_HISTORY_STORAGE_KEY,
-    currentVersion: TOOLBOX_HISTORY_SCHEMA_VERSION,
-    migrators: TOOLBOX_HISTORY_MIGRATORS
-  });
-  try {
-    return payload.filter((e): e is ToolboxHistoryEntry => {
-      if (!e || typeof e !== 'object') return false;
-      const x = e as Record<string, unknown>;
-      return typeof x.id === 'string' &&
-        typeof x.kind === 'string' &&
-        typeof x.inputPath === 'string' &&
-        typeof x.displayName === 'string' &&
-        Array.isArray(x.outputs) &&
-        typeof x.finishedAt === 'number' &&
-        (x.status === 'done' || x.status === 'failed' || x.status === 'cancelled' || x.status === 'skipped');
-    });
-  } catch {
-    return [];
-  }
-}
-
-function saveHistoryToStorage(list: ToolboxHistoryEntry[]): void {
-  writeVersionedStorage({
-    key: TOOLBOX_HISTORY_STORAGE_KEY,
-    currentVersion: TOOLBOX_HISTORY_SCHEMA_VERSION,
-    payload: list
-  });
+/** R-39 — best-effort parse of one row from the DB. Treats every
+ *  shape error as "drop the row" so a corrupted blob never blocks
+ *  the panel from booting. */
+function parseHistoryEntry(e: unknown): ToolboxHistoryEntry | null {
+  if (!e || typeof e !== 'object') return null;
+  const x = e as Record<string, unknown>;
+  if (typeof x.id !== 'string' || typeof x.kind !== 'string' ||
+      typeof x.inputPath !== 'string' || typeof x.displayName !== 'string' ||
+      !Array.isArray(x.outputs) || typeof x.finishedAt !== 'number') return null;
+  if (x.status !== 'done' && x.status !== 'failed' && x.status !== 'cancelled' && x.status !== 'skipped') return null;
+  return e as ToolboxHistoryEntry;
 }
 
 const TERMINAL: ReadonlySet<TaskProgress['status']> = new Set([
@@ -200,7 +184,12 @@ export function useToolbox(): UseToolboxResult {
   const [progress, setProgress] = useState<Record<string, TaskProgress>>({});
   const [lastOutputDir, setLastOutputDir] = useState<string | null>(null);
   const [isRunning, setIsRunning] = useState(false);
-  const [toolboxHistory, setToolboxHistory] = useState<ToolboxHistoryEntry[]>(() => loadHistoryFromStorage());
+  const [toolboxHistory, setToolboxHistory] = useState<ToolboxHistoryEntry[]>([]);
+  const [isHistoryLoading, setIsHistoryLoading] = useState<boolean>(true);
+  // R-80 — guard async DB reads against late resolution after unmount
+  // (StrictMode double-invokes effects in dev). Checked before any
+  // setState in the bootstrap then-block.
+  const mountedRef = useRef<boolean>(true);
   // Track ids the toolbox owns so we can ignore unrelated `process:progress`
   // events flowing through the same IPC channel (e.g. from a home-tab batch).
   const ownedIdsRef = useRef<Set<string>>(new Set());
@@ -321,18 +310,56 @@ export function useToolbox(): UseToolboxResult {
   }, []);
 
   const removeHistoryEntry = useCallback((id: string): void => {
-    setToolboxHistory((prev) => {
-      const next = prev.filter((e) => e.id !== id);
-      saveHistoryToStorage(next);
-      return next;
-    });
+    setToolboxHistory((prev) => prev.filter((e) => e.id !== id));
+    const api = typeof window !== 'undefined' ? window.giftk?.db?.toolboxHistory : undefined;
+    if (api) {
+      api.remove(id).catch(() => { /* best-effort. */ });
+    }
   }, []);
 
   const clearToolboxHistory = useCallback((): void => {
-    setToolboxHistory(() => {
-      saveHistoryToStorage([]);
-      return [];
-    });
+    setToolboxHistory([]);
+    const api = typeof window !== 'undefined' ? window.giftk?.db?.toolboxHistory : undefined;
+    if (api) {
+      api.clear().catch(() => { /* best-effort. */ });
+    }
+  }, []);
+
+  // R-80 — initial DB load. Toolbox history is convenience-only so a
+  // bridge / IPC failure leaves the in-memory list empty rather than
+  // crashing the panel.
+  useEffect(() => {
+    mountedRef.current = true;
+    const api = typeof window !== 'undefined' ? window.giftk?.db?.toolboxHistory : undefined;
+    if (!api) {
+      setIsHistoryLoading(false);
+      return () => {
+        mountedRef.current = false;
+      };
+    }
+    api
+      .readAll()
+      .then((rows) => {
+        if (!mountedRef.current) return;
+        const out: ToolboxHistoryEntry[] = [];
+        for (const r of rows) {
+          const e = parseHistoryEntry(r);
+          if (e) out.push(e);
+        }
+        // newest-first (DB returns ordered, but defensive sort here
+        // protects against future schema drift).
+        out.sort((a, b) => b.finishedAt - a.finishedAt);
+        setToolboxHistory(out.slice(0, TOOLBOX_HISTORY_LIMIT));
+      })
+      .catch(() => {
+        /* keep empty. */
+      })
+      .finally(() => {
+        if (mountedRef.current) setIsHistoryLoading(false);
+      });
+    return () => {
+      mountedRef.current = false;
+    };
   }, []);
 
   // R-39 — promote terminal-status progress events into history entries.
@@ -366,9 +393,15 @@ export function useToolbox(): UseToolboxResult {
         // Replace any pre-existing entry with the same id (defensive).
         const filtered = prev.filter((e) => e.id !== entry.id);
         const next = [entry, ...filtered].slice(0, TOOLBOX_HISTORY_LIMIT);
-        saveHistoryToStorage(next);
         return next;
       });
+      // R-80 — fire-and-forget DB upsert. Toolbox history is
+      // convenience-only; an IPC failure leaves the in-memory list
+      // intact and the next boot just won't see the row.
+      const api = typeof window !== 'undefined' ? window.giftk?.db?.toolboxHistory : undefined;
+      if (api) {
+        api.upsert(entry).catch(() => { /* best-effort. */ });
+      }
       // Drop the row from the queue so the user sees a strict "to-do".
       setJobs((prev) => prev.filter((j) => j.id !== p.taskId));
       setProgress((prev) => {
@@ -456,6 +489,7 @@ export function useToolbox(): UseToolboxResult {
     start,
     cancel,
     toolboxHistory,
+    isHistoryLoading,
     removeHistoryEntry,
     clearToolboxHistory
   };

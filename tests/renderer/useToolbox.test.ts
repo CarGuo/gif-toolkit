@@ -2,23 +2,34 @@
  * R-35 — useToolbox hook unit tests.
  *
  * The hook is a thin renderer-side state manager around the toolbox IPC
- * surface. We exercise:
+ * surface plus the SQLite-backed toolbox history. We exercise:
  *   1. Default params per kind (mirrors processor's defaults).
  *   2. setKind clears jobs/progress/lastOutputDir and resets params.
  *   3. addJobsFromPaths dedupes by inputPath.
  *   4. removeJob / clearJobs clean both jobs and progress.
  *   5. start() rejects when jobs is empty and rolls back isRunning on error.
- *   6. start() ignores `process:progress` events whose taskId we don't own
- *      (so an unrelated home-tab batch can't poison toolbox state).
- *   7. isRunning auto-flips false once every owned job reaches a terminal
- *      status.
+ *   6. Progress events for foreign taskIds are ignored.
+ *   7. isRunning auto-flips false once every owned job reaches terminal.
+ *   8. R-39 — terminal events migrate jobs into history; the hook
+ *      forwards toolbox-history mutations to the mocked
+ *      window.giftk.db.toolboxHistory async stubs (readAll/upsert/
+ *      remove/clear) and exposes a new `isHistoryLoading` flag.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
-import { defaultParamsFor, useToolbox, TOOLBOX_HISTORY_STORAGE_KEY } from '../../src/renderer/components/useToolbox';
+import { defaultParamsFor, useToolbox } from '../../src/renderer/components/useToolbox';
 import type { TaskProgress, ToolboxStartResult } from '../../src/shared/types';
 
 type ProgressListener = (p: TaskProgress) => void;
+
+interface FakeToolboxDb {
+  readAll: ReturnType<typeof vi.fn>;
+  upsert: ReturnType<typeof vi.fn>;
+  remove: ReturnType<typeof vi.fn>;
+  clear: ReturnType<typeof vi.fn>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  __rows: any[];
+}
 
 interface FakeGiftk {
   onProgress: (cb: ProgressListener) => () => void;
@@ -26,11 +37,35 @@ interface FakeGiftk {
   startToolbox: ReturnType<typeof vi.fn>;
   cancelAll: ReturnType<typeof vi.fn>;
   openOutputDir: ReturnType<typeof vi.fn>;
+  db: { toolboxHistory: FakeToolboxDb };
   __emit: (p: TaskProgress) => void;
 }
 
-function installFakeGiftk(): FakeGiftk {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function installFakeToolboxDb(seed: any[] = []): FakeToolboxDb {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const rows: any[] = seed.slice();
+  const fake: FakeToolboxDb = {
+    readAll: vi.fn(async () => rows.slice()),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    upsert: vi.fn(async (e: any) => {
+      const i = rows.findIndex((r) => r && r.id === e.id);
+      if (i >= 0) rows[i] = e; else rows.unshift(e);
+    }),
+    remove: vi.fn(async (id: string) => {
+      const i = rows.findIndex((r) => r && r.id === id);
+      if (i >= 0) rows.splice(i, 1);
+    }),
+    clear: vi.fn(async () => { rows.length = 0; }),
+    __rows: rows
+  };
+  return fake;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function installFakeGiftk(seedHistory: any[] = []): FakeGiftk {
   const listeners: ProgressListener[] = [];
+  const fakeDb = installFakeToolboxDb(seedHistory);
   const fake: FakeGiftk = {
     onProgress: (cb) => {
       listeners.push(cb);
@@ -43,6 +78,7 @@ function installFakeGiftk(): FakeGiftk {
     startToolbox: vi.fn(async (): Promise<ToolboxStartResult> => ({ ok: true, outputDir: '/tmp/toolbox/x' })),
     cancelAll: vi.fn(async () => undefined),
     openOutputDir: vi.fn(async () => undefined),
+    db: { toolboxHistory: fakeDb },
     __emit: (p) => listeners.forEach((l) => l(p))
   };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -50,13 +86,18 @@ function installFakeGiftk(): FakeGiftk {
   return fake;
 }
 
+async function flushLoad(): Promise<void> {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
 describe('defaultParamsFor', () => {
   it('returns sensible defaults per kind', () => {
     expect(defaultParamsFor('video-to-gif')).toEqual({ fps: 12, width: 800 });
     expect(defaultParamsFor('video-to-webp')).toMatchObject({ quality: 75, loop: 0 });
     expect(defaultParamsFor('gif-resize')).toEqual({ targetWidth: 480 });
-    // R-36 — gif-optimize default surfaces a `method` so the renderer
-    // form can render the right sub-fields without an explicit pick.
     expect(defaultParamsFor('gif-optimize')).toEqual({
       method: 'lossy',
       lossy: 80,
@@ -65,8 +106,6 @@ describe('defaultParamsFor', () => {
     });
   });
 
-  // R-37 — Trim/Speed/Reverse/Rotate defaults. The hook + main-side
-  // sanitiser both rely on these exact shapes; keep them in lockstep.
   it('exposes R-37 toolbox defaults', () => {
     expect(defaultParamsFor('trim')).toEqual({});
     expect(defaultParamsFor('speed')).toEqual({ speedFactor: 1 });
@@ -74,17 +113,10 @@ describe('defaultParamsFor', () => {
     expect(defaultParamsFor('rotate')).toEqual({ rotateDegrees: 90, flipH: false, flipV: false });
   });
 
-  // R-38 — Crop ships with no rect by default; the user must drag one.
-  // The renderer also enforces a single-file Start guard, but the hook
-  // itself stays kind-agnostic so backend integrations remain reusable.
   it('exposes R-38 crop default (empty rect)', () => {
     expect(defaultParamsFor('crop')).toEqual({});
   });
 
-  // R-42 — gif-webp-convert defaults to webp output. The actual flip
-  // (input is .webp → default to .gif and vice versa) lives in the
-  // ToolboxPanel effect, not the hook, because the hook is purposely
-  // unaware of which file types live in the queue.
   it('exposes R-42 gif-webp-convert default (target webp)', () => {
     expect(defaultParamsFor('gif-webp-convert')).toEqual({ targetFormat: 'webp' });
   });
@@ -92,14 +124,62 @@ describe('defaultParamsFor', () => {
 
 describe('useToolbox', () => {
   beforeEach(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    delete (window as any).giftk;
     installFakeGiftk();
-    // R-39 — every test starts with an empty history so localStorage
-    // residue from earlier tests doesn't leak in.
-    try { window.localStorage.removeItem(TOOLBOX_HISTORY_STORAGE_KEY); } catch { /* ignore */ }
   });
 
-  it('defaults to video-to-gif and resets params on setKind', () => {
+  it('starts with isHistoryLoading true and flips false after the initial DB read', async () => {
     const { result } = renderHook(() => useToolbox());
+    expect(result.current.isHistoryLoading).toBe(true);
+    expect(result.current.toolboxHistory).toEqual([]);
+    await flushLoad();
+    expect(result.current.isHistoryLoading).toBe(false);
+  });
+
+  it('flips isHistoryLoading false when the bridge is unavailable', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    delete (window as any).giftk;
+    const { result } = renderHook(() => useToolbox());
+    await flushLoad();
+    expect(result.current.isHistoryLoading).toBe(false);
+    expect(result.current.toolboxHistory).toEqual([]);
+  });
+
+  it('hydrates toolboxHistory from db.toolboxHistory.readAll on mount', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    delete (window as any).giftk;
+    const fake = installFakeGiftk([
+      {
+        id: 'h-1',
+        kind: 'video-to-gif',
+        inputPath: '/a/clip.mp4',
+        displayName: 'clip.mp4',
+        outputs: ['/o/clip.gif'],
+        params: { fps: 12, width: 800 },
+        status: 'done',
+        finishedAt: 2000
+      },
+      {
+        id: 'h-2',
+        kind: 'gif-resize',
+        inputPath: '/a/loop.gif',
+        displayName: 'loop.gif',
+        outputs: ['/o/loop.gif'],
+        params: { targetWidth: 480 },
+        status: 'failed',
+        finishedAt: 1000
+      }
+    ]);
+    const { result } = renderHook(() => useToolbox());
+    await flushLoad();
+    expect(fake.db.toolboxHistory.readAll).toHaveBeenCalledTimes(1);
+    expect(result.current.toolboxHistory.map((e) => e.id)).toEqual(['h-1', 'h-2']);
+  });
+
+  it('defaults to video-to-gif and resets params on setKind', async () => {
+    const { result } = renderHook(() => useToolbox());
+    await flushLoad();
     expect(result.current.kind).toBe('video-to-gif');
     expect(result.current.params).toEqual({ fps: 12, width: 800 });
 
@@ -110,13 +190,13 @@ describe('useToolbox', () => {
     expect(result.current.params).toEqual({ targetWidth: 480 });
   });
 
-  it('addJobsFromPaths dedupes by inputPath', () => {
+  it('addJobsFromPaths dedupes by inputPath', async () => {
     const { result } = renderHook(() => useToolbox());
+    await flushLoad();
     act(() => {
       result.current.addJobsFromPaths(['/a/x.mp4', '/a/y.mp4']);
     });
     act(() => {
-      // Re-add one duplicate plus a new one.
       result.current.addJobsFromPaths(['/a/x.mp4', '/a/z.mp4']);
     });
     expect(result.current.jobs.map((j) => j.inputPath)).toEqual([
@@ -126,22 +206,14 @@ describe('useToolbox', () => {
     ]);
   });
 
-  it('setKind keeps queued jobs whose extension is still allowed (R-38, updated R-41)', () => {
-    // Before R-38 setKind unconditionally cleared jobs. The new behaviour
-    // is to filter jobs by the *new* kind's extension whitelist so that
-    // switching e.g. video-to-gif → video-to-webp (both accept video)
-    // preserves user work, while switching to a GIF/WebP-only tool
-    // drops video items.
-    // R-41 — Trim no longer accepts .mp4 (it's GIF_OR_WEBP now). Use
-    // video-to-gif as the multi-video seed and trim as the
-    // multi-image seed.
+  it('setKind keeps queued jobs whose extension is still allowed (R-38, updated R-41)', async () => {
     const { result } = renderHook(() => useToolbox());
+    await flushLoad();
     act(() => {
       result.current.addJobsFromPaths(['/a/clip.mp4', '/a/clip.mov']);
     });
     expect(result.current.jobs).toHaveLength(2);
 
-    // video-to-webp also accepts video → both should remain.
     act(() => {
       result.current.setKind('video-to-webp');
     });
@@ -150,21 +222,15 @@ describe('useToolbox', () => {
       '/a/clip.mp4'
     ]);
 
-    // gif-resize only accepts .gif/.webp → both .mp4/.mov should be dropped.
     act(() => {
       result.current.setKind('gif-resize');
     });
     expect(result.current.jobs).toEqual([]);
   });
 
-  // R-41 — Reverse / Trim / Speed / Rotate / Crop accept .gif AND .webp.
-  // Switching from a video-only kind to one of those tools must drop
-  // video rows but preserve gif/webp rows. Switching from one GIF/WebP
-  // tool to another should preserve everything.
-  it('setKind to reverse drops video jobs but keeps gif/webp (R-41)', () => {
+  it('setKind to reverse drops video jobs but keeps gif/webp (R-41)', async () => {
     const { result } = renderHook(() => useToolbox());
-    // Seed under video-to-gif (accepts mp4/mov/webm) for the videos,
-    // then add gif/webp under trim (accepts those).
+    await flushLoad();
     act(() => {
       result.current.addJobsFromPaths(['/a/clip.mp4', '/a/clip.mov']);
     });
@@ -174,9 +240,6 @@ describe('useToolbox', () => {
     act(() => {
       result.current.addJobsFromPaths(['/a/loop.gif', '/a/anim.webp']);
     });
-    // Switching trim → reverse keeps both .gif and .webp (both are in
-    // GIF_OR_WEBP whitelist). The earlier .mp4/.mov entries were
-    // already filtered when we entered trim.
     act(() => {
       result.current.setKind('reverse');
     });
@@ -186,10 +249,9 @@ describe('useToolbox', () => {
     ]);
   });
 
-  // R-41 — addJobsFromPaths under reverse must reject .mp4 but accept
-  // both .gif and .webp.
-  it('addJobsFromPaths under reverse accepts gif and webp, rejects video (R-41)', () => {
+  it('addJobsFromPaths under reverse accepts gif and webp, rejects video (R-41)', async () => {
     const { result } = renderHook(() => useToolbox());
+    await flushLoad();
     act(() => {
       result.current.setKind('reverse');
     });
@@ -202,14 +264,9 @@ describe('useToolbox', () => {
     ]);
   });
 
-  // R-41 — setKind exposes an optional `confirm` callback. When the
-  // target kind would drop incompatible jobs, the hook calls confirm
-  // with the drop count. If confirm returns false, the kind switch is
-  // aborted (kind + jobs both unchanged) and setKind returns false.
-  // If confirm returns true (or isn't provided), the switch proceeds
-  // and incompatible rows are filtered.
-  it('setKind confirm callback can abort an incompatible switch (R-41)', () => {
+  it('setKind confirm callback can abort an incompatible switch (R-41)', async () => {
     const { result } = renderHook(() => useToolbox());
+    await flushLoad();
     act(() => {
       result.current.addJobsFromPaths(['/a/clip.mp4', '/a/clip.mov']);
     });
@@ -224,14 +281,11 @@ describe('useToolbox', () => {
         }
       });
     });
-    // Confirm rejected → kind stays as the previous video-to-gif and
-    // queue is untouched.
     expect(returned).toBe(false);
     expect(droppedCount).toBe(2);
     expect(result.current.kind).toBe('video-to-gif');
     expect(result.current.jobs).toHaveLength(2);
 
-    // Now approve the drop and confirm the kind/jobs flip.
     act(() => {
       returned = result.current.setKind('reverse', { confirm: () => true });
     });
@@ -241,9 +295,12 @@ describe('useToolbox', () => {
   });
 
   it('removeJob and clearJobs both purge progress entries', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    delete (window as any).giftk;
     const fake = installFakeGiftk();
     fake.startToolbox.mockResolvedValueOnce({ ok: true, outputDir: '/o' });
     const { result } = renderHook(() => useToolbox());
+    await flushLoad();
     act(() => {
       result.current.addJobsFromPaths(['/a/1.mp4', '/a/2.mp4']);
     });
@@ -266,6 +323,7 @@ describe('useToolbox', () => {
 
   it('start() rejects with error when no jobs are queued', async () => {
     const { result } = renderHook(() => useToolbox());
+    await flushLoad();
     let r: { ok: boolean; error?: string } | undefined;
     await act(async () => {
       r = await result.current.start();
@@ -276,9 +334,12 @@ describe('useToolbox', () => {
   });
 
   it('start() flips isRunning true and remembers outputDir on success', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    delete (window as any).giftk;
     const fake = installFakeGiftk();
     fake.startToolbox.mockResolvedValueOnce({ ok: true, outputDir: '/out/toolbox/x' });
     const { result } = renderHook(() => useToolbox());
+    await flushLoad();
     act(() => {
       result.current.addJobsFromPaths(['/a/1.mp4']);
     });
@@ -291,9 +352,12 @@ describe('useToolbox', () => {
   });
 
   it('start() rolls back isRunning when IPC throws', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    delete (window as any).giftk;
     const fake = installFakeGiftk();
     fake.startToolbox.mockRejectedValueOnce(new Error('boom'));
     const { result } = renderHook(() => useToolbox());
+    await flushLoad();
     act(() => {
       result.current.addJobsFromPaths(['/a/1.mp4']);
     });
@@ -307,8 +371,11 @@ describe('useToolbox', () => {
   });
 
   it('progress events for foreign taskIds are ignored', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    delete (window as any).giftk;
     const fake = installFakeGiftk();
     const { result } = renderHook(() => useToolbox());
+    await flushLoad();
     act(() => {
       result.current.addJobsFromPaths(['/a/1.mp4']);
     });
@@ -327,8 +394,11 @@ describe('useToolbox', () => {
   });
 
   it('flips isRunning false after every owned job reaches a terminal status', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    delete (window as any).giftk;
     const fake = installFakeGiftk();
     const { result } = renderHook(() => useToolbox());
+    await flushLoad();
     act(() => {
       result.current.addJobsFromPaths(['/a/1.mp4', '/a/2.mp4']);
     });
@@ -347,13 +417,12 @@ describe('useToolbox', () => {
     expect(result.current.isRunning).toBe(false);
   });
 
-  // R-39 — terminal-status progress events promote the row out of `jobs`
-  // into `toolboxHistory`, persist it to localStorage and clear the
-  // matching `progress` entry. The audit log keeps both successful and
-  // failed runs (the UI distinguishes them via row classes).
-  it('done event migrates the job from queue into history', async () => {
+  it('done event migrates the job from queue into history and forwards db.toolboxHistory.upsert', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    delete (window as any).giftk;
     const fake = installFakeGiftk();
     const { result } = renderHook(() => useToolbox());
+    await flushLoad();
     act(() => {
       result.current.addJobsFromPaths(['/a/clip.mp4']);
     });
@@ -378,11 +447,15 @@ describe('useToolbox', () => {
       outputs: ['/o/clip.gif'],
       status: 'done'
     });
+    expect(fake.db.toolboxHistory.upsert).toHaveBeenCalledWith(expect.objectContaining({ id, status: 'done' }));
   });
 
   it('failed event also migrates the job (with error) into history', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    delete (window as any).giftk;
     const fake = installFakeGiftk();
     const { result } = renderHook(() => useToolbox());
+    await flushLoad();
     act(() => {
       result.current.addJobsFromPaths(['/a/bad.mp4']);
     });
@@ -400,14 +473,12 @@ describe('useToolbox', () => {
     expect(result.current.toolboxHistory[0].error).toBe('ffprobe boom');
   });
 
-  // R-43 H-2 — addJobsFromPaths uses the closure `kind` rather than the
-  // hard-coded literal 'video-to-gif'. A queued job under any non-default
-  // kind must report that kind both on the live row and (after a `done`
-  // event) in toolbox history; otherwise history would mislabel every
-  // run as video-to-gif and downstream filters would break.
   it('R-43 — addJobsFromPaths records the active kind, not a hard-coded one', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    delete (window as any).giftk;
     const fake = installFakeGiftk();
     const { result } = renderHook(() => useToolbox());
+    await flushLoad();
     act(() => {
       result.current.setKind('gif-webp-convert');
     });
@@ -427,9 +498,12 @@ describe('useToolbox', () => {
     expect(result.current.toolboxHistory[0].kind).toBe('gif-webp-convert');
   });
 
-  it('history persists to localStorage and survives reload', async () => {
+  it('history persists via the DB stub and survives remount', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    delete (window as any).giftk;
     const fake = installFakeGiftk();
     const { result, unmount } = renderHook(() => useToolbox());
+    await flushLoad();
     act(() => {
       result.current.addJobsFromPaths(['/a/clip.mp4']);
     });
@@ -441,27 +515,25 @@ describe('useToolbox', () => {
       fake.__emit({ taskId: id, status: 'done', percent: 100, outputs: ['/o/clip.gif'] });
     });
     expect(result.current.toolboxHistory).toHaveLength(1);
-
-    // Persisted blob lives in localStorage under the well-known key.
-    // R-79b: now wrapped in `{version, payload}` envelope.
-    const raw = window.localStorage.getItem(TOOLBOX_HISTORY_STORAGE_KEY);
-    expect(raw).toBeTruthy();
-    const parsed = JSON.parse(raw as string);
-    expect(parsed.version).toBe(1);
-    expect(Array.isArray(parsed.payload)).toBe(true);
-    expect(parsed.payload).toHaveLength(1);
-    expect(parsed.payload[0]).toMatchObject({ inputPath: '/a/clip.mp4', status: 'done' });
+    // The fake DB now has the row.
+    expect(fake.db.toolboxHistory.__rows).toHaveLength(1);
+    expect(fake.db.toolboxHistory.__rows[0]).toMatchObject({ inputPath: '/a/clip.mp4', status: 'done' });
 
     unmount();
-    // Re-mount; the new hook instance reads localStorage on init.
+    // Re-mount against the same fake (giftk still installed) — it
+    // reads the seeded row out of the DB stub.
     const remount = renderHook(() => useToolbox());
+    await flushLoad();
     expect(remount.result.current.toolboxHistory).toHaveLength(1);
     expect(remount.result.current.toolboxHistory[0].id).toBe(id);
   });
 
-  it('removeHistoryEntry and clearToolboxHistory both update storage', async () => {
+  it('removeHistoryEntry forwards to db.toolboxHistory.remove and clearToolboxHistory calls clear', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    delete (window as any).giftk;
     const fake = installFakeGiftk();
     const { result } = renderHook(() => useToolbox());
+    await flushLoad();
     act(() => {
       result.current.addJobsFromPaths(['/a/x.mp4', '/a/y.mp4']);
     });
@@ -480,18 +552,21 @@ describe('useToolbox', () => {
     });
     expect(result.current.toolboxHistory).toHaveLength(1);
     expect(result.current.toolboxHistory[0].id).toBe(ids[1]);
+    expect(fake.db.toolboxHistory.remove).toHaveBeenCalledWith(ids[0]);
 
     act(() => {
       result.current.clearToolboxHistory();
     });
     expect(result.current.toolboxHistory).toHaveLength(0);
-    const raw = window.localStorage.getItem(TOOLBOX_HISTORY_STORAGE_KEY);
-    expect(raw).toBe('{"version":1,"payload":[]}');
+    expect(fake.db.toolboxHistory.clear).toHaveBeenCalledTimes(1);
   });
 
   it('duplicate done events for the same id are idempotent', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    delete (window as any).giftk;
     const fake = installFakeGiftk();
     const { result } = renderHook(() => useToolbox());
+    await flushLoad();
     act(() => {
       result.current.addJobsFromPaths(['/a/x.mp4']);
     });

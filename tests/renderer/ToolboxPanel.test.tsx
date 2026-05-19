@@ -23,15 +23,47 @@ interface FakeGiftk {
   startToolbox: ReturnType<typeof vi.fn>;
   cancelAll: ReturnType<typeof vi.fn>;
   openOutputDir: ReturnType<typeof vi.fn>;
+  /** R-80 — fake of the toolboxHistory IPC surface backed by an in-
+   *  memory array. Mirrors the same shape that the preload exposes. */
+  db: {
+    toolboxHistory: {
+      readAll: ReturnType<typeof vi.fn>;
+      upsert: ReturnType<typeof vi.fn>;
+      remove: ReturnType<typeof vi.fn>;
+      clear: ReturnType<typeof vi.fn>;
+    };
+  };
+  /** Test-only handle: the in-memory store backing `db.toolboxHistory`. */
+  __toolboxRows: unknown[];
 }
 
 function installFakeGiftk(): FakeGiftk {
+  const rows: unknown[] = [];
   const fake: FakeGiftk = {
     onProgress: vi.fn(() => () => undefined),
     toolboxPickFiles: vi.fn(async () => [] as string[]),
     startToolbox: vi.fn(async () => ({ ok: true, outputDir: '/o' })),
     cancelAll: vi.fn(async () => undefined),
-    openOutputDir: vi.fn(async () => undefined)
+    openOutputDir: vi.fn(async () => undefined),
+    db: {
+      toolboxHistory: {
+        readAll: vi.fn(async () => [...rows]),
+        upsert: vi.fn(async (entry: unknown) => {
+          const e = entry as { id: string };
+          const idx = rows.findIndex((r) => (r as { id: string }).id === e.id);
+          if (idx >= 0) rows[idx] = entry;
+          else rows.unshift(entry);
+        }),
+        remove: vi.fn(async (id: string) => {
+          const idx = rows.findIndex((r) => (r as { id: string }).id === id);
+          if (idx >= 0) rows.splice(idx, 1);
+        }),
+        clear: vi.fn(async () => {
+          rows.length = 0;
+        })
+      }
+    },
+    __toolboxRows: rows
   };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (window as any).giftk = fake as any;
@@ -374,7 +406,7 @@ describe('ToolboxPanel', () => {
   });
 
   it('History rows render persisted entries and clicking Reveal calls window.giftk.revealItem', async () => {
-    // Pre-seed localStorage so the panel boots with one history entry.
+    // R-80: pre-seed the fake DB so the panel boots with one history entry.
     const entry = {
       id: 't1',
       kind: 'video-to-gif',
@@ -385,14 +417,16 @@ describe('ToolboxPanel', () => {
       status: 'done',
       finishedAt: Date.now()
     };
-    window.localStorage.setItem('giftk.toolbox.history.v1', JSON.stringify([entry]));
 
     const fake = installFakeGiftk();
+    fake.__toolboxRows.push(entry);
     // Augment the bridge with revealItem, the new R-39 IPC.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (window as any).giftk.revealItem = vi.fn(async () => ({ ok: true }));
 
-    render(<ToolboxPanel />);
+    await act(async () => {
+      render(<ToolboxPanel />);
+    });
     expect(screen.getByText(/历史结果 · 1/)).toBeInTheDocument();
     expect(screen.getByText('clip.gif')).toBeInTheDocument();
 
@@ -406,7 +440,7 @@ describe('ToolboxPanel', () => {
     void fake; // keep ts happy if the fake var goes unused otherwise
   });
 
-  it('History row for a failed entry is non-clickable and shows error', () => {
+  it('History row for a failed entry is non-clickable and shows error', async () => {
     const entry = {
       id: 't2',
       kind: 'video-to-gif',
@@ -418,9 +452,11 @@ describe('ToolboxPanel', () => {
       error: 'ffprobe boom',
       finishedAt: Date.now()
     };
-    window.localStorage.setItem('giftk.toolbox.history.v1', JSON.stringify([entry]));
-    installFakeGiftk();
-    render(<ToolboxPanel />);
+    const fake = installFakeGiftk();
+    fake.__toolboxRows.push(entry);
+    await act(async () => {
+      render(<ToolboxPanel />);
+    });
     expect(screen.getByText('失败')).toBeInTheDocument();
     expect(screen.getByText('ffprobe boom')).toBeInTheDocument();
     // The clickable main button is disabled when there's no output.
@@ -429,7 +465,7 @@ describe('ToolboxPanel', () => {
     expect(mainBtn.disabled).toBe(true);
   });
 
-  it('Clicking 清空历史 wipes the history list and localStorage', async () => {
+  it('Clicking 清空历史 wipes the history list and calls db.toolboxHistory.clear', async () => {
     const entry = {
       id: 't3',
       kind: 'gif-resize',
@@ -440,14 +476,16 @@ describe('ToolboxPanel', () => {
       status: 'done',
       finishedAt: Date.now()
     };
-    window.localStorage.setItem('giftk.toolbox.history.v1', JSON.stringify([entry]));
-    installFakeGiftk();
-    render(<ToolboxPanel />);
+    const fake = installFakeGiftk();
+    fake.__toolboxRows.push(entry);
+    await act(async () => {
+      render(<ToolboxPanel />);
+    });
     expect(screen.getByText(/历史结果 · 1/)).toBeInTheDocument();
     await act(async () => {
       fireEvent.click(screen.getByText('清空历史'));
     });
     expect(screen.getByText(/历史结果 · 0/)).toBeInTheDocument();
-    expect(window.localStorage.getItem('giftk.toolbox.history.v1')).toBe('{"version":1,"payload":[]}');
+    expect(fake.db.toolboxHistory.clear).toHaveBeenCalled();
   });
 });
