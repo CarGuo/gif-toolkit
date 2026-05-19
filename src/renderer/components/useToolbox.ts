@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { TaskProgress, ToolboxJob, ToolboxKind, ToolboxParams } from '../../shared/types';
 import { TOOLBOX_INPUT_EXTENSIONS } from '../../shared/types';
+import { reportDbError } from './dbErrorBus';
 
 /**
  * R-80 — storage moved from localStorage to a main-process SQLite
@@ -96,6 +97,10 @@ export interface UseToolboxResult {
   isHistoryLoading: boolean;
   removeHistoryEntry: (id: string) => void;
   clearToolboxHistory: () => void;
+  /** R-80 hardening — re-read the toolbox history list from the DB.
+   *  Used post-bootstrap so a hook that mounted before the import
+   *  finished surfaces freshly-imported rows. */
+  reloadToolboxHistory: () => void;
 }
 
 /** Default params per kind. Mirrors processor.ts defaults so the renderer
@@ -313,7 +318,7 @@ export function useToolbox(): UseToolboxResult {
     setToolboxHistory((prev) => prev.filter((e) => e.id !== id));
     const api = typeof window !== 'undefined' ? window.giftk?.db?.toolboxHistory : undefined;
     if (api) {
-      api.remove(id).catch(() => { /* best-effort. */ });
+      api.remove(id).catch((err) => reportDbError('toolboxHistory', 'remove', err));
     }
   }, []);
 
@@ -321,8 +326,29 @@ export function useToolbox(): UseToolboxResult {
     setToolboxHistory([]);
     const api = typeof window !== 'undefined' ? window.giftk?.db?.toolboxHistory : undefined;
     if (api) {
-      api.clear().catch(() => { /* best-effort. */ });
+      api.clear().catch((err) => reportDbError('toolboxHistory', 'clear', err));
     }
+  }, []);
+
+  // R-80 hardening — re-read the toolbox history from the DB. Shared
+  // by both the initial load effect and the public `reloadToolboxHistory`
+  // exposed for App.tsx's post-bootstrap refresh.
+  const reloadToolboxHistory = useCallback((): void => {
+    const api = typeof window !== 'undefined' ? window.giftk?.db?.toolboxHistory : undefined;
+    if (!api) return;
+    api
+      .readAll()
+      .then((rows) => {
+        if (!mountedRef.current) return;
+        const out: ToolboxHistoryEntry[] = [];
+        for (const r of rows) {
+          const e = parseHistoryEntry(r);
+          if (e) out.push(e);
+        }
+        out.sort((a, b) => b.finishedAt - a.finishedAt);
+        setToolboxHistory(out.slice(0, TOOLBOX_HISTORY_LIMIT));
+      })
+      .catch((err) => reportDbError('toolboxHistory', 'readAll', err));
   }, []);
 
   // R-80 — initial DB load. Toolbox history is convenience-only so a
@@ -351,9 +377,7 @@ export function useToolbox(): UseToolboxResult {
         out.sort((a, b) => b.finishedAt - a.finishedAt);
         setToolboxHistory(out.slice(0, TOOLBOX_HISTORY_LIMIT));
       })
-      .catch(() => {
-        /* keep empty. */
-      })
+      .catch((err) => reportDbError('toolboxHistory', 'readAll', err))
       .finally(() => {
         if (mountedRef.current) setIsHistoryLoading(false);
       });
@@ -400,7 +424,7 @@ export function useToolbox(): UseToolboxResult {
       // intact and the next boot just won't see the row.
       const api = typeof window !== 'undefined' ? window.giftk?.db?.toolboxHistory : undefined;
       if (api) {
-        api.upsert(entry).catch(() => { /* best-effort. */ });
+        api.upsert(entry).catch((err) => reportDbError('toolboxHistory', 'upsert', err));
       }
       // Drop the row from the queue so the user sees a strict "to-do".
       setJobs((prev) => prev.filter((j) => j.id !== p.taskId));
@@ -491,6 +515,7 @@ export function useToolbox(): UseToolboxResult {
     toolboxHistory,
     isHistoryLoading,
     removeHistoryEntry,
-    clearToolboxHistory
+    clearToolboxHistory,
+    reloadToolboxHistory
   };
 }

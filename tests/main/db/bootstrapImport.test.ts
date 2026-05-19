@@ -46,12 +46,18 @@ describe('R-80 bootstrapImport', () => {
       }
     ]);
     const result = bootstrapImport(db, { history: histPayload });
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       history: 1,
       uploadHistory: 0,
       sniffHistory: 0,
       toolboxHistory: 0
     });
+    // R-80 hardening — every family ran without throwing, so all
+    // four are reported as succeeded; failures should be empty.
+    expect(result.succeededFamilies).toEqual(
+      expect.arrayContaining(['history', 'uploadHistory', 'sniffHistory', 'toolboxHistory'])
+    );
+    expect(result.failedFamilies).toEqual([]);
     expect(createHistoryRepo(db).readAll()).toHaveLength(1);
   });
 
@@ -72,12 +78,16 @@ describe('R-80 bootstrapImport', () => {
       sniffHistory: '[}',
       toolboxHistory: 'NaN'
     });
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       history: 0,
       uploadHistory: 0,
       sniffHistory: 0,
       toolboxHistory: 0
     });
+    // Bad JSON is downgraded to `[]` by `decodePayload`, so each
+    // family inserts zero rows but the transaction commits cleanly
+    // — they all count as "succeeded" and zero "failed".
+    expect(result.failedFamilies).toEqual([]);
   });
 
   it('is idempotent: a second call inserts zero new rows', () => {
@@ -128,5 +138,47 @@ describe('R-80 bootstrapImport', () => {
     const result = bootstrapImport(db, { toolboxHistory: tbPayload });
     expect(result.toolboxHistory).toBe(1);
     expect(createToolboxHistoryRepo(db).readAll().map((r) => r.id)).toEqual(['t1']);
+  });
+
+  it('reports per-family failure when a repo throws (hardening)', () => {
+    // Force `historyRepo.insertManyRaw` to throw while the other
+    // three families remain healthy. A naive single-transaction
+    // implementation would roll back ALL four families and the
+    // renderer would re-import everything next boot. The hardened
+    // version isolates the failure to `history` only.
+    const realPrepare = db.prepare.bind(db);
+    let triggered = false;
+    db.prepare = ((sql: string) => {
+      if (!triggered && sql.includes('INSERT OR IGNORE INTO history')) {
+        triggered = true;
+        throw new Error('simulated history insert failure');
+      }
+      return realPrepare(sql);
+    }) as typeof db.prepare;
+
+    const result = bootstrapImport(db, {
+      history: envelope(1, [
+        {
+          id: 'h1',
+          createdAt: 1,
+          pageUrl: '',
+          items: [],
+          options: {},
+          outputsByTaskId: {},
+          taskStatus: {}
+        }
+      ]),
+      sniffHistory: envelope(1, [{ url: 'https://ok', ts: 100 }])
+    });
+    // history failed, sniff succeeded.
+    expect(result.history).toBe(0);
+    expect(result.sniffHistory).toBe(1);
+    expect(result.failedFamilies.map((f) => f.family)).toEqual(['history']);
+    expect(result.succeededFamilies).toEqual(
+      expect.arrayContaining(['uploadHistory', 'sniffHistory', 'toolboxHistory'])
+    );
+    // history must NOT be in succeededFamilies — that's the contract
+    // the renderer uses to decide whether to delete the legacy key.
+    expect(result.succeededFamilies).not.toContain('history');
   });
 });

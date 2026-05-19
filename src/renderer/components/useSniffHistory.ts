@@ -31,6 +31,7 @@
  * source of truth from mount onward.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { reportDbError } from './dbErrorBus';
 
 export const SNIFF_HISTORY_STORAGE_KEY = 'giftk.sniffHistory.v1';
 export const SNIFF_HISTORY_MAX_ENTRIES = 30;
@@ -85,6 +86,12 @@ export interface UseSniffHistoryApi {
   remove(url: string): void;
   /** Wipe everything (UI is expected to confirm). */
   clear(): void;
+  /** R-80 hardening — re-read the entire list from the DB. Used by
+   *  `App.tsx` after the one-shot bootstrap import completes so a
+   *  hook that mounted *before* the import has finished still sees
+   *  the freshly-imported rows. Failures keep the existing in-memory
+   *  list intact. */
+  reload(): void;
 }
 
 /** Pure helper — extracted for unit-testing the LRU policy without
@@ -152,9 +159,11 @@ export function useSniffHistory(): UseSniffHistoryApi {
         out.sort((a, b) => b.ts - a.ts);
         setEntries(out.slice(0, SNIFF_HISTORY_MAX_ENTRIES));
       })
-      .catch(() => {
-        // Sniff history is convenience-only; an IPC failure leaves
-        // the in-memory list empty rather than crashing the panel.
+      .catch((err) => {
+        // Sniff history is convenience-only; surface the first IPC
+        // failure as a one-shot toast so the user knows the panel
+        // isn't loading from disk, but don't crash the panel.
+        reportDbError('sniffHistory', 'readAll', err);
       })
       .finally(() => {
         if (mountedRef.current) setIsLoading(false);
@@ -162,6 +171,30 @@ export function useSniffHistory(): UseSniffHistoryApi {
     return () => {
       mountedRef.current = false;
     };
+  }, []);
+
+  // R-80 hardening — re-read the entire list from the DB. Shared by
+  // both initial mount and the post-bootstrap `reload()` exposed in
+  // the public API.
+  const reload = useCallback((): void => {
+    const api = typeof window !== 'undefined' ? window.giftk?.db?.sniffHistory : undefined;
+    if (!api) return;
+    api
+      .readAll()
+      .then((rows) => {
+        if (!mountedRef.current) return;
+        const out: SniffHistoryEntry[] = [];
+        const seen = new Set<string>();
+        for (const r of rows) {
+          const e = parseEntry(r);
+          if (!e || seen.has(e.url)) continue;
+          seen.add(e.url);
+          out.push(e);
+        }
+        out.sort((a, b) => b.ts - a.ts);
+        setEntries(out.slice(0, SNIFF_HISTORY_MAX_ENTRIES));
+      })
+      .catch((err) => reportDbError('sniffHistory', 'readAll', err));
   }, []);
 
   const addOrPromote = useCallback(
@@ -178,9 +211,7 @@ export function useSniffHistory(): UseSniffHistoryApi {
       // reload) will pick up whatever main persisted.
       const api = typeof window !== 'undefined' ? window.giftk?.db?.sniffHistory : undefined;
       if (api) {
-        api.upsert(result).catch(() => {
-          /* best-effort; sniff history is non-load-bearing. */
-        });
+        api.upsert(result).catch((err) => reportDbError('sniffHistory', 'upsert', err));
       }
       return result;
     },
@@ -191,9 +222,7 @@ export function useSniffHistory(): UseSniffHistoryApi {
     setEntries((prev) => prev.filter((e) => e.url !== url));
     const api = typeof window !== 'undefined' ? window.giftk?.db?.sniffHistory : undefined;
     if (api) {
-      api.remove(url).catch(() => {
-        /* best-effort. */
-      });
+      api.remove(url).catch((err) => reportDbError('sniffHistory', 'remove', err));
     }
   }, []);
 
@@ -201,11 +230,9 @@ export function useSniffHistory(): UseSniffHistoryApi {
     setEntries([]);
     const api = typeof window !== 'undefined' ? window.giftk?.db?.sniffHistory : undefined;
     if (api) {
-      api.clear().catch(() => {
-        /* best-effort. */
-      });
+      api.clear().catch((err) => reportDbError('sniffHistory', 'clear', err));
     }
   }, []);
 
-  return { entries, isLoading, addOrPromote, remove, clear };
+  return { entries, isLoading, addOrPromote, remove, clear, reload };
 }

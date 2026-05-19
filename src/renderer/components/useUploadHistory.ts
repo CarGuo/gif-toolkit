@@ -19,6 +19,7 @@
  * fire-and-forget IPC. Initial load is async, gated on `isLoading`.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { reportDbError } from './dbErrorBus';
 import type {
   UploadBackend,
   UploadConfigs,
@@ -79,6 +80,17 @@ export interface UseUploadHistoryApi {
   remove(id: string): void;
   /** Wipe everything. */
   clear(): void;
+  /** R-80 hardening — re-read the entire list from the DB. Used by
+   *  `App.tsx` after the one-shot bootstrap import lands so a hook
+   *  that mounted with an empty DB still surfaces freshly-imported
+   *  rows. */
+  reload(): void;
+  /** R-80 hardening (H5) — synchronously cancel the debounce timer
+   *  and forward every queued upsert to the DB. The returned Promise
+   *  resolves once every queued IPC settles, so `db:flushBeforeQuit`
+   *  can wait for the trailing progress emit before the window
+   *  tears down. */
+  flushPending(): Promise<void>;
 }
 
 /**
@@ -161,17 +173,21 @@ export function useUploadHistory(): UseUploadHistoryApi {
   const upsertQueueRef = useRef<Map<string, UploadHistoryRecord>>(new Map());
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const flushUpserts = useCallback(() => {
+  const flushUpserts = useCallback(async (): Promise<void> => {
     const api = typeof window !== 'undefined' ? window.giftk?.db?.uploadHistory : undefined;
     const pending = upsertQueueRef.current;
     upsertQueueRef.current = new Map();
     flushTimerRef.current = null;
     if (!api) return;
+    // R-80 hardening (H5) — return a Promise that resolves once
+    // every queued upsert IPC settles, so `db:flushBeforeQuit` can
+    // wait for the trailing progress emit to land before the window
+    // tears down.
+    const tasks: Array<Promise<unknown>> = [];
     for (const rec of pending.values()) {
-      api.upsert(rec).catch(() => {
-        /* best-effort. */
-      });
+      tasks.push(api.upsert(rec).catch((err) => reportDbError('uploadHistory', 'upsert', err)));
     }
+    await Promise.all(tasks);
   }, []);
 
   const scheduleUpsert = useCallback((rec: UploadHistoryRecord) => {
@@ -205,9 +221,7 @@ export function useUploadHistory(): UseUploadHistoryApi {
         }
         setHistory(out);
       })
-      .catch(() => {
-        /* keep empty. */
-      })
+      .catch((err) => reportDbError('uploadHistory', 'readAll', err))
       .finally(() => {
         if (mountedRef.current) setIsLoading(false);
       });
@@ -218,7 +232,7 @@ export function useUploadHistory(): UseUploadHistoryApi {
       if (flushTimerRef.current) {
         clearTimeout(flushTimerRef.current);
         flushTimerRef.current = null;
-        flushUpserts();
+        void flushUpserts();
       }
     };
   }, [flushUpserts]);
@@ -259,7 +273,7 @@ export function useUploadHistory(): UseUploadHistoryApi {
     upsertQueueRef.current.delete(id);
     const api = typeof window !== 'undefined' ? window.giftk?.db?.uploadHistory : undefined;
     if (api) {
-      api.remove(id).catch(() => { /* best-effort. */ });
+      api.remove(id).catch((err) => reportDbError('uploadHistory', 'remove', err));
     }
   }, []);
 
@@ -272,11 +286,31 @@ export function useUploadHistory(): UseUploadHistoryApi {
     }
     const api = typeof window !== 'undefined' ? window.giftk?.db?.uploadHistory : undefined;
     if (api) {
-      api.clear().catch(() => { /* best-effort. */ });
+      api.clear().catch((err) => reportDbError('uploadHistory', 'clear', err));
     }
   }, []);
 
-  return { history, isLoading, start, applyProgress, remove, clear };
+  // R-80 hardening — re-read the entire upload history from the DB.
+  // Used post-bootstrap so a hook that mounted before the import
+  // finished refreshes its in-memory mirror.
+  const reload = useCallback((): void => {
+    const api = typeof window !== 'undefined' ? window.giftk?.db?.uploadHistory : undefined;
+    if (!api) return;
+    api
+      .readAll()
+      .then((rows) => {
+        if (!mountedRef.current) return;
+        const out: UploadHistoryRecord[] = [];
+        for (const r of rows) {
+          const rec = parseRecord(r);
+          if (rec) out.push(rec);
+        }
+        setHistory(out);
+      })
+      .catch((err) => reportDbError('uploadHistory', 'readAll', err));
+  }, []);
+
+  return { history, isLoading, start, applyProgress, remove, clear, reload, flushPending: flushUpserts };
 }
 
 /** R-45 — Pretty backend label for UI display. */

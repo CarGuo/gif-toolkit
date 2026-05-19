@@ -51,11 +51,34 @@ export interface BootstrapImportInput {
   toolboxHistory?: string | null;
 }
 
+/**
+ * Per-family family identifier used to report which legacy keys are
+ * safe for the renderer to delete after the import settles. The
+ * renderer's contract: only delete a legacy localStorage key whose
+ * family appears in `succeededFamilies`. Anything else stays in
+ * place so the next launch can retry that specific family without
+ * re-importing the ones that already landed.
+ */
+export type BootstrapFamily =
+  | 'history'
+  | 'uploadHistory'
+  | 'sniffHistory'
+  | 'toolboxHistory';
+
 export interface BootstrapImportResult {
   history: number;
   uploadHistory: number;
   sniffHistory: number;
   toolboxHistory: number;
+  /** Families whose `insertManyRaw` completed cleanly (whether or not
+   *  any rows survived the coerce step). The renderer is safe to
+   *  delete these legacy keys. */
+  succeededFamilies: BootstrapFamily[];
+  /** Families whose import failed mid-flight. The renderer MUST keep
+   *  the corresponding legacy key in localStorage so the next launch
+   *  retries. The string is a short human-readable error message
+   *  for diagnostics. */
+  failedFamilies: { family: BootstrapFamily; error: string }[];
 }
 
 /**
@@ -222,38 +245,67 @@ function coerceToolboxHistory(arr: unknown[]): ToolboxHistoryRow[] {
 }
 
 /**
- * Run all four imports inside a single transaction so a mid-flight
- * crash leaves the DB in a coherent state. The renderer only deletes
- * its localStorage keys on a successful (resolved) IPC return.
+ * Per-family imports each wrapped in their *own* transaction. If
+ * `history` blows up because of a corrupt row, the upload / sniff /
+ * toolbox families still land cleanly; we report which families
+ * succeeded so the renderer can delete only those legacy keys. A
+ * mid-flight crash leaves each family atomic on its own (better-
+ * sqlite3 transactions roll back on any thrown error) and the
+ * remaining families simply retry next launch.
+ *
+ * Note: `decodePayload` and the `coerceXxx` helpers already return
+ * `[]` on bad input, so the only paths that can throw here are the
+ * `insertManyRaw` calls (constraint violation, disk full, …).
  */
 export function bootstrapImport(
   db: Database.Database,
   input: BootstrapImportInput
 ): BootstrapImportResult {
-  const historyRepo = createHistoryRepo(db);
-  const uploadRepo = createUploadHistoryRepo(db);
-  const sniffRepo = createSniffHistoryRepo(db);
-  const toolboxRepo = createToolboxHistoryRepo(db);
-
   const histRows = coerceHistory(decodePayload(input.history));
   const upRows = coerceUploadHistory(decodePayload(input.uploadHistory));
   const sniffRows = coerceSniffHistory(decodePayload(input.sniffHistory));
   const tbRows = coerceToolboxHistory(decodePayload(input.toolboxHistory));
 
-  let result: BootstrapImportResult = {
-    history: 0,
-    uploadHistory: 0,
-    sniffHistory: 0,
-    toolboxHistory: 0
+  const succeededFamilies: BootstrapFamily[] = [];
+  const failedFamilies: { family: BootstrapFamily; error: string }[] = [];
+
+  // Each family runs its repo factory + transactional insert inside
+  // the same try/catch so even a failure during `db.prepare(...)` at
+  // construction time is isolated to that one family.
+  const runFamily = (
+    family: BootstrapFamily,
+    insert: () => number
+  ): number => {
+    try {
+      const inserted = db.transaction(() => insert())();
+      succeededFamilies.push(family);
+      return inserted;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      failedFamilies.push({ family, error: message });
+      return 0;
+    }
   };
-  const txn = db.transaction(() => {
-    result = {
-      history: historyRepo.insertManyRaw(histRows),
-      uploadHistory: uploadRepo.insertManyRaw(upRows),
-      sniffHistory: sniffRepo.insertManyRaw(sniffRows),
-      toolboxHistory: toolboxRepo.insertManyRaw(tbRows)
-    };
-  });
-  txn();
-  return result;
+
+  const history = runFamily('history', () =>
+    createHistoryRepo(db).insertManyRaw(histRows)
+  );
+  const uploadHistory = runFamily('uploadHistory', () =>
+    createUploadHistoryRepo(db).insertManyRaw(upRows)
+  );
+  const sniffHistory = runFamily('sniffHistory', () =>
+    createSniffHistoryRepo(db).insertManyRaw(sniffRows)
+  );
+  const toolboxHistory = runFamily('toolboxHistory', () =>
+    createToolboxHistoryRepo(db).insertManyRaw(tbRows)
+  );
+
+  return {
+    history,
+    uploadHistory,
+    sniffHistory,
+    toolboxHistory,
+    succeededFamilies,
+    failedFamilies
+  };
 }

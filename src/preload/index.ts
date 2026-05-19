@@ -403,6 +403,29 @@ const api = {
     }> {
       ensureObject(payload, 'payload');
       return ipcRenderer.invoke('db:bootstrapImport', payload);
+    },
+    /**
+     * R-80 hardening (H5) — Subscribe to the main-process
+     * `db:flushBeforeQuit` lifecycle event. The renderer is expected
+     * to (1) cancel all debounce timers, (2) await every queued upsert
+     * IPC, (3) call back via `acked()`. Main side waits up to ~1s for
+     * the ack before forcing the quit; a slow / hung renderer must not
+     * be able to block app exit indefinitely.
+     */
+    onFlushBeforeQuit(
+      cb: (acked: () => void) => void
+    ): () => void {
+      const handler = (_: unknown, requestId: string) => {
+        let already = false;
+        const acked = (): void => {
+          if (already) return;
+          already = true;
+          ipcRenderer.send('db:flushBeforeQuit:ack', requestId);
+        };
+        try { cb(acked); } catch { acked(); }
+      };
+      ipcRenderer.on('db:flushBeforeQuit', handler);
+      return () => ipcRenderer.removeListener('db:flushBeforeQuit', handler);
     }
   }
 };

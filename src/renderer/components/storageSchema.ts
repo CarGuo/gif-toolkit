@@ -260,33 +260,74 @@ export async function bootstrapImportFromLocalStorage(): Promise<{
   // boot. Returning zero-counts lets callers distinguish "imported
   // 0 rows" from "import was skipped because it ran previously".
   const allEmpty = !payload.history && !payload.uploadHistory && !payload.sniffHistory && !payload.toolboxHistory;
+  if (allEmpty) {
+    try {
+      window.localStorage.setItem(DB_BOOTSTRAP_DONE_KEY, '1');
+    } catch {
+      /* best-effort */
+    }
+    return { history: 0, uploadHistory: 0, sniffHistory: 0, toolboxHistory: 0 };
+  }
+
+  // R-80 hardening — main now reports per-family success/failure.
+  // Result shape: { history, uploadHistory, sniffHistory, toolboxHistory,
+  //                 succeededFamilies, failedFamilies }
+  // We selectively delete only the legacy keys whose family
+  // succeeded; failures keep their key so the next boot retries.
   let result: {
     history: number;
     uploadHistory: number;
     sniffHistory: number;
     toolboxHistory: number;
+    succeededFamilies?: Array<'history' | 'uploadHistory' | 'sniffHistory' | 'toolboxHistory'>;
+    failedFamilies?: Array<{ family: string; error: string }>;
   };
-  if (allEmpty) {
-    result = { history: 0, uploadHistory: 0, sniffHistory: 0, toolboxHistory: 0 };
-  } else {
-    try {
-      result = await window.giftk.db.bootstrapImport(payload);
-    } catch {
-      // Main rejected — leave the legacy keys in place so a future
-      // boot can retry. Returning null tells the caller to fall back
-      // to a plain DB read (which may yield an empty list, but the
-      // app is still usable).
-      return null;
-    }
-  }
-  // Successful import → remove legacy keys + set the done marker.
   try {
-    for (const k of Object.values(LEGACY_HISTORY_KEYS)) {
-      window.localStorage.removeItem(k);
+    result = (await window.giftk.db.bootstrapImport(payload)) as typeof result;
+  } catch (err) {
+    // Main rejected entirely — leave every legacy key in place so a
+    // future boot can retry the whole import. Surface the failure as
+    // a one-shot toast via the dbErrorBus so the user knows the
+    // legacy data hasn't moved into the DB this boot.
+    try {
+      const { reportDbError } = await import('./dbErrorBus');
+      reportDbError('bootstrap', 'import', err);
+    } catch {
+      /* dbErrorBus import itself failed — give up silently. */
     }
-    window.localStorage.setItem(DB_BOOTSTRAP_DONE_KEY, '1');
+    return null;
+  }
+
+  // Selectively delete only the succeeded families' legacy keys.
+  // Default to "delete all four" for older-main-process compatibility
+  // (a build that doesn't yet report `succeededFamilies` is treated
+  // as success across the board because the IPC resolved without
+  // throwing).
+  const succeeded = result.succeededFamilies ?? [
+    'history',
+    'uploadHistory',
+    'sniffHistory',
+    'toolboxHistory'
+  ];
+  const failed = result.failedFamilies ?? [];
+  try {
+    for (const family of succeeded) {
+      const key = LEGACY_HISTORY_KEYS[family as keyof typeof LEGACY_HISTORY_KEYS];
+      if (key) window.localStorage.removeItem(key);
+    }
+    // Only flip the bootstrap-done marker once *every* family has
+    // landed. A partial failure leaves the marker unset so the next
+    // boot reattempts only the failed legacy keys.
+    if (failed.length === 0) {
+      window.localStorage.setItem(DB_BOOTSTRAP_DONE_KEY, '1');
+    }
   } catch {
     /* best-effort; the next boot will re-run INSERT OR IGNORE. */
   }
-  return result;
+  return {
+    history: result.history,
+    uploadHistory: result.uploadHistory,
+    sniffHistory: result.sniffHistory,
+    toolboxHistory: result.toolboxHistory
+  };
 }

@@ -41,6 +41,7 @@ import { UploadResultModal } from './components/UploadResultModal';
 import { Toaster, useToaster } from './components/Toast';
 import { evaluateSizeGuard } from '../shared/sizeGuard';
 import { bootstrapImportFromLocalStorage } from './components/storageSchema';
+import { setDbErrorListener, type DbErrorEvent } from './components/dbErrorBus';
 
 const giftk = (typeof window !== 'undefined' ? window.giftk : undefined);
 
@@ -62,6 +63,13 @@ const App: React.FC = () => {
   // mounts; for the very first launch after upgrade we issue a
   // reload() on each hook once the import promise settles so the
   // user sees their pre-R-80 history immediately without restarting.
+  //
+  // R-80 hardening — every visible top-level hook now exposes a
+  // `reload()` so we can refresh all four families post-bootstrap
+  // without forcing the user to switch tabs. ToolboxPanel mounts its
+  // own `useToolbox` only when the toolbox tab is visited, so its
+  // initial `useEffect` read happens *after* bootstrap already wrote
+  // the rows — no explicit reload is needed for that hook.
   useEffect(() => {
     let cancelled = false;
     bootstrapImportFromLocalStorage()
@@ -69,15 +77,11 @@ const App: React.FC = () => {
         if (cancelled || !result) return;
         const total = result.history + result.uploadHistory + result.sniffHistory + result.toolboxHistory;
         if (total > 0) {
-          // Force each hook to re-pull from disk now that legacy
-          // rows are committed. reloadHistory is the only hook with
-          // a public reload — sniff/upload/toolbox hooks instead get
-          // implicitly refreshed on next mount; the panels are
-          // already mounted, so we trust the bootstrap-then-reload
-          // pattern of the history hook and accept that the other
-          // three lists may need a tab toggle for very-first-launch
-          // visibility (idempotent on subsequent restarts).
+          // Refresh every hook that's already mounted at this point
+          // so freshly-imported rows surface without a restart.
           try { reloadHistory(); } catch { /* best-effort. */ }
+          try { reloadSniffHistory(); } catch { /* best-effort. */ }
+          try { reloadUploadHistory(); } catch { /* best-effort. */ }
         }
       })
       .catch((e) => {
@@ -87,6 +91,29 @@ const App: React.FC = () => {
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  // R-80 hardening — wire a one-shot toast to the dbErrorBus so the
+  // first `window.giftk.db.*` IPC failure surfaces as user-visible
+  // feedback instead of being silently swallowed by the hooks'
+  // optimistic-update `.catch()` blocks. The bus itself enforces the
+  // "fire once per session" semantics.
+  useEffect(() => {
+    setDbErrorListener((evt: DbErrorEvent) => {
+      const familyLabel: Record<DbErrorEvent['family'], string> = {
+        history: '历史记录',
+        uploadHistory: '上传历史',
+        sniffHistory: '嗅探历史',
+        toolboxHistory: '工具箱历史',
+        bootstrap: '历史数据迁移'
+      };
+      toaster.push({
+        id: `db-error-${evt.family}-${evt.op}`,
+        severity: 'warn',
+        title: `${familyLabel[evt.family]}暂存失败`,
+        detail: '内存中的记录仍可见,但本次未能写入本地数据库,重启后可能丢失最近变更。'
+      });
+    });
+    return () => setDbErrorListener(null);
+  }, [toaster]);
   // R-62 — On first mount, ask main for the platform capability
   // report and surface one toast per issue (skipping ones the user
   // has previously dismissed via "不再提醒"). Run once — capabilities
@@ -186,7 +213,7 @@ const App: React.FC = () => {
   // life-cycle hooks that create/append records. We track the *current*
   // record id in a ref so progress events can locate the right record
   // without forcing a re-render or recreating any callback.
-  const { history, isLoading: isHistoryLoading, pushOrReplace, patch: patchHistory, remove: removeHistory, clear: clearHistory, reload: reloadHistory } = useHistory();
+  const { history, isLoading: isHistoryLoading, pushOrReplace, patch: patchHistory, remove: removeHistory, clear: clearHistory, reload: reloadHistory, flushPending: flushHistoryPending } = useHistory();
   // R-32 — independent LRU of *URLs the user has sniffed* (capped at 30).
   // This is intentionally orthogonal to useHistory above — that hook
   // remembers full batch sessions, this one is the "address book" of
@@ -198,7 +225,8 @@ const App: React.FC = () => {
     isLoading: isSniffHistoryLoading,
     addOrPromote: addSniffHistory,
     remove: removeSniffHistory,
-    clear: clearSniffHistory
+    clear: clearSniffHistory,
+    reload: reloadSniffHistory
   } = useSniffHistory();
   const [sniffHistoryOpen, setSniffHistoryOpen] = useState(false);
   // R-51/R-52 — split-button state for the「网页嗅探」entry. Three
@@ -341,7 +369,27 @@ const App: React.FC = () => {
   // ipc; the modal updates them in place. The upload-history hook owns
   // localStorage persistence; we only forward main-process progress
   // emits into it via uploadRecordRef (jobId → recordId mapping).
-  const { history: uploadHistory, isLoading: isUploadHistoryLoading, start: startUploadRecord, applyProgress: applyUploadProgress, remove: removeUploadHistory, clear: clearUploadHistory } = useUploadHistory();
+  const { history: uploadHistory, isLoading: isUploadHistoryLoading, start: startUploadRecord, applyProgress: applyUploadProgress, remove: removeUploadHistory, clear: clearUploadHistory, reload: reloadUploadHistory, flushPending: flushUploadHistoryPending } = useUploadHistory();
+  // R-80 hardening (H5) — keep the latest flushPending callbacks in
+  // refs so a single one-time `db:flushBeforeQuit` listener can call
+  // them without re-subscribing on every re-render.
+  const flushHistoryPendingRef = useRef(flushHistoryPending);
+  const flushUploadHistoryPendingRef = useRef(flushUploadHistoryPending);
+  useEffect(() => { flushHistoryPendingRef.current = flushHistoryPending; }, [flushHistoryPending]);
+  useEffect(() => { flushUploadHistoryPendingRef.current = flushUploadHistoryPending; }, [flushUploadHistoryPending]);
+  useEffect(() => {
+    // Subscribe to main's pre-quit flush request. We await both
+    // debounced upsert queues, then ack so main can proceed with
+    // closing the DB. Main has a 1-second hard timeout, so a
+    // hung renderer can't block the quit.
+    const off = window.giftk?.db?.onFlushBeforeQuit?.((acked) => {
+      Promise.allSettled([
+        flushHistoryPendingRef.current(),
+        flushUploadHistoryPendingRef.current()
+      ]).finally(() => acked());
+    });
+    return () => { try { off?.(); } catch { /* ignore */ } };
+  }, []);
   const [uploadConfigs, setUploadConfigs] = useState<UploadConfigs | null>(null);
   const [uploadSettingsOpen, setUploadSettingsOpen] = useState(false);
   const [uploadResult, setUploadResult] = useState<string | null>(null); // recordId

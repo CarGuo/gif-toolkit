@@ -168,6 +168,26 @@ jobs:
       - name: Re-rebuild better-sqlite3 for Electron
         run: npm run test:db:to-electron
 
+      # R-80 hardening — explicit ABI verification probe. `electron-rebuild`
+      # has historically returned exit 0 for partial / silent failures
+      # (network blip, npm cache miss). If the .node binary is left at
+      # the Node ABI instead of Electron's, every renderer DB call
+      # silently rejects (renderer hooks .catch() => {} swallow it),
+      # users see "history works on first run, then forgets everything"
+      # — the worst kind of bug. The most reliable check is to run the
+      # Electron binary itself with ELECTRON_RUN_AS_NODE and require
+      # better-sqlite3; any ABI mismatch throws synchronously with a
+      # clear "NODE_MODULE_VERSION ..." message.
+      - name: Verify better-sqlite3 ABI matches Electron
+        shell: bash
+        env:
+          ELECTRON_RUN_AS_NODE: '1'
+        run: |
+          set -euo pipefail
+          ELECTRON_BIN=$(node -p "require('electron')")
+          echo "Probing $ELECTRON_BIN with better-sqlite3…"
+          "$ELECTRON_BIN" -e "const db = new (require('better-sqlite3'))(':memory:'); db.exec('CREATE TABLE t(a)'); db.prepare('INSERT INTO t VALUES (?)').run(1); console.log('ok abi=' + process.versions.modules); db.close();"
+
       - name: Build renderer + main bundles
         run: npm run build
 

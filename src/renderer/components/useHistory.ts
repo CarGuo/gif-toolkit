@@ -37,6 +37,7 @@ import type {
   UploadStatus
 } from '../../shared/types';
 import { DEFAULT_OPTIONS } from '../../shared/types';
+import { reportDbError } from './dbErrorBus';
 
 export const HISTORY_STORAGE_KEY = 'giftk.history.v1';
 export const HISTORY_MAX_ENTRIES = 30;
@@ -191,6 +192,12 @@ export interface UseHistoryApi {
    *  memory; only the presence of new ids triggers an authoritative
    *  swap. */
   reload(): void;
+  /** R-80 hardening (H5) — synchronously cancel the debounce timer
+   *  and forward every queued upsert / remove to the DB. The returned
+   *  Promise resolves when ALL of the queued IPC operations settle.
+   *  Used by the `db:flushBeforeQuit` lifecycle hook so a window that
+   *  closes mid-batch doesn't drop the trailing progress emit. */
+  flushPending(): Promise<void>;
 }
 
 /**
@@ -217,7 +224,7 @@ export function useHistory(): UseHistoryApi {
   const removeQueueRef = useRef<Set<string>>(new Set());
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const flushPending = useCallback(() => {
+  const flushPending = useCallback(async (): Promise<void> => {
     const upserts = upsertQueueRef.current;
     const removals = removeQueueRef.current;
     upsertQueueRef.current = new Map();
@@ -230,12 +237,21 @@ export function useHistory(): UseHistoryApi {
     // patch on the *same* id (we'd cancel the upsert on remove
     // anyway, but the explicit ordering keeps the serial DB log
     // easy to reason about).
+    //
+    // R-80 hardening (H5) — flushPending now returns a Promise that
+    // resolves after every queued IPC settles. Callers that need a
+    // synchronous fire-and-forget can simply ignore the returned
+    // promise (existing call sites do exactly that). The
+    // `db:flushBeforeQuit` hook awaits this promise so the renderer
+    // doesn't tear down with in-flight upserts.
+    const tasks: Array<Promise<unknown>> = [];
     for (const id of removals) {
-      api.remove(id).catch(() => { /* best-effort. */ });
+      tasks.push(api.remove(id).catch((err) => reportDbError('history', 'remove', err)));
     }
     for (const rec of upserts.values()) {
-      api.upsert(rec).catch(() => { /* best-effort. */ });
+      tasks.push(api.upsert(rec).catch((err) => reportDbError('history', 'upsert', err)));
     }
+    await Promise.all(tasks);
   }, []);
 
   const schedule = useCallback(() => {
@@ -286,8 +302,11 @@ export function useHistory(): UseHistoryApi {
         out.sort((a, b) => b.createdAt - a.createdAt);
         setHistory(out.slice(0, HISTORY_MAX_ENTRIES));
       })
-      .catch(() => {
-        /* keep empty. */
+      .catch((err) => {
+        // First failure surfaces a one-shot toast via dbErrorBus; the
+        // panel still renders with an empty list (graceful fallback)
+        // rather than blocking on the IPC error.
+        reportDbError('history', 'readAll', err);
       })
       .finally(() => {
         if (mountedRef.current) setIsLoading(false);
@@ -299,7 +318,7 @@ export function useHistory(): UseHistoryApi {
       if (flushTimerRef.current) {
         clearTimeout(flushTimerRef.current);
         flushTimerRef.current = null;
-        flushPending();
+        void flushPending();
       }
     };
   }, [flushPending]);
@@ -357,7 +376,7 @@ export function useHistory(): UseHistoryApi {
     }
     const api = typeof window !== 'undefined' ? window.giftk?.db?.history : undefined;
     if (api) {
-      api.clear().catch(() => { /* best-effort. */ });
+      api.clear().catch((err) => reportDbError('history', 'clear', err));
     }
   }, []);
 
@@ -373,7 +392,7 @@ export function useHistory(): UseHistoryApi {
     // adopt the readback wholesale. Otherwise memory is at least as
     // fresh and we leave it alone — the trailing 250ms flush is
     // about to push it through anyway.
-    flushPending();
+    void flushPending();
     const api = typeof window !== 'undefined' ? window.giftk?.db?.history : undefined;
     if (!api) return;
     api
@@ -393,10 +412,10 @@ export function useHistory(): UseHistoryApi {
           return fresh.slice(0, HISTORY_MAX_ENTRIES);
         });
       })
-      .catch(() => { /* best-effort. */ });
+      .catch((err) => reportDbError('history', 'readAll', err));
   }, [flushPending]);
 
-  return { history, isLoading, pushOrReplace, patch, remove, clear, reload };
+  return { history, isLoading, pushOrReplace, patch, remove, clear, reload, flushPending };
 }
 
 /**

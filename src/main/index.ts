@@ -1514,18 +1514,61 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-app.on('before-quit', () => {
-  // Fire-and-forget: cancelAllTasks is async but the lifecycle hook is sync.
-  // killAllProcs() is synchronous and ensures spawned children die before the
-  // process actually exits.
+// R-80 hardening (H5) — flushed once-per-quit. The handler defers
+// `app.quit()` once, asks the renderer to flush its in-memory upsert
+// queues, awaits the ack (or a short timeout), then re-quits. The
+// flag below prevents the second `before-quit` from re-entering the
+// flush path (we'd deadlock waiting for an already-torn-down
+// renderer to ack).
+let flushedBeforeQuit = false;
+
+app.on('before-quit', (event) => {
+  // Synchronous side-effects we always want to run regardless of the
+  // flush-before-quit path: cancel in-flight ffmpeg jobs and kill
+  // spawned children. closeDb() is intentionally MOVED inside the
+  // post-flush branch so the renderer's trailing `db:*` IPC writes
+  // can land on an open handle.
   void cancelAllTasks();
   killAllProcs();
-  // R-80 — checkpoint and close the history DB so the WAL doesn't
-  // get left dangling. better-sqlite3's close() is synchronous and
-  // safe to call from a `before-quit` hook.
+
+  if (flushedBeforeQuit) {
+    // Second pass after our async re-quit — actually close the DB
+    // and let Electron tear down. better-sqlite3's close() is
+    // synchronous and safe inside a `before-quit` hook.
+    try { closeDb(); } catch { /* best-effort */ }
+    return;
+  }
+
+  const wc = mainWindow?.webContents;
+  if (!wc || wc.isDestroyed()) {
+    // No live renderer to ask — close DB synchronously and let the
+    // quit proceed.
+    try { closeDb(); } catch { /* best-effort */ }
+    flushedBeforeQuit = true;
+    return;
+  }
+
+  // Defer the quit; re-fire after the renderer acknowledges (or the
+  // 1-second hard timeout fires, whichever comes first).
+  event.preventDefault();
+  const requestId = `flush-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  let settled = false;
+  const finish = (reason: 'ack' | 'timeout' | 'error'): void => {
+    if (settled) return;
+    settled = true;
+    flushedBeforeQuit = true;
+    log(`[db] before-quit flush settled via ${reason}`);
+    // close DB on the next pass (from `flushedBeforeQuit` branch above)
+    setImmediate(() => { app.quit(); });
+  };
+  ipcMain.once('db:flushBeforeQuit:ack', (_e, ackId: unknown) => {
+    if (typeof ackId === 'string' && ackId === requestId) finish('ack');
+  });
+  setTimeout(() => finish('timeout'), 1000);
   try {
-    closeDb();
-  } catch {
-    // best-effort; the OS will reclaim the file handle anyway
+    wc.send('db:flushBeforeQuit', requestId);
+  } catch (e) {
+    log(`[db] before-quit send failed: ${(e as Error).message}`);
+    finish('error');
   }
 });

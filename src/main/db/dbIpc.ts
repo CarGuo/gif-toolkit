@@ -80,62 +80,91 @@ function getToolboxHistory() {
 }
 
 /**
+ * R-80 hardening — wrap each handler so a thrown SQL error is logged
+ * with full context on the main side (otherwise it surfaces only as
+ * an opaque rejected IPC promise on the renderer, which the hook
+ * `.catch()` swallows). We DO re-throw so the renderer's existing
+ * promise contract (rejected → optimistic-update divergence handled
+ * upstream by hook `.catch` or toast) still works.
+ */
+function safeHandle<TArgs extends unknown[], TResult>(
+  channel: string,
+  fn: (...args: TArgs) => TResult | Promise<TResult>
+): (...args: TArgs) => Promise<TResult> {
+  return async (...args: TArgs): Promise<TResult> => {
+    try {
+      return await fn(...args);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(
+        `[dbIpc:${channel}] handler failed:`,
+        err instanceof Error ? err.message : String(err),
+        err instanceof Error && err.stack ? `\n${err.stack}` : ''
+      );
+      throw err;
+    }
+  };
+}
+
+/**
  * Register every `db:*` channel. Must be called inside `app.whenReady`
  * after `openDb()` so the prepared statements have a live handle.
  */
 export function registerDbIpc(): void {
   // history
-  ipcMain.handle('db:history:readAll', async () => getHistory().readAll());
-  ipcMain.handle('db:history:upsert', async (_e, rec: HistoryRow) => {
+  ipcMain.handle('db:history:readAll', safeHandle('history:readAll', async () => getHistory().readAll()));
+  ipcMain.handle('db:history:upsert', safeHandle('history:upsert', async (_e, rec: HistoryRow) => {
     getHistory().upsert(rec);
-  });
-  ipcMain.handle('db:history:remove', async (_e, id: string) => {
+  }));
+  ipcMain.handle('db:history:remove', safeHandle('history:remove', async (_e, id: string) => {
     getHistory().remove(id);
-  });
-  ipcMain.handle('db:history:clear', async () => {
+  }));
+  ipcMain.handle('db:history:clear', safeHandle('history:clear', async () => {
     getHistory().clear();
-  });
+  }));
 
   // upload history
-  ipcMain.handle('db:uploadHistory:readAll', async () => getUploadHistory().readAll());
-  ipcMain.handle('db:uploadHistory:upsert', async (_e, rec: UploadHistoryRow) => {
+  ipcMain.handle('db:uploadHistory:readAll', safeHandle('uploadHistory:readAll', async () => getUploadHistory().readAll()));
+  ipcMain.handle('db:uploadHistory:upsert', safeHandle('uploadHistory:upsert', async (_e, rec: UploadHistoryRow) => {
     getUploadHistory().upsert(rec);
-  });
-  ipcMain.handle('db:uploadHistory:remove', async (_e, id: string) => {
+  }));
+  ipcMain.handle('db:uploadHistory:remove', safeHandle('uploadHistory:remove', async (_e, id: string) => {
     getUploadHistory().remove(id);
-  });
-  ipcMain.handle('db:uploadHistory:clear', async () => {
+  }));
+  ipcMain.handle('db:uploadHistory:clear', safeHandle('uploadHistory:clear', async () => {
     getUploadHistory().clear();
-  });
+  }));
 
   // sniff history
-  ipcMain.handle('db:sniffHistory:readAll', async () => getSniffHistory().readAll());
-  ipcMain.handle('db:sniffHistory:upsert', async (_e, entry: SniffHistoryRow) => {
+  ipcMain.handle('db:sniffHistory:readAll', safeHandle('sniffHistory:readAll', async () => getSniffHistory().readAll()));
+  ipcMain.handle('db:sniffHistory:upsert', safeHandle('sniffHistory:upsert', async (_e, entry: SniffHistoryRow) => {
     getSniffHistory().upsert(entry);
-  });
-  ipcMain.handle('db:sniffHistory:remove', async (_e, url: string) => {
+  }));
+  ipcMain.handle('db:sniffHistory:remove', safeHandle('sniffHistory:remove', async (_e, url: string) => {
     getSniffHistory().remove(url);
-  });
-  ipcMain.handle('db:sniffHistory:clear', async () => {
+  }));
+  ipcMain.handle('db:sniffHistory:clear', safeHandle('sniffHistory:clear', async () => {
     getSniffHistory().clear();
-  });
+  }));
 
   // toolbox history
-  ipcMain.handle('db:toolboxHistory:readAll', async () => getToolboxHistory().readAll());
-  ipcMain.handle('db:toolboxHistory:upsert', async (_e, entry: ToolboxHistoryRow) => {
+  ipcMain.handle('db:toolboxHistory:readAll', safeHandle('toolboxHistory:readAll', async () => getToolboxHistory().readAll()));
+  ipcMain.handle('db:toolboxHistory:upsert', safeHandle('toolboxHistory:upsert', async (_e, entry: ToolboxHistoryRow) => {
     getToolboxHistory().upsert(entry);
-  });
-  ipcMain.handle('db:toolboxHistory:remove', async (_e, id: string) => {
+  }));
+  ipcMain.handle('db:toolboxHistory:remove', safeHandle('toolboxHistory:remove', async (_e, id: string) => {
     getToolboxHistory().remove(id);
-  });
-  ipcMain.handle('db:toolboxHistory:clear', async () => {
+  }));
+  ipcMain.handle('db:toolboxHistory:clear', safeHandle('toolboxHistory:clear', async () => {
     getToolboxHistory().clear();
-  });
+  }));
 
   // bootstrap import
   ipcMain.handle(
     'db:bootstrapImport',
-    async (_e, payload: BootstrapImportInput) => bootstrapImport(openDb(), payload ?? {})
+    safeHandle('bootstrapImport', async (_e, payload: BootstrapImportInput) =>
+      bootstrapImport(openDb(), payload ?? {})
+    )
   );
 }
 
