@@ -1277,6 +1277,14 @@ const App: React.FC = () => {
     maxBytes?: number;
     fps?: number;
     maxWidth?: number;
+    /** R-79 — additional ProcessOptions overrides exposed by the
+     *  expanded ManualOptimizeModal. Each is applied independently
+     *  (typeof === 'number' check below) so the modal can omit any
+     *  field it doesn't want to touch. None of these write back to
+     *  the global `options` state — they are per-dispatch only. */
+    softMaxBytes?: number;
+    minSize?: number;
+    speed?: number;
   }) => {
     if (!giftk) return;
     if (media.kind === 'image') {
@@ -1316,6 +1324,18 @@ const App: React.FC = () => {
       }
       if (typeof override.fps === 'number') optBase.fps = override.fps;
       if (typeof override.maxWidth === 'number') optBase.maxWidth = override.maxWidth;
+      // R-79 — additional per-dispatch overrides from the expanded
+      // ManualOptimizeModal. Each is applied independently so the modal
+      // can omit fields the user didn't touch. softMaxBytes is re-clamped
+      // here (in addition to the modal's own clamp) so it can never
+      // exceed the freshly-resolved maxBytes — invariant the compress
+      // loop relies on.
+      if (typeof override.softMaxBytes === 'number') {
+        const cap = Math.min(optBase.maxBytes, override.softMaxBytes);
+        optBase.softMaxBytes = Math.max(100 * 1024, cap);
+      }
+      if (typeof override.minSize === 'number') optBase.minSize = override.minSize;
+      if (typeof override.speed === 'number') optBase.speed = override.speed;
     }
     const dur = media.resolved?.durationSec ?? media.durationSec ?? 0;
     const tooLong = media.kind === 'video' && dur > options.maxSegmentSec;
@@ -1423,7 +1443,10 @@ const App: React.FC = () => {
       reoptimizeFromGifPath: gifPath,
       maxBytes: req.maxBytes,
       fps: req.fps,
-      maxWidth: req.maxWidth
+      maxWidth: req.maxWidth,
+      softMaxBytes: req.softMaxBytes,
+      minSize: req.minSize,
+      speed: req.speed
     });
   }, [manualOpt, onProcessOne]);
 

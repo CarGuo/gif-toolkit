@@ -913,6 +913,16 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
   // download/encode and jump straight into the gif compress branch using
   // the supplied file as our sourcePath. The branch below (`media.kind
   // === 'gif' || options.reoptimizeFromGifPath`) does the rest.
+  //
+  // R-79: warning text MUST use the SAME phrases the first-pass branch
+  // emits ("exceeds hard target …" / "did not reach soft target …").
+  // The renderer's `isUnderTargetDone` predicate is a String.includes
+  // match against those exact tokens; if a re-opt result is still
+  // over-target, we want the "手动优化" button to come back so the
+  // user can keep tightening parameters until the file fits — that is
+  // the entire R-79 product requirement ("二次处理后还是不达标的话,
+  // 那还是可以继续二次处理"). When the re-opt actually hits the soft
+  // target, `warning` stays undefined and the button auto-disappears.
   if (options.reoptimizeFromGifPath) {
     emit({
       taskId: task.id,
@@ -957,11 +967,23 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
       : !result.given
         ? `<= ${targetMBLocal.toFixed(1)}MB (fallback)`
         : `over ${targetMBLocal.toFixed(1)}MB`;
+    // R-79 — keep the first-pass token vocabulary verbatim so the
+    // renderer's `isUnderTargetDone` predicate keeps recognising
+    // re-optimised-but-still-over-target rows and brings the
+    // "手动优化" button back. We embed "(re-run)" in the message
+    // (not the warning) so logs / history can still distinguish a
+    // re-run from a first pass without breaking the predicate.
     let warning: string | undefined;
     if (result.given) {
-      warning = `re-opt size ${result.sizeMB.toFixed(2)}MB still over ${targetMBLocal.toFixed(1)}MB target`;
+      warning = `final size ${result.sizeMB.toFixed(2)}MB exceeds hard target ${targetMBLocal.toFixed(1)}MB at min ${options.minSize}px`;
+      if (result.phaseFailures.length > 0) {
+        warning += ` · ${result.phaseFailures.length} phase failure(s) — click for details`;
+      }
     } else if (!result.reachedSoft) {
-      warning = `re-opt did not reach soft ${softMBLocal2.toFixed(1)}MB; ${result.sizeMB.toFixed(2)}MB`;
+      warning = `did not reach soft target ${softMBLocal2.toFixed(1)}MB; saved at ${result.sizeMB.toFixed(2)}MB`;
+      if (result.phaseFailures.length > 0) {
+        warning += ` · ${result.phaseFailures.length} phase failure(s) — click for details`;
+      }
     }
     emit({
       taskId: task.id,

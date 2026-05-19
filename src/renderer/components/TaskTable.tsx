@@ -76,6 +76,12 @@ function describe(p: TaskProgress): string {
  *   - "did not reach soft target …" (over softMaxBytes but at-or-below maxBytes)
  * Either case is a candidate for manual re-optimization.
  *
+ * R-79 — the manual re-optimize fast path in processor.ts now emits the
+ * SAME two phrases when the re-run still cannot meet the target. That
+ * is intentional: as long as the result is over-target the user wants
+ * to keep tightening parameters and try again. Reaching the soft target
+ * still leaves `warning === undefined` so the button auto-disappears.
+ *
  * Exported so tests + the App-level "isUnderTargetDone" helper share the same
  * predicate; flipping the warning string on the main side requires updating
  * exactly one place.
