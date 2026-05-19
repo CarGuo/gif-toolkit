@@ -13,6 +13,7 @@ import type {
   ToolboxJob,
   ToolboxParams
 } from '../shared/types';
+import type { GifOptimizeLevel, GifDither } from '../shared/types/process';
 import { DEFAULT_OPTIONS } from '../shared/types';
 import { downloadToFile } from './downloader';
 import {
@@ -282,6 +283,33 @@ async function compressLoop(
   const softMB = Math.max(0.1, Math.min(hardMB, options.softMaxBytes / (1024 * 1024)));
   const minSide = Math.max(HARD_MIN_SIZE, options.minSize);
   const maxSide = Math.max(minSide, options.maxWidth);
+  // R-81 — gifsicle knobs surfaced from ProcessOptions. Treat them as
+  // ceiling / floor / lock so compressLoop's adaptive search still has
+  // headroom to converge but stays within the user's quality budget.
+  //   - lossyCeiling: max --lossy=N adaptive search may use (default 200,
+  //     i.e. wide open). Lower it to "cap visual damage".
+  //   - colorsFloor:  min --colors=N. Default 2 (also wide open). Raise
+  //     it to "force palette ≥ N" — every reduction pass clamps to floor.
+  //   - optimizeLevel: -O1/2/3 lock for every gifsicle pass.
+  //   - dither: lock for every gifsicle pass that quantises (colors<256).
+  const lossyCeiling = (() => {
+    const v = options.lossyCeiling;
+    if (typeof v !== 'number' || !Number.isFinite(v)) return 200;
+    return Math.max(0, Math.min(200, Math.floor(v)));
+  })();
+  const colorsFloor = (() => {
+    const v = options.colorsFloor;
+    if (typeof v !== 'number' || !Number.isFinite(v)) return 2;
+    return Math.max(2, Math.min(256, Math.floor(v)));
+  })();
+  const optimizeLevel: GifOptimizeLevel = options.optimizeLevel === 1 || options.optimizeLevel === 2 || options.optimizeLevel === 3
+    ? options.optimizeLevel
+    : 3;
+  const dither: GifDither = options.dither === 'none' || options.dither === 'floyd-steinberg' || options.dither === 'ordered'
+    ? options.dither
+    : 'floyd-steinberg';
+  const clampLossy = (n: number): number => Math.max(0, Math.min(lossyCeiling, Math.round(n)));
+  const clampColors = (n: number): number => Math.max(colorsFloor, Math.min(256, Math.round(n)));
   const TOTAL_STEPS = 8; // new realistic ceiling, was 12
   let stepCounter = 0;
   // Tunables — exposed as constants so a follow-up benchmark pass can
@@ -447,7 +475,12 @@ async function compressLoop(
     label: string
   ): Promise<number> => {
     checkCancel(signal);
-    const key = cacheKey(src, width, lossy, colors);
+    // R-81 — clamp every adaptive proposal to the user's ceiling/floor
+    // BEFORE we hash the cache key, so a (lossy=180, ceiling=120) request
+    // and a (lossy=120) request reuse the same cache slot.
+    const effLossy = clampLossy(lossy);
+    const effColors = clampColors(colors);
+    const key = cacheKey(src, width, effLossy, effColors);
     const hit = optimizeCache.get(key);
     if (hit) {
       // O5: short-circuit redundant gifsicle. Still feed the result into
@@ -459,13 +492,13 @@ async function compressLoop(
         substep: 'optimizing',
         stepIndex: ++stepCounter,
         totalSteps: TOTAL_STEPS,
-        detail: `cache w=${width} colors=${colors} lossy=${lossy} -> ${hit.size.toFixed(2)}MB`,
+        detail: `cache w=${width} colors=${effColors} lossy=${effLossy} -O${optimizeLevel} dither=${dither} -> ${hit.size.toFixed(2)}MB`,
         currentSizeMB: hit.size
       });
       return hit.size;
     }
-    const out = path.join(workDir, `${baseName}.w${width}.c${colors}l${lossy}.gif`);
-    await gifsicleOptimize(src, out, lossy, colors, signal);
+    const out = path.join(workDir, `${baseName}.w${width}.c${effColors}l${effLossy}.gif`);
+    await gifsicleOptimize(src, out, effLossy, effColors, signal, { optimizeLevel, dither });
     const s = await statSizeMB(out);
     producedAny = true;
     recordBest(out, s, width);
@@ -476,7 +509,7 @@ async function compressLoop(
       substep: 'optimizing',
       stepIndex: ++stepCounter,
       totalSteps: TOTAL_STEPS,
-      detail: `w=${width} colors=${colors} lossy=${lossy} -> ${s.toFixed(2)}MB`,
+      detail: `w=${width} colors=${effColors} lossy=${effLossy} -O${optimizeLevel} dither=${dither} -> ${s.toFixed(2)}MB`,
       currentSizeMB: s
     });
     return s;
@@ -1694,6 +1727,22 @@ function toolboxParamsToProcessOptions(params: ToolboxParams): ProcessOptions {
   // Toolbox 'width' is the longest-side cap (mirrors ProcessOptions.maxWidth).
   // gif-resize's targetWidth is consumed differently — read directly from params.
   if (typeof params.width === 'number') opts.maxWidth = Math.max(64, params.width);
+  // R-81 — propagate gifsicle knobs (lossyCeiling / colorsFloor /
+  // optimizeLevel / dither) to ProcessOptions so compressLoop honours
+  // them. main/index.ts sanitizeToolboxParams clamps to legal ranges
+  // before reaching here, but we still guard defensively.
+  if (typeof params.lossyCeiling === 'number' && Number.isFinite(params.lossyCeiling)) {
+    opts.lossyCeiling = Math.max(0, Math.min(200, Math.floor(params.lossyCeiling)));
+  }
+  if (typeof params.colorsFloor === 'number' && Number.isFinite(params.colorsFloor)) {
+    opts.colorsFloor = Math.max(2, Math.min(256, Math.floor(params.colorsFloor)));
+  }
+  if (params.optimizeLevel === 1 || params.optimizeLevel === 2 || params.optimizeLevel === 3) {
+    opts.optimizeLevel = params.optimizeLevel;
+  }
+  if (params.dither === 'none' || params.dither === 'floyd-steinberg' || params.dither === 'ordered') {
+    opts.dither = params.dither;
+  }
   return opts;
 }
 
@@ -1970,16 +2019,22 @@ async function processToolboxJob({ job, outputBaseDir, emit, signal, batchTaken 
     if (!hasMethod && hasExplicit && !hasBudget) {
       const lossy = job.params.lossy ?? 0;
       const colors = job.params.colors ?? 256;
+      // R-81 — explicit one-shot also honours -O / dither knobs.
+      const oLevel = opts.optimizeLevel ?? 3;
+      const oDither = opts.dither ?? 'floyd-steinberg';
       emit({
         taskId: job.id,
         status: 'compressing',
         percent: 30,
         substep: 'optimizing',
-        message: `gifsicle lossy=${lossy} colors=${colors}`,
+        message: `gifsicle lossy=${lossy} colors=${colors} -O${oLevel} dither=${oDither}`,
         elapsedMs: elapsed()
       });
       const finalOut = path.join(outputBaseDir, fileNameFor(fakeMedia, optOutExt, batchTaken));
-      await gifsicleOptimize(job.inputPath, finalOut, lossy, colors, signal);
+      await gifsicleOptimize(job.inputPath, finalOut, lossy, colors, signal, {
+        optimizeLevel: oLevel,
+        dither: oDither
+      });
       const sizeMB = await statSizeMB(finalOut);
       emit({
         taskId: job.id,
@@ -1987,7 +2042,7 @@ async function processToolboxJob({ job, outputBaseDir, emit, signal, batchTaken 
         percent: 100,
         outputs: [finalOut],
         currentSizeMB: sizeMB,
-        message: `gif optimized (${sizeMB.toFixed(2)}MB · lossy=${lossy} colors=${colors})`,
+        message: `gif optimized (${sizeMB.toFixed(2)}MB · lossy=${lossy} colors=${colors} -O${oLevel})`,
         elapsedMs: elapsed()
       });
       return;

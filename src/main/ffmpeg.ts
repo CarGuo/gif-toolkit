@@ -4,6 +4,7 @@ import { promises as fsp } from 'fs';
 import { tmpdir as osTmpdir } from 'os';
 import sharp from 'sharp';
 import { getFfmpegPath, getFfprobePath, getGifsiclePath, gifsicleSupportsLossy } from './binaries';
+import type { GifOptimizeLevel, GifDither } from '../shared/types/process';
 
 export interface ProbeInfo {
   durationSec: number;
@@ -492,12 +493,18 @@ export async function videoToAnimatedWebP(
   );
 }
 
+export interface GifsicleOptimizeOpts {
+  optimizeLevel?: GifOptimizeLevel;
+  dither?: GifDither;
+}
+
 export async function gifsicleOptimize(
   input: string,
   output: string,
   lossy: number,
   colors: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  opts?: GifsicleOptimizeOpts
 ): Promise<void> {
   // R-41 — gifsicle is gif-only, but the toolbox now accepts .webp on
   // GIF Optimize too. When either side is webp, route through the
@@ -505,13 +512,22 @@ export async function gifsicleOptimize(
   // a webp output (matching their input format).
   if (!isGifPath(input) || !isGifPath(output)) {
     return withWebpAsGif(input, output, (gifIn, gifOut) =>
-      gifsicleOptimize(gifIn, gifOut, lossy, colors, signal)
+      gifsicleOptimize(gifIn, gifOut, lossy, colors, signal, opts)
     );
   }
   const gifsicle = getGifsiclePath();
   const safeLossy = Number.isFinite(lossy) ? Math.max(0, Math.floor(lossy)) : 0;
   const safeColors = Number.isFinite(colors) ? Math.max(2, Math.min(256, Math.floor(colors))) : 256;
-  const args = ['-O3'];
+  // R-81 — optimize level / dither are user-controlled knobs (process.ts).
+  // Default to -O3 + floyd-steinberg dither (matches pre-R-81 behaviour
+  // for callers that don't pass opts).
+  const level: GifOptimizeLevel = opts?.optimizeLevel === 1 || opts?.optimizeLevel === 2 || opts?.optimizeLevel === 3
+    ? opts.optimizeLevel
+    : 3;
+  const dither: GifDither = opts?.dither === 'none' || opts?.dither === 'floyd-steinberg' || opts?.dither === 'ordered'
+    ? opts.dither
+    : 'floyd-steinberg';
+  const args = [`-O${level}`];
   // Skip --lossy if the resolved binary doesn't understand it (some older
   // imagemin/gifsicle-bin builds < 1.92 reject it with
   // "gifsicle: unrecognized option '--lossy=N'" and the entire optimize
@@ -519,6 +535,17 @@ export async function gifsicleOptimize(
   // taking the whole compress phase down with us).
   if (safeLossy > 0 && gifsicleSupportsLossy()) {
     args.push(`--lossy=${safeLossy}`);
+  }
+  // R-81 — dither only matters when palette is reduced (colors < 256);
+  // a 256-colour gif has no quantisation step to dither against.
+  if (safeColors < 256) {
+    if (dither === 'none') {
+      args.push('--no-dither');
+    } else if (dither === 'ordered') {
+      args.push('--dither=ordered');
+    } else {
+      args.push('--dither=floyd-steinberg');
+    }
   }
   args.push('--colors', String(safeColors), input, '-o', output);
   await run(gifsicle, args, { signal });

@@ -1,5 +1,14 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import type { ProcessOptions } from '../../shared/types';
+import {
+  GIF_OPTIMIZE_LEVELS,
+  GIF_DITHER_MODES,
+  GIF_LOSSY_MAX,
+  GIF_COLORS_MIN,
+  GIF_COLORS_MAX,
+  type GifOptimizeLevel,
+  type GifDither,
+} from '../../shared/types/process';
 
 /**
  * R-79 — Full ProcessOptions surface for "再压一次".
@@ -35,6 +44,14 @@ export interface ManualOptimizeRequest {
   minSize?: number;
   /** R-79 — playback speed multiplier (optional override). */
   speed?: number;
+  /** R-81 — gifsicle --lossy=N ceiling (0..200). */
+  lossyCeiling?: number;
+  /** R-81 — gifsicle --colors=N floor (2..256). */
+  colorsFloor?: number;
+  /** R-81 — gifsicle -O level lock (1..3). */
+  optimizeLevel?: GifOptimizeLevel;
+  /** R-81 — gifsicle dither lock when palette<256. */
+  dither?: GifDither;
 }
 
 interface Props {
@@ -70,43 +87,54 @@ const PRESETS: Preset[] = [
   {
     key: 'harder',
     label: '更狠压',
-    hint: '目标 -30% / fps -2 / 边长 ×0.85',
+    hint: '目标 -30% / fps -2 / 边长 ×0.85 / lossy=160 colors=64',
     build: (base, sizeMB) => ({
       maxBytes: Math.max(100 * 1024, Math.round(Math.min(base.maxBytes, sizeMB * 1024 * 1024) * 0.7)),
       fps: clampInt(base.fps - 2, 5, 60),
-      maxWidth: clampInt(Math.round(base.maxWidth * 0.85), Math.max(64, base.minSize), 4096)
-    })
+      maxWidth: clampInt(Math.round(base.maxWidth * 0.85), Math.max(64, base.minSize), 4096),
+      // R-81 — "更狠压" 真的去动 lossy / colors。lossy=160 是 gifsicle 公认
+      // "明显能看出来,但还能接受" 的拐点;colors=64 是体积/质量平衡线。
+      lossyCeiling: 160,
+      colorsFloor: 64,
+    }),
   },
   {
     key: 'size',
     label: '优先尺寸',
-    hint: '边长 ×0.75,fps 不变',
+    hint: '边长 ×0.75,fps 不变,lossy 用全局值',
     build: (base, sizeMB) => ({
       maxBytes: Math.max(100 * 1024, Math.round(Math.min(base.maxBytes, sizeMB * 1024 * 1024) * 0.8)),
       fps: base.fps,
-      maxWidth: clampInt(Math.round(base.maxWidth * 0.75), Math.max(64, base.minSize), 4096)
-    })
+      maxWidth: clampInt(Math.round(base.maxWidth * 0.75), Math.max(64, base.minSize), 4096),
+      // R-81 — 让 adaptive 搜索自由发挥(不锁 lossy/colors);用户专注让边长缩。
+    }),
   },
   {
     key: 'fps',
     label: '优先帧率',
-    hint: 'fps -4,边长不变',
+    hint: 'fps -4,边长不变,lossy 用全局值',
     build: (base, sizeMB) => ({
       maxBytes: Math.max(100 * 1024, Math.round(Math.min(base.maxBytes, sizeMB * 1024 * 1024) * 0.8)),
       fps: clampInt(base.fps - 4, 5, 60),
-      maxWidth: base.maxWidth
-    })
+      maxWidth: base.maxWidth,
+      // R-81 — 不锁 lossy/colors,让 adaptive 自己来。用户用减帧抢体积。
+    }),
   },
   {
     key: 'fidelity',
     label: '近于原图',
-    hint: '只降目标大小,画质优先',
+    hint: '只降目标大小,lossy=20 colors=256(最高画质)',
     build: (base, sizeMB) => ({
       maxBytes: Math.max(100 * 1024, Math.round(Math.min(base.maxBytes, sizeMB * 1024 * 1024) * 0.9)),
       fps: base.fps,
-      maxWidth: base.maxWidth
-    })
-  }
+      maxWidth: base.maxWidth,
+      // R-81 — 把 lossy 上限压到 20(gifsicle 几乎无察觉)、colors 锁满 256
+      // (完全禁用调色板压缩)。adaptive 搜索仍会动,但每一步都局限于
+      // "高画质" 子空间,体积一般只能勉强降到目标 0.9 倍。
+      lossyCeiling: 20,
+      colorsFloor: 256,
+    }),
+  },
 ];
 
 export const ManualOptimizeModal: React.FC<Props> = ({
@@ -134,6 +162,22 @@ export const ManualOptimizeModal: React.FC<Props> = ({
   const [maxWidth, setMaxWidth] = useState<string>(String(initial.maxWidth));
   const [minSize, setMinSize] = useState<string>(String(baseOptions.minSize));
   const [speed, setSpeed] = useState<string>(String(baseOptions.speed));
+  // R-81 — 4 gifsicle knobs. Default to whatever the live OptionsForm
+  // already holds; presets that *do* lock lossy/colors will overwrite
+  // these on click via applyPreset(); presets that don't will leave the
+  // user's hand-edits intact (mirrors softMaxBytes/minSize/speed policy).
+  const [lossyCeiling, setLossyCeiling] = useState<string>(
+    String(baseOptions.lossyCeiling ?? GIF_LOSSY_MAX)
+  );
+  const [colorsFloor, setColorsFloor] = useState<string>(
+    String(baseOptions.colorsFloor ?? GIF_COLORS_MIN)
+  );
+  const [optimizeLevel, setOptimizeLevel] = useState<GifOptimizeLevel>(
+    baseOptions.optimizeLevel ?? 3
+  );
+  const [dither, setDither] = useState<GifDither>(
+    baseOptions.dither ?? 'floyd-steinberg'
+  );
 
   useEffect(() => {
     if (!open) return;
@@ -150,6 +194,14 @@ export const ManualOptimizeModal: React.FC<Props> = ({
     setMaxWidth(String(p.maxWidth));
     setMinSize(String(baseOptions.minSize));
     setSpeed(String(baseOptions.speed));
+    // R-81 — same selective rule: if the preset names lossy/colors, use
+    // it; otherwise fall back to the live OptionsForm value. -O level
+    // and dither are NOT preset-driven (no semantic gain in flipping
+    // them per preset) — they always follow baseOptions on open.
+    setLossyCeiling(String(p.lossyCeiling ?? baseOptions.lossyCeiling ?? GIF_LOSSY_MAX));
+    setColorsFloor(String(p.colorsFloor ?? baseOptions.colorsFloor ?? GIF_COLORS_MIN));
+    setOptimizeLevel(baseOptions.optimizeLevel ?? 3);
+    setDither(baseOptions.dither ?? 'floyd-steinberg');
   }, [open, baseOptions, currentSizeMB]);
 
   useEffect(() => {
@@ -173,6 +225,12 @@ export const ManualOptimizeModal: React.FC<Props> = ({
     setMaxWidth(String(next.maxWidth));
     // softMaxBytes / minSize / speed left as-is so the user keeps any
     // hand-edits they already made when toggling between presets.
+    // R-81 — for lossy/colors we follow the preset's intent: a preset
+    // that explicitly names them overwrites; one that doesn't leaves
+    // any hand-edit alone. -O level / dither are never touched by
+    // presets at all (those are advanced-axis knobs).
+    if (typeof next.lossyCeiling === 'number') setLossyCeiling(String(next.lossyCeiling));
+    if (typeof next.colorsFloor === 'number') setColorsFloor(String(next.colorsFloor));
   };
 
   const handleRun = (): void => {
@@ -205,6 +263,23 @@ export const ManualOptimizeModal: React.FC<Props> = ({
     }
     if (Number.isFinite(sp) && sp > 0) {
       req.speed = clampNum(sp, 0.25, 4);
+    }
+    // R-81 — gifsicle knobs. Each one is independently optional;
+    // omission means "leave the form's current options.* untouched
+    // for THIS task" (matches the rest of the modal's contract).
+    const lc = Number(lossyCeiling);
+    if (Number.isFinite(lc)) {
+      req.lossyCeiling = clampInt(lc, 0, GIF_LOSSY_MAX);
+    }
+    const cf = Number(colorsFloor);
+    if (Number.isFinite(cf)) {
+      req.colorsFloor = clampInt(cf, GIF_COLORS_MIN, GIF_COLORS_MAX);
+    }
+    if ((GIF_OPTIMIZE_LEVELS as readonly number[]).includes(optimizeLevel)) {
+      req.optimizeLevel = optimizeLevel;
+    }
+    if ((GIF_DITHER_MODES as readonly string[]).includes(dither)) {
+      req.dither = dither;
     }
     onConfirm(req);
   };
@@ -303,6 +378,59 @@ export const ManualOptimizeModal: React.FC<Props> = ({
                 value={speed}
                 onChange={(e) => setSpeed(e.target.value)}
               />
+            </label>
+            {/* R-81 — gifsicle 4 knobs surfaced into 手动二次优化。
+                lossy/colors 是 ceiling/floor (compressLoop adaptive 搜索的边界);
+                -O / dither 是每一次 gifsicle invocation 的 lock。 */}
+            <label>
+              <span>lossy 上限 (0-200)</span>
+              <input
+                type="number"
+                min={0}
+                max={GIF_LOSSY_MAX}
+                step={5}
+                value={lossyCeiling}
+                onChange={(e) => setLossyCeiling(e.target.value)}
+              />
+            </label>
+            <label>
+              <span>colors 下限 (2-256)</span>
+              <input
+                type="number"
+                min={GIF_COLORS_MIN}
+                max={GIF_COLORS_MAX}
+                step={2}
+                value={colorsFloor}
+                onChange={(e) => setColorsFloor(e.target.value)}
+              />
+            </label>
+            <label>
+              <span>-O 级别</span>
+              <select
+                value={String(optimizeLevel)}
+                onChange={(e) => {
+                  const lvl = Number(e.target.value) as GifOptimizeLevel;
+                  if ((GIF_OPTIMIZE_LEVELS as readonly number[]).includes(lvl)) setOptimizeLevel(lvl);
+                }}
+              >
+                {GIF_OPTIMIZE_LEVELS.map((lvl) => (
+                  <option key={lvl} value={String(lvl)}>{`-O${lvl}`}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>dither</span>
+              <select
+                value={dither}
+                onChange={(e) => {
+                  const d = e.target.value as GifDither;
+                  if ((GIF_DITHER_MODES as readonly string[]).includes(d)) setDither(d);
+                }}
+              >
+                {GIF_DITHER_MODES.map((d) => (
+                  <option key={d} value={d}>{d}</option>
+                ))}
+              </select>
             </label>
           </div>
         </div>

@@ -1,5 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import type { ProcessOptions } from '../../shared/types';
+import {
+  GIF_OPTIMIZE_LEVELS,
+  GIF_DITHER_MODES,
+  GIF_LOSSY_MAX,
+  GIF_COLORS_MIN,
+  GIF_COLORS_MAX,
+  type GifOptimizeLevel,
+  type GifDither,
+} from '../../shared/types/process';
 
 interface Props {
   value: ProcessOptions;
@@ -133,6 +142,62 @@ export const OptionsForm: React.FC<Props> = ({ value, onChange }) => {
         step={1}
         onCommit={(n) => set('concurrency', Math.max(1, Math.min(8, Math.round(n))))}
       />
+      {/* R-81 — 高级 gifsicle 旋钮。默认折叠,普通用户看到的是 8 个核心字段;
+          需要精细控制画质 ↔ 体积平衡的用户可展开此抽屉:
+            - lossy 上限   :  0..200,越小画质越好但体积越大,0 = 关闭 lossy
+            - colors 下限  :  2..256,越大画质越好但体积越大,256 = 关闭调色板压缩
+            - -O 级别      :  1/2/3,锁定 gifsicle 优化级别
+            - dither       :  none / floyd-steinberg / ordered,调色板量化算法
+          这 4 个值会作为 ceiling/floor/lock 喂进 compressLoop 的 adaptive 搜索 */}
+      <details className="advanced-gif">
+        <summary>高级 GIF 优化</summary>
+        <div className="options" style={{ marginTop: 8 }}>
+          <NumField
+            label="lossy 上限"
+            value={value.lossyCeiling ?? GIF_LOSSY_MAX}
+            min={0}
+            max={GIF_LOSSY_MAX}
+            step={5}
+            onCommit={(n) => set('lossyCeiling', Math.max(0, Math.min(GIF_LOSSY_MAX, Math.round(n))))}
+          />
+          <NumField
+            label="colors 下限"
+            value={value.colorsFloor ?? GIF_COLORS_MIN}
+            min={GIF_COLORS_MIN}
+            max={GIF_COLORS_MAX}
+            step={2}
+            onCommit={(n) => set('colorsFloor', Math.max(GIF_COLORS_MIN, Math.min(GIF_COLORS_MAX, Math.round(n))))}
+          />
+          <label>
+            -O 级别
+            <select
+              value={String(value.optimizeLevel ?? 3)}
+              onChange={(e) => {
+                const lvl = Number(e.target.value) as GifOptimizeLevel;
+                if ((GIF_OPTIMIZE_LEVELS as readonly number[]).includes(lvl)) set('optimizeLevel', lvl);
+              }}
+            >
+              {GIF_OPTIMIZE_LEVELS.map((lvl) => (
+                <option key={lvl} value={String(lvl)}>{`-O${lvl}`}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            dither
+            <select
+              value={value.dither ?? 'floyd-steinberg'}
+              onChange={(e) => {
+                const d = e.target.value as GifDither;
+                if ((GIF_DITHER_MODES as readonly string[]).includes(d)) set('dither', d);
+              }}
+            >
+              {GIF_DITHER_MODES.map((d) => (
+                <option key={d} value={d}>{d}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+      </details>
     </div>
   );
 };

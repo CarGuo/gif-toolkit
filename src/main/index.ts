@@ -15,7 +15,15 @@ import { getCapabilityReport } from './capabilities';
 import { registerUploaderIpc } from './uploader';
 import { openDb, closeDb } from './db';
 import { registerDbIpc } from './db/dbIpc';
-import { DEFAULT_OPTIONS, TOOLBOX_INPUT_EXTENSIONS } from '../shared/types';
+import {
+  DEFAULT_OPTIONS,
+  TOOLBOX_INPUT_EXTENSIONS,
+  GIF_OPTIMIZE_LEVELS,
+  GIF_DITHER_MODES,
+  GIF_LOSSY_MAX,
+  GIF_COLORS_MIN,
+  GIF_COLORS_MAX,
+} from '../shared/types';
 import type {
   ProcessOptions,
   ProcessTask,
@@ -23,7 +31,9 @@ import type {
   ResolvedMedia,
   ToolboxJob,
   ToolboxKind,
-  ToolboxParams
+  ToolboxParams,
+  GifOptimizeLevel,
+  GifDither
 } from '../shared/types';
 import { isPrivateHost, safeName } from './helpers';
 import { applySniffFilters, type SniffFilterOptions } from './sniffFilters';
@@ -343,6 +353,27 @@ function sanitizeOptions(o: unknown): ProcessOptions {
     result.reoptimizeFromGifPath = norm;
   }
 
+  // R-81: gif optimize knobs (lossy ceiling, colors floor, optimize level,
+  // dither mode). Each is validated in strict mode — wrong type / NaN /
+  // out-of-range / unknown enum string falls through silently to the
+  // default rather than throwing, so a renderer that never sets these
+  // fields gets the historical behaviour for free.
+  if (typeof obj.lossyCeiling === 'number' && Number.isFinite(obj.lossyCeiling)) {
+    result.lossyCeiling = Math.max(0, Math.min(GIF_LOSSY_MAX, Math.round(obj.lossyCeiling)));
+  }
+  if (typeof obj.colorsFloor === 'number' && Number.isFinite(obj.colorsFloor)) {
+    result.colorsFloor = Math.max(GIF_COLORS_MIN, Math.min(GIF_COLORS_MAX, Math.round(obj.colorsFloor)));
+  }
+  if (typeof obj.optimizeLevel === 'number' && Number.isFinite(obj.optimizeLevel)) {
+    const lvl = Math.round(obj.optimizeLevel) as GifOptimizeLevel;
+    if (GIF_OPTIMIZE_LEVELS.includes(lvl)) {
+      result.optimizeLevel = lvl;
+    }
+  }
+  if (typeof obj.dither === 'string' && GIF_DITHER_MODES.includes(obj.dither as GifDither)) {
+    result.dither = obj.dither as GifDither;
+  }
+
   if (typeof obj.outDir === 'string' && obj.outDir) {
     result.outDir = assertOutputDir(obj.outDir);
   }
@@ -450,6 +481,27 @@ function sanitizeToolboxParams(p: unknown): ToolboxParams {
   }
   const dropEveryN = num(obj.dropEveryN);
   if (dropEveryN !== undefined) result.dropEveryN = Math.max(2, Math.min(10, Math.round(dropEveryN)));
+
+  // R-81 — gifsicle knobs (lossyCeiling / colorsFloor / optimizeLevel /
+  // dither). Mirrors the same clamp logic used by sanitizeOptions for
+  // ProcessOptions; closed enums for level / dither prevent IPC-tampered
+  // strings from smuggling unknown gifsicle flags.
+  const lossyCeiling = num(obj.lossyCeiling);
+  if (lossyCeiling !== undefined) {
+    result.lossyCeiling = Math.max(0, Math.min(GIF_LOSSY_MAX, Math.round(lossyCeiling)));
+  }
+  const colorsFloor = num(obj.colorsFloor);
+  if (colorsFloor !== undefined) {
+    result.colorsFloor = Math.max(GIF_COLORS_MIN, Math.min(GIF_COLORS_MAX, Math.round(colorsFloor)));
+  }
+  const optLevel = obj.optimizeLevel;
+  if (typeof optLevel === 'number' && (GIF_OPTIMIZE_LEVELS as readonly number[]).includes(optLevel)) {
+    result.optimizeLevel = optLevel as GifOptimizeLevel;
+  }
+  const ditherVal = obj.dither;
+  if (typeof ditherVal === 'string' && (GIF_DITHER_MODES as readonly string[]).includes(ditherVal)) {
+    result.dither = ditherVal as GifDither;
+  }
 
   // R-37 — Trim / Speed / Reverse / Rotate fields. Same defensive posture:
   // every numeric is clamped to its supported range and every enum is
@@ -1373,6 +1425,21 @@ if (!gotLock) {
       log(`whenReady[+${Date.now() - T0}ms] ${label}`);
     };
     tick('start');
+    // R-80 post-mortem · macOS dock tooltip / menubar 在 dev 下显示 "Electron"。
+    // 真正修 dock tooltip 的是 [scripts/patch-electron-plist.mjs](postinstall/predev/prestart)
+    // 在 node_modules/electron/dist/Electron.app/Contents/Info.plist 改 CFBundleName。
+    // `app.setName()` 不影响 macOS dock tooltip(那是 OS 读 bundle 元数据决定的),
+    // 但会影响 menubar 第一项 / About 面板 / process.title,所以这里仍然要调,
+    // 让 menubar 一进入就是 "Gif Toolkit",和 dock tooltip(Gif Toolkit (dev))协同。
+    try {
+      app.setName('Gif Toolkit');
+      app.setAboutPanelOptions({
+        applicationName: 'Gif Toolkit',
+        applicationVersion: app.getVersion(),
+      });
+    } catch (e) {
+      log(`setName failed: ${(e as Error).message}`);
+    }
     // R-64 — Set the macOS Dock icon SYNCHRONOUSLY at the very top of
     // `whenReady` so the user never sees the Electron atom logo. The
     // setIcon inside `createWindow()` is too late: by the time await

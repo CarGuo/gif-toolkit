@@ -14,6 +14,7 @@ import type {
   UploadStartPayload
 } from '../shared/types';
 import { DEFAULT_OPTIONS } from '../shared/types';
+import type { GifOptimizeLevel, GifDither } from '../shared/types/process';
 import { MediaGrid } from './components/MediaGrid';
 import { OptionsForm } from './components/OptionsForm';
 import { PreviewModal } from './components/PreviewModal';
@@ -1369,6 +1370,12 @@ const App: React.FC = () => {
     softMaxBytes?: number;
     minSize?: number;
     speed?: number;
+    /** R-81 — gifsicle knobs from ManualOptimizeModal / preset chips.
+     *  Each is independently optional; same per-dispatch contract. */
+    lossyCeiling?: number;
+    colorsFloor?: number;
+    optimizeLevel?: GifOptimizeLevel;
+    dither?: GifDither;
   }) => {
     if (!giftk) return;
     if (media.kind === 'image') {
@@ -1420,6 +1427,21 @@ const App: React.FC = () => {
       }
       if (typeof override.minSize === 'number') optBase.minSize = override.minSize;
       if (typeof override.speed === 'number') optBase.speed = override.speed;
+      // R-81 — gifsicle knobs. Defensive clamp mirrors sanitizeOptions
+      // in main/index.ts so the per-dispatch override survives even
+      // if a future caller forgets to pre-clamp.
+      if (typeof override.lossyCeiling === 'number' && Number.isFinite(override.lossyCeiling)) {
+        optBase.lossyCeiling = Math.max(0, Math.min(200, Math.round(override.lossyCeiling)));
+      }
+      if (typeof override.colorsFloor === 'number' && Number.isFinite(override.colorsFloor)) {
+        optBase.colorsFloor = Math.max(2, Math.min(256, Math.round(override.colorsFloor)));
+      }
+      if (override.optimizeLevel === 1 || override.optimizeLevel === 2 || override.optimizeLevel === 3) {
+        optBase.optimizeLevel = override.optimizeLevel;
+      }
+      if (override.dither === 'none' || override.dither === 'floyd-steinberg' || override.dither === 'ordered') {
+        optBase.dither = override.dither;
+      }
     }
     const dur = media.resolved?.durationSec ?? media.durationSec ?? 0;
     const tooLong = media.kind === 'video' && dur > options.maxSegmentSec;
@@ -1530,7 +1552,13 @@ const App: React.FC = () => {
       maxWidth: req.maxWidth,
       softMaxBytes: req.softMaxBytes,
       minSize: req.minSize,
-      speed: req.speed
+      speed: req.speed,
+      // R-81 — propagate gifsicle knobs from the manual modal so the
+      // re-run honours user-picked lossy/colors/-O/dither overrides.
+      lossyCeiling: req.lossyCeiling,
+      colorsFloor: req.colorsFloor,
+      optimizeLevel: req.optimizeLevel,
+      dither: req.dither,
     });
   }, [manualOpt, onProcessOne]);
 

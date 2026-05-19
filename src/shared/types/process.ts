@@ -1,5 +1,35 @@
 import type { SniffedMedia } from './media';
 
+/** R-81 — gifsicle `--optimize` level. O1=safe/fast, O2=better, O3=best (default). */
+export type GifOptimizeLevel = 1 | 2 | 3;
+
+/** R-81 — gifsicle dithering when reducing palette. `none` = posterize (smaller,
+ *  banding); `floyd-steinberg` = error-diffusion (industry default,
+ *  cleanest gradients); `ordered` = patterned (smaller than FS, more visible). */
+export type GifDither = 'none' | 'floyd-steinberg' | 'ordered';
+
+/** R-81 — runtime guard list mirrored in main/index.ts sanitizeOptions
+ *  so renderer-supplied values cannot escape this set. */
+export const GIF_OPTIMIZE_LEVELS: readonly GifOptimizeLevel[] = [1, 2, 3] as const;
+export const GIF_DITHER_MODES: readonly GifDither[] = [
+  'none',
+  'floyd-steinberg',
+  'ordered',
+] as const;
+
+/** R-81 — `lossy` ceiling. 0 = no lossy compression; 200 = aggressive
+ *  (gifsicle hard cap). compressLoop will never *exceed* this value;
+ *  the adaptive lossy search may pick anything in [0, lossyCeiling]. */
+export const GIF_LOSSY_MAX = 200;
+
+/** R-81 — `colors` floor. gifsicle accepts 2..256; we keep 2 as the
+ *  hard floor so a determined user can ship a 1-bit palette but the
+ *  default 256 means no palette reduction. compressLoop will never
+ *  reduce *below* this floor; the adaptive search may pick anything
+ *  in [colorsFloor, 256]. */
+export const GIF_COLORS_MIN = 2;
+export const GIF_COLORS_MAX = 256;
+
 export interface ProcessOptions {
   /** Hard target: must reach (or best-effort) before giving up. Default 4MB. */
   maxBytes: number;
@@ -63,6 +93,37 @@ export interface ProcessOptions {
    * already-processed gif further down.
    */
   reoptimizeFromGifPath?: string;
+  /**
+   * R-81 — gifsicle `--lossy=N` ceiling (0..200, integer). The adaptive
+   * lossy search inside compressLoop will never pick a value greater
+   * than this. 0 = forbid lossy entirely (pure-palette compression
+   * only — visually safest, highest size). 200 = full freedom for the
+   * adaptive search to push aggressively. Undefined = use DEFAULT.
+   */
+  lossyCeiling?: number;
+  /**
+   * R-81 — gifsicle `--colors=N` floor (2..256, integer). The adaptive
+   * palette-reduction step inside compressLoop will never pick a value
+   * smaller than this. 256 = forbid palette reduction (highest fidelity
+   * gradients, largest size). 2 = full freedom for the adaptive search
+   * to crush palette down to a posterised 2-color frame. Undefined =
+   * use DEFAULT.
+   */
+  colorsFloor?: number;
+  /**
+   * R-81 — gifsicle `--optimize=N` level. Locked across the entire
+   * compress loop (every gifsicle invocation). Default 3 (best). 1 is
+   * faster but ~20% larger; 2 is mid-tier. Undefined = use DEFAULT.
+   */
+  optimizeLevel?: GifOptimizeLevel;
+  /**
+   * R-81 — gifsicle dithering applied whenever palette reduction is
+   * active (i.e. `--colors < 256`). Locked across the entire compress
+   * loop. `floyd-steinberg` is the industry default and cleanest on
+   * gradients; `none` is smallest at the cost of banding; `ordered`
+   * sits between. Undefined = use DEFAULT.
+   */
+  dither?: GifDither;
 }
 
 export type TaskStatus =
@@ -170,5 +231,17 @@ export const DEFAULT_OPTIONS: ProcessOptions = {
   maxSegmentSec: 20,
   fps: 12,
   speed: 1,
-  concurrency: 3
+  concurrency: 3,
+  // R-81 — defaults preserve legacy behaviour:
+  //   lossyCeiling=200 lets the adaptive search go anywhere in [0,200];
+  //   colorsFloor=2    lets the adaptive search crush palette all the way;
+  //   optimizeLevel=3  matches the historical hard-coded -O3;
+  //   dither=floyd-steinberg is the industry default for palette reduction.
+  // Tightening any of these from the UI = "be safer / preserve quality";
+  // loosening = (only meaningful for colorsFloor / lossyCeiling) gives
+  // the search more room to shrink.
+  lossyCeiling: 200,
+  colorsFloor: 2,
+  optimizeLevel: 3,
+  dither: 'floyd-steinberg',
 };

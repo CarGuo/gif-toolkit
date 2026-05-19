@@ -9,6 +9,7 @@
   },
   "license": "MIT",
   "scripts": {
+    "predev": "node scripts/ensure-sqlite-abi.mjs && node scripts/patch-electron-plist.mjs",
     "dev": "concurrently -k -n RENDERER,MAIN -c blue,green \"npm:dev:renderer\" \"npm:dev:main\"",
     "dev:renderer": "vite",
     "dev:main": "wait-on http://localhost:5173 && tsc -p tsconfig.main.json --watch --preserveWatchOutput & wait-on dist/main/index.js && cross-env NODE_ENV=development electron .",
@@ -17,6 +18,7 @@
     "build:main": "tsc -p tsconfig.main.json",
     "build:info": "node scripts/write-build-info.mjs",
     "prebuild": "node scripts/write-build-info.mjs",
+    "prestart": "node scripts/ensure-sqlite-abi.mjs && node scripts/patch-electron-plist.mjs",
     "start": "cross-env NODE_ENV=production electron .",
     "package:mac": "npm run build && electron-builder --mac",
     "package:win": "npm run build && electron-builder --win",
@@ -29,7 +31,8 @@
     "test:db:to-node": "cd node_modules/better-sqlite3 && npx node-gyp rebuild",
     "test:db:to-electron": "electron-rebuild -f -w better-sqlite3",
     "test:db:run": "cross-env GIFTK_DB_TESTS=1 vitest run tests/main/db",
-    "postinstall": "npm rebuild sharp ffmpeg-static ffprobe-static @343dev/gifsicle ytdlp-nodejs && electron-rebuild -f -w better-sqlite3",
+    "test:db": "node scripts/test-db.mjs",
+    "postinstall": "npm rebuild sharp ffmpeg-static ffprobe-static @343dev/gifsicle ytdlp-nodejs && electron-rebuild -f -w better-sqlite3 && node scripts/patch-electron-plist.mjs",
     "lockfile:lint": "lockfile-lint --path package-lock.json --type npm --validate-https --allowed-hosts npm --validate-integrity --validate-package-names"
   },
   "engines": {

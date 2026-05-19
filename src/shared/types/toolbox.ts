@@ -1,5 +1,7 @@
 /* ----------------------- R-35 Toolbox ----------------------- */
 
+import type { GifOptimizeLevel, GifDither } from './process';
+
 /**
  * R-35 — local Toolbox (Ezgif-style). MVP shipped 4 tools (video↔gif/webp,
  * gif-resize, gif-optimize). R-37 adds the next 4: Trim / Speed / Reverse
@@ -112,6 +114,18 @@ export interface ToolboxParams {
   method?: ToolboxOptimizeMethod;
   /** every-Nth frame drop step, used when method === 'drop-every-nth' (2..10). */
   dropEveryN?: number;
+  /* ----------- R-81 Manual / Toolbox gifsicle knobs ----------- */
+  /** Mirror of ProcessOptions.lossyCeiling — caps every adaptive lossy
+   *  pass inside compressLoop / gifsicleOptimize. 0..200 integer. */
+  lossyCeiling?: number;
+  /** Mirror of ProcessOptions.colorsFloor — floors every adaptive palette
+   *  pass. 2..256 integer. */
+  colorsFloor?: number;
+  /** Mirror of ProcessOptions.optimizeLevel — gifsicle -O1/2/3 lock. */
+  optimizeLevel?: GifOptimizeLevel;
+  /** Mirror of ProcessOptions.dither — gifsicle dither lock when palette
+   *  reduction kicks in (colors < 256). */
+  dither?: GifDither;
   /* ----------- R-37 Trim / Speed / Reverse / Rotate ----------- */
   /** Speed multiplier, used by 'speed'. 0.25..4.0; 1.0 = no-op.
    *  For video tracks we apply setpts=PTS/N + atempo (audio); for gifs
