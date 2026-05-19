@@ -50,6 +50,33 @@
 | `sniff:progress` | `SniffProgress` | 每 200ms~ |
 | `app:log` | `string` | 主进程日志 |
 
+### 2.5 历史持久化(R-80, SQLite)
+
+> 详见 [docs/R-80-SQLITE-NOTES.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/R-80-SQLITE-NOTES.md)。
+> Renderer 通过 `window.giftk.db.{history|uploadHistory|sniffHistory|toolboxHistory}.*`。
+
+| 通道 | 入参 | 出参 |
+|---|---|---|
+| `db:history:readAll` | — | `HistoryRecord[]` |
+| `db:history:upsert` | `rec: HistoryRecord` | `void` |
+| `db:history:remove` | `id: string` | `void` |
+| `db:history:clear` | — | `void` |
+| `db:uploadHistory:readAll` | — | `UploadHistoryRecord[]` |
+| `db:uploadHistory:upsert` | `rec: UploadHistoryRecord` | `void` |
+| `db:uploadHistory:remove` | `id: string` | `void` |
+| `db:uploadHistory:clear` | — | `void` |
+| `db:sniffHistory:readAll` | — | `SniffHistoryEntry[]` |
+| `db:sniffHistory:upsert` | `rec: SniffHistoryEntry` | `void` |
+| `db:sniffHistory:remove` | `url: string` | `void` |
+| `db:sniffHistory:clear` | — | `void` |
+| `db:toolboxHistory:readAll` | — | `ToolboxHistoryEntry[]` |
+| `db:toolboxHistory:upsert` | `rec: ToolboxHistoryEntry` | `void` |
+| `db:toolboxHistory:remove` | `id: string` | `void` |
+| `db:toolboxHistory:clear` | — | `void` |
+| `db:bootstrapImport` | `payload: { history?, uploadHistory?, sniffHistory?, toolboxHistory? }` | `{ history, uploadHistory, sniffHistory, toolboxHistory }` 计数 |
+
+> Bootstrap import 是 R-80 Commit B 启动期一次性把 renderer 的旧 localStorage 喂给主进程入库的渠道,事务化,接受信封 (`{version,exportedAt,records}`) 或 bare-array 两种 raw 形态。每行单独 try/catch,坏行 drop 不影响整批。
+
 ---
 
 ## 3. TaskProgress 字段(R-08)

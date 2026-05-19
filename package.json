@@ -26,7 +26,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "postinstall": "npm rebuild sharp ffmpeg-static ffprobe-static @343dev/gifsicle ytdlp-nodejs",
+    "test:db:to-node": "cd node_modules/better-sqlite3 && npx node-gyp rebuild",
+    "test:db:to-electron": "electron-rebuild -f -w better-sqlite3",
+    "test:db:run": "cross-env GIFTK_DB_TESTS=1 vitest run tests/main/db",
+    "postinstall": "npm rebuild sharp ffmpeg-static ffprobe-static @343dev/gifsicle ytdlp-nodejs && electron-rebuild -f -w better-sqlite3",
     "lockfile:lint": "lockfile-lint --path package-lock.json --type npm --validate-https --allowed-hosts npm --validate-integrity --validate-package-names"
   },
   "engines": {
@@ -36,6 +39,7 @@
   "dependencies": {
     "@343dev/gifsicle": "^1.1.0",
     "axios": "^1.7.7",
+    "better-sqlite3": "12.9.0",
     "cheerio": "1.0.0-rc.12",
     "chrome-remote-interface": "0.34.0",
     "ffmpeg-static": "^5.2.0",
@@ -45,10 +49,12 @@
     "ytdlp-nodejs": "^3.4.4"
   },
   "devDependencies": {
+    "@electron/rebuild": "3.7.2",
     "@testing-library/dom": "10.4.0",
     "@testing-library/jest-dom": "6.6.3",
     "@testing-library/react": "16.1.0",
     "@testing-library/user-event": "14.5.2",
+    "@types/better-sqlite3": "7.6.13",
     "@types/chrome-remote-interface": "0.34.0",
     "@types/node": "^20.14.10",
     "@types/react": "^18.3.3",
@@ -101,7 +107,10 @@
       "node_modules/@img/**",
       "node_modules/sharp/**",
       "node_modules/@ffprobe-installer/**",
-      "node_modules/ytdlp-nodejs/bin/**"
+      "node_modules/ytdlp-nodejs/bin/**",
+      "node_modules/better-sqlite3/**",
+      "node_modules/bindings/**",
+      "node_modules/file-uri-to-path/**"
     ],
     "mac": {
       "icon": "build/icon.png",

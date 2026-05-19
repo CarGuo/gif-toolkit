@@ -13,6 +13,8 @@ import { log } from './logger';
 import { printPathsAsync } from './binaries';
 import { getCapabilityReport } from './capabilities';
 import { registerUploaderIpc } from './uploader';
+import { openDb, closeDb } from './db';
+import { registerDbIpc } from './db/dbIpc';
 import { DEFAULT_OPTIONS, TOOLBOX_INPUT_EXTENSIONS } from '../shared/types';
 import type {
   ProcessOptions,
@@ -1450,6 +1452,21 @@ if (!gotLock) {
     });
     tick('registerUploaderIpc');
 
+    // R-80 — open the SQLite history DB and register `db:*` IPC.
+    // openDb() is idempotent and runs the migrations chain; it
+    // throws if the native binding can't be loaded so a corrupt
+    // postinstall surfaces immediately at startup. registerDbIpc()
+    // is also idempotent for tests but in production this is the
+    // only call site.
+    try {
+      openDb();
+      registerDbIpc();
+      tick('openDb + registerDbIpc');
+    } catch (e) {
+      log(`db init failed: ${(e as Error).stack ?? (e as Error).message}`);
+      throw e;
+    }
+
     // Strict CSP for renderer — packaged uses tight policy; dev keeps loose.
     // R-56 — `giftk-local:` is allow-listed for img-src / media-src so
     // offline-imported items render without flipping `webSecurity` off.
@@ -1503,4 +1520,12 @@ app.on('before-quit', () => {
   // process actually exits.
   void cancelAllTasks();
   killAllProcs();
+  // R-80 — checkpoint and close the history DB so the WAL doesn't
+  // get left dangling. better-sqlite3's close() is synchronous and
+  // safe to call from a `before-quit` hook.
+  try {
+    closeDb();
+  } catch {
+    // best-effort; the OS will reclaim the file handle anyway
+  }
 });

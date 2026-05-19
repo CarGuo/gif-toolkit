@@ -31,6 +31,12 @@
 #     `npm rebuild` is OS-specific and a stale cache would cross-link
 #     the wrong native binaries. We DO cache `~/.npm` via setup-node's
 #     built-in `cache: npm`, which is just the registry tarballs.
+#   * R-80 — postinstall now ALSO runs `electron-rebuild -f -w
+#     better-sqlite3` so the SQLite native module is rebuilt against
+#     the embedded Electron 31 ABI on every CI runner. Failing to do
+#     so produces a "NODE_MODULE_VERSION mismatch" crash on first
+#     `new Database(...)` call. The 'native modules' job adds ~30s
+#     per platform but is non-negotiable for cross-platform release.
 #   * `permissions: contents: write` is required so the
 #     auto-provisioned `GITHUB_TOKEN` can create the release and
 #     upload assets. Without it, electron-builder's publish step
@@ -145,6 +151,22 @@ jobs:
 
       - name: Run tests
         run: npm test
+
+      # R-80 — DB-backed test suite. The repos exercise real
+      # better-sqlite3 against in-memory DBs, so the native module
+      # must be linked against the *host* Node ABI for this step.
+      # Before: ABI = Electron 31 (postinstall left it that way).
+      # After:  ABI = Electron 31 (we re-rebuild via electron-rebuild
+      # so the subsequent `npm run build` / electron-builder steps
+      # see the right binary). The two rebuilds add ~30s to CI but
+      # are non-negotiable: skipping them means the DB suite never
+      # runs.
+      - name: Run DB tests (rebuild to Node ABI)
+        run: npm run test:db:to-node
+      - name: Run DB tests
+        run: npm run test:db:run
+      - name: Re-rebuild better-sqlite3 for Electron
+        run: npm run test:db:to-electron
 
       - name: Build renderer + main bundles
         run: npm run build

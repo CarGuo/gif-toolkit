@@ -314,6 +314,96 @@ const api = {
     };
     ipcRenderer.on('upload:progress', handler);
     return () => ipcRenderer.removeListener('upload:progress', handler);
+  },
+
+  /**
+   * R-80 — SQLite-backed history. Each sub-namespace mirrors one of
+   * the four `useXxxHistory` hooks 1:1. The renderer keeps the same
+   * record types it had under localStorage; the main process is just
+   * the durable store. Calls are async and never throw on the wire —
+   * any error caught in the main handler is rejected so the renderer
+   * can fall back to an empty list (history is convenience, not load-
+   * bearing).
+   */
+  db: {
+    history: {
+      readAll(): Promise<unknown[]> {
+        return ipcRenderer.invoke('db:history:readAll');
+      },
+      upsert(rec: unknown): Promise<void> {
+        return ipcRenderer.invoke('db:history:upsert', rec);
+      },
+      remove(id: string): Promise<void> {
+        return ipcRenderer.invoke('db:history:remove', ensureString(id, 'id'));
+      },
+      clear(): Promise<void> {
+        return ipcRenderer.invoke('db:history:clear');
+      }
+    },
+    uploadHistory: {
+      readAll(): Promise<unknown[]> {
+        return ipcRenderer.invoke('db:uploadHistory:readAll');
+      },
+      upsert(rec: unknown): Promise<void> {
+        return ipcRenderer.invoke('db:uploadHistory:upsert', rec);
+      },
+      remove(id: string): Promise<void> {
+        return ipcRenderer.invoke('db:uploadHistory:remove', ensureString(id, 'id'));
+      },
+      clear(): Promise<void> {
+        return ipcRenderer.invoke('db:uploadHistory:clear');
+      }
+    },
+    sniffHistory: {
+      readAll(): Promise<unknown[]> {
+        return ipcRenderer.invoke('db:sniffHistory:readAll');
+      },
+      upsert(entry: unknown): Promise<void> {
+        return ipcRenderer.invoke('db:sniffHistory:upsert', entry);
+      },
+      remove(url: string): Promise<void> {
+        return ipcRenderer.invoke('db:sniffHistory:remove', ensureString(url, 'url'));
+      },
+      clear(): Promise<void> {
+        return ipcRenderer.invoke('db:sniffHistory:clear');
+      }
+    },
+    toolboxHistory: {
+      readAll(): Promise<unknown[]> {
+        return ipcRenderer.invoke('db:toolboxHistory:readAll');
+      },
+      upsert(entry: unknown): Promise<void> {
+        return ipcRenderer.invoke('db:toolboxHistory:upsert', entry);
+      },
+      remove(id: string): Promise<void> {
+        return ipcRenderer.invoke('db:toolboxHistory:remove', ensureString(id, 'id'));
+      },
+      clear(): Promise<void> {
+        return ipcRenderer.invoke('db:toolboxHistory:clear');
+      }
+    },
+    /**
+     * R-80 — Bootstrap import. The renderer reads the four legacy
+     * localStorage keys verbatim (raw JSON strings) on boot and
+     * sends them here. Main parses defensively, INSERT OR IGNOREs
+     * inside a transaction, then returns per-family insert counts.
+     * Renderer deletes the keys on a successful (non-rejecting)
+     * return. Idempotent on partial-import recovery.
+     */
+    bootstrapImport(payload: {
+      history?: string | null;
+      uploadHistory?: string | null;
+      sniffHistory?: string | null;
+      toolboxHistory?: string | null;
+    }): Promise<{
+      history: number;
+      uploadHistory: number;
+      sniffHistory: number;
+      toolboxHistory: number;
+    }> {
+      ensureObject(payload, 'payload');
+      return ipcRenderer.invoke('db:bootstrapImport', payload);
+    }
   }
 };
 

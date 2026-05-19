@@ -21,7 +21,16 @@ export default defineConfig({
     globals: true,
     setupFiles: ['./tests/setup.ts'],
     include: ['tests/**/*.test.{ts,tsx}'],
-    exclude: ['node_modules', 'dist', 'release'],
+    // R-80 — DB-backed tests require better-sqlite3 to be linked
+    // against the host Node ABI (not Electron). The default `npm test`
+    // run keeps better-sqlite3 in its installed (Electron-ABI) state
+    // because the surrounding `npm test` → `npm run build` chain
+    // depends on that. The DB suite is opt-in via the dedicated
+    // `npm run test:db:run` script which sets GIFTK_DB_TESTS=1 and
+    // depends on `npm run test:db:to-node` having been run first.
+    exclude: process.env.GIFTK_DB_TESTS
+      ? ['node_modules', 'dist', 'release']
+      : ['node_modules', 'dist', 'release', 'tests/main/db/**'],
     environmentMatchGlobs: [
       ['tests/renderer/**', 'happy-dom']
     ],
