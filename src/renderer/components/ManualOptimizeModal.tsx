@@ -6,6 +6,7 @@ import {
   GIF_LOSSY_MAX,
   GIF_COLORS_MIN,
   GIF_COLORS_MAX,
+  DEFAULT_OPTIONS,
   type GifOptimizeLevel,
   type GifDither,
 } from '../../shared/types/process';
@@ -166,17 +167,20 @@ export const ManualOptimizeModal: React.FC<Props> = ({
   // already holds; presets that *do* lock lossy/colors will overwrite
   // these on click via applyPreset(); presets that don't will leave the
   // user's hand-edits intact (mirrors softMaxBytes/minSize/speed policy).
+  // R-82 — fall back through DEFAULT_OPTIONS first (so the user sees the
+  // canonical default 200 / 2 / 3 / floyd-steinberg if baseOptions is
+  // missing them) before bottoming out on the type-level GIF_* bounds.
   const [lossyCeiling, setLossyCeiling] = useState<string>(
-    String(baseOptions.lossyCeiling ?? GIF_LOSSY_MAX)
+    String(baseOptions.lossyCeiling ?? DEFAULT_OPTIONS.lossyCeiling ?? GIF_LOSSY_MAX)
   );
   const [colorsFloor, setColorsFloor] = useState<string>(
-    String(baseOptions.colorsFloor ?? GIF_COLORS_MIN)
+    String(baseOptions.colorsFloor ?? DEFAULT_OPTIONS.colorsFloor ?? GIF_COLORS_MIN)
   );
   const [optimizeLevel, setOptimizeLevel] = useState<GifOptimizeLevel>(
-    baseOptions.optimizeLevel ?? 3
+    baseOptions.optimizeLevel ?? DEFAULT_OPTIONS.optimizeLevel ?? 3
   );
   const [dither, setDither] = useState<GifDither>(
-    baseOptions.dither ?? 'floyd-steinberg'
+    baseOptions.dither ?? DEFAULT_OPTIONS.dither ?? 'floyd-steinberg'
   );
 
   useEffect(() => {
@@ -198,10 +202,10 @@ export const ManualOptimizeModal: React.FC<Props> = ({
     // it; otherwise fall back to the live OptionsForm value. -O level
     // and dither are NOT preset-driven (no semantic gain in flipping
     // them per preset) — they always follow baseOptions on open.
-    setLossyCeiling(String(p.lossyCeiling ?? baseOptions.lossyCeiling ?? GIF_LOSSY_MAX));
-    setColorsFloor(String(p.colorsFloor ?? baseOptions.colorsFloor ?? GIF_COLORS_MIN));
-    setOptimizeLevel(baseOptions.optimizeLevel ?? 3);
-    setDither(baseOptions.dither ?? 'floyd-steinberg');
+    setLossyCeiling(String(p.lossyCeiling ?? baseOptions.lossyCeiling ?? DEFAULT_OPTIONS.lossyCeiling ?? GIF_LOSSY_MAX));
+    setColorsFloor(String(p.colorsFloor ?? baseOptions.colorsFloor ?? DEFAULT_OPTIONS.colorsFloor ?? GIF_COLORS_MIN));
+    setOptimizeLevel(baseOptions.optimizeLevel ?? DEFAULT_OPTIONS.optimizeLevel ?? 3);
+    setDither(baseOptions.dither ?? DEFAULT_OPTIONS.dither ?? 'floyd-steinberg');
   }, [open, baseOptions, currentSizeMB]);
 
   useEffect(() => {

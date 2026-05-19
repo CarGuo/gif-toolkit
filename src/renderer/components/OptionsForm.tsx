@@ -6,6 +6,7 @@ import {
   GIF_LOSSY_MAX,
   GIF_COLORS_MIN,
   GIF_COLORS_MAX,
+  DEFAULT_OPTIONS,
   type GifOptimizeLevel,
   type GifDither,
 } from '../../shared/types/process';
@@ -18,18 +19,26 @@ interface Props {
 interface NumFieldProps {
   label: string;
   unit?: string;
-  value: number;
+  value: number | undefined;
+  defaultValue?: number;
   min: number;
   max?: number;
   step?: number;
   onCommit: (n: number) => void;
 }
 
-const NumField: React.FC<NumFieldProps> = ({ label, unit, value, min, max, step, onCommit }) => {
-  const [text, setText] = useState<string>(String(value));
+const NumField: React.FC<NumFieldProps> = ({ label, unit, value, defaultValue, min, max, step, onCommit }) => {
+  // R-82: NumField MUST never display `min` as the apparent value just
+  // because `value` is undefined — that misled users into thinking
+  // lossyCeiling/colorsFloor defaulted to 2 when the real default is
+  // 200/2. Always coerce undefined/NaN through `defaultValue ?? min`.
+  const resolved = typeof value === 'number' && Number.isFinite(value)
+    ? value
+    : (typeof defaultValue === 'number' ? defaultValue : min);
+  const [text, setText] = useState<string>(String(resolved));
   useEffect(() => {
-    setText(String(value));
-  }, [value]);
+    setText(String(resolved));
+  }, [resolved]);
   return (
     <label>
       {label}{unit ? ` (${unit})` : ''}
@@ -43,7 +52,7 @@ const NumField: React.FC<NumFieldProps> = ({ label, unit, value, min, max, step,
         onBlur={() => {
           const n = Number(text);
           if (!Number.isFinite(n)) {
-            setText(String(value));
+            setText(String(resolved));
             return;
           }
           let v = n;
@@ -151,10 +160,11 @@ export const OptionsForm: React.FC<Props> = ({ value, onChange }) => {
           这 4 个值会作为 ceiling/floor/lock 喂进 compressLoop 的 adaptive 搜索 */}
       <details className="advanced-gif">
         <summary>高级 GIF 优化</summary>
-        <div className="options" style={{ marginTop: 8 }}>
+        <div className="options advanced-gif-grid">
           <NumField
             label="lossy 上限"
-            value={value.lossyCeiling ?? GIF_LOSSY_MAX}
+            value={value.lossyCeiling}
+            defaultValue={DEFAULT_OPTIONS.lossyCeiling ?? GIF_LOSSY_MAX}
             min={0}
             max={GIF_LOSSY_MAX}
             step={5}
@@ -162,7 +172,8 @@ export const OptionsForm: React.FC<Props> = ({ value, onChange }) => {
           />
           <NumField
             label="colors 下限"
-            value={value.colorsFloor ?? GIF_COLORS_MIN}
+            value={value.colorsFloor}
+            defaultValue={DEFAULT_OPTIONS.colorsFloor ?? GIF_COLORS_MIN}
             min={GIF_COLORS_MIN}
             max={GIF_COLORS_MAX}
             step={2}
@@ -171,7 +182,7 @@ export const OptionsForm: React.FC<Props> = ({ value, onChange }) => {
           <label>
             -O 级别
             <select
-              value={String(value.optimizeLevel ?? 3)}
+              value={String(value.optimizeLevel ?? DEFAULT_OPTIONS.optimizeLevel ?? 3)}
               onChange={(e) => {
                 const lvl = Number(e.target.value) as GifOptimizeLevel;
                 if ((GIF_OPTIMIZE_LEVELS as readonly number[]).includes(lvl)) set('optimizeLevel', lvl);
@@ -185,7 +196,7 @@ export const OptionsForm: React.FC<Props> = ({ value, onChange }) => {
           <label>
             dither
             <select
-              value={value.dither ?? 'floyd-steinberg'}
+              value={value.dither ?? DEFAULT_OPTIONS.dither ?? 'floyd-steinberg'}
               onChange={(e) => {
                 const d = e.target.value as GifDither;
                 if ((GIF_DITHER_MODES as readonly string[]).includes(d)) set('dither', d);

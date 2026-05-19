@@ -1,8 +1,7 @@
 # AGENTS.md — Gif Toolkit Agent Harness
 
-> 这是给**任何在本仓库写代码的 Agent / 协作者**的"操作手册"。  
-> 它不是 README(README 给最终用户看,告诉你这个 App 是干嘛的)。  
-> 这一份是**让你不要把现有约束改坏、不要重复造已经踩过的坑**。
+> 这是给**任何在本仓库写代码的 Agent / 协作者**的"操作手册"。
+> 它不是 README(README 给最终用户看);**这一份是让你不要把现有约束改坏、不要重复造已经踩过的坑**。
 >
 > 灵感与方法论:["Harness Engineering" 知乎专题 / Mitchell Hashimoto 《Engineer the Harness》(2026.02) / OpenAI 《Harness engineering》(2026.02) / LangChain 《The Anatomy of an Agent Harness》(2026.03)](https://zhuanlan.zhihu.com/p/2014799697290753718)。
 > 核心原则:**每发现一个错误,就把"它不再犯"的工程方案沉淀进 Harness**。
@@ -13,38 +12,43 @@
 
 输入文章 URL → 嗅探页面里的 video / gif → 选择 → 预览/裁剪/调速度 → 批量转 GIF → **双层目标自适应压缩(best 2MB / fallback 4MB)** → 落到本地子目录。
 
-**这是一个 Electron 桌面 App,主进程负责所有 I/O 和重活,渲染端只渲染 UI。** 任何要"在浏览器侧调 ffmpeg"的提议都要拒绝。
+**Electron 桌面 App,主进程负责所有 I/O 和重活,渲染端只渲染 UI。** 任何"在浏览器侧调 ffmpeg"的提议都要拒绝。
 
 ---
 
-## 1. Agent 必须遵守的项目级硬规则(Project Rules)
+## 1. Project Rules 索引(强制硬规则,违反即 PR block)
 
-| # | 规则 | 触发场景 | 沉淀来源 |
-|---|---|---|---|
-| **R-01** | **任何"嗅探"入口都必须走主进程**,绝不许 renderer 直接 fetch 跨域资源 | renderer CORS / cookie 政策不一样,远端站会偶发拒绝 | [src/main/index.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/index.ts) `ipcMain.handle('sniff:url')` |
-| **R-02** | **不要为某个 host 加白名单**;所有规则要结构化,适用于任意网页 | 第 14/15 轮用户反馈"我要的是通用实现,不是针对某个 url 进行特定化处理" | [sniffer.ts dedupKey](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/sniffer.ts) |
-| **R-03** | **maxSide 同时作用于宽和高,取最长边**;不能只调宽 | 第 17 轮 "应该是宽和高都需要满足最大那个设置" | [shortSideAfterCap](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor.ts#L77-L81) |
-| **R-04** | **压缩管线必须四阶段**:Phase A resize-first → Phase B adaptive lossy 二分 → Phase C 几何缩边(longSideFloor 守护) → Phase D 兜底 | 第 16 轮 "为什么压缩那么慢?ezgif 实现很快" | [compressLoop](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor.ts) |
-| **R-05** | **双层目标**:`softMaxBytes`(默认 2MB,best)+ `maxBytes`(默认 4MB,fallback);UI 上 soft ≤ hard 互相 clamp | 第 17 轮 "最佳目标 2M 以内,降级目标 4M" | [DEFAULT_OPTIONS](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types.ts) / [OptionsForm.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/OptionsForm.tsx) |
-| **R-06** | **缩边时必须保短边 ≥ minSide**;若做不到,**抛 [AspectRatioConstraintError](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor.ts#L46-L70) 早 fail**,而不是压扁出垃圾文件 | 第 18 轮 "改高让宽超过最小就要直接提示问题" | longSideFloor 推导 |
-| **R-07** | **批处理走 PQueue**,concurrency 默认 3、可配置 1..8;不要硬编码 1 也不要无限并发 | 第 16 轮 "能并行执行吗" | [ProcessOptions.concurrency](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types.ts) |
-| **R-08** | **进度必须有 substep / detail / elapsedMs / stepIndex**,不能只有一个 percent | 第 16 轮 "进度信息太少,看起来卡住" | [TaskProgress](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types.ts) |
-| **R-09** | **iframe 第三方播放器(Vimeo / YouTube / Bilibili 等)只识别不下载**;在 SniffedMedia 上设 `requiresExternalDownload: true`,渲染端禁用"处理"按钮 | 用户最新一轮反馈 "OpenAI mhtml 里其实是有视频的,为什么会嗅探不出来" + 拍板"不集成 yt-dlp" | [matchEmbedProvider](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/sniffer.ts#L51-L78) |
-| **R-10** | **renderer 永远不许直接读本地路径或运行 child_process**;contextIsolation 永远 ON,nodeIntegration 永远 OFF | Electron 安全基线 | [BrowserWindow webPreferences](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/index.ts) |
-| **R-11** | **preload 暴露的 API 必须白名单**;新增方法须同步更新 [src/preload/index.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/preload/index.ts) 和 [src/renderer/global.d.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/global.d.ts) | 否则 `window.giftk.foo` 在生产构建里就是 undefined | — |
-| **R-12** | **不要为了让一个测试通过就改测试,要改的是代码** | 全局 SOP | — |
-| **R-13** | **SPA / anti-bot 页面必须走「静态正则 → headless → CF challenge 报警」三级 fallback**:1) 规则 8 用宽松正则在 `<script>` JSON payload 里抽 player URL;2) `noMedia ‖ looksTooShort ‖ looksLikeCsr` 任一即触发 [headlessFetch](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/headlessFetch.ts);3) 命中 Turnstile / Just-a-moment 时显式 warning。同时 main 入口必须 `app.commandLine.appendSwitch('disable-quic')`,否则部分网络上 Chromium 会 ERR_CONNECTION_RESET。**任何 sniffer 改动都必须先用真实 OpenAI URL 跑通 e2e 才能交付** | 第 23 轮 "OpenAI 还是测试不出来,你不应该测试下这个嗅探成功了才交付吗?" | [extractFromHtml](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/sniffer.ts) 规则 8 + [headlessFetch.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/headlessFetch.ts) + [SC-07](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-07-spa-hydrated-iframe-fallback.md) |
-| **R-14** | **embed resolver 随包分发 + 自动解析(开箱即用)**:1) `electron-builder.asarUnpack` 必须包含 `node_modules/ytdlp-nodejs/bin/**`,yt-dlp 二进制随 dmg/installer 分发,**不允许**在 `build.files` 排除该路径;2) 嗅探完成后 `App.tsx useEffect([result])` 自动批量调起 `resolveEmbed`,**不得**有任何 `confirm()` 弹窗 / `installYtdlp` IPC / `ytdlp-chip` 状态徽章;3) resolver 内部 4 级 fallback 找 binary(packaged → dev node_modules → helpers.BIN_DIR → userData/bin → helpers.downloadYtDlp 兜底);4) resolver 失败 / 上游拒绝时 embed 卡片必须保留 + 显示 `↻ 重试解析` 小按钮 + `resolveErrorMap` 守卫(永不卡死、永不循环);5) resolver target 必须是 `media.url`(iframe `src`),不是 `media.pageUrl`(文章页);6) header 沿用必须经白名单(User-Agent/Referer/Origin/Accept-*/Range/X-CSRF-Token/X-Requested-With),禁止 Authorization/Cookie/Set-Cookie/Host 沿用;7) log buffer 写入前必须 `redactUrls()` 脱敏。**改 resolver 必须先验证 YouTube + Bilibili must-pass 才能交付** | 第 29 轮 "没必要,我们要提供的是开箱即用的功能,都打包进去,没必要做这种未装的情况" | [resolver/ytdlp.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/resolver/ytdlp.ts) + [resolver/index.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/resolver/index.ts) + [SC-13](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-13-resolver-opt-in.md) / [SC-14](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-14-resolver-bilibili.md) / [SC-15](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-15-resolver-failure-fallback.md) |
-| **R-15** | **npm 供应链卫生**(五道闸门,缺一不可):1) `.npmrc` 设 `min-release-age=7`(npm 单位是*天*,不要混淆 pnpm 的*分钟*单位写成 10080)— 新版本必须满 7 天才进 lockfile;2) `ignore-scripts=true` 全局禁止子依赖 lifecycle hook,native rebuild 通过根 `package.json` 的 `scripts.postinstall` 显式 allowlist(`sharp` / `ffmpeg-static` / `ffprobe-static` / `gifsicle` / `ytdlp-nodejs` 五个);3) `save-exact=true` + `save-prefix=` — 新增依赖固定到精确版本而非 caret 范围;4) CI / 部署必须用 `npm ci`,禁止 `npm install`(后者会默默改 lockfile);5) `npm run lockfile:lint` 校验 `package-lock.json` 所有 resolved 都指向官方 npm + integrity 是 sha512(挡 lockfile injection)。辅助:`engine-strict=true` + `audit-signatures=true` + `engines.node>=20 / npm>=11.10`。紧急 CVE 通道允许 `--min-release-age=0`,但 PR 必须前缀 `[security]` 并附 CVE 编号 | 第 31 轮 "现在有什么避免 npm 投毒或供应链安全的规则,找一些落实到项目里" | [.npmrc](file:///Users/guoshuyu/workspace/gif-toolkit/.npmrc) + [package.json](file:///Users/guoshuyu/workspace/gif-toolkit/package.json) `scripts.postinstall` / `scripts.lockfile:lint` / `engines` + [R-15](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-15-npm-supply-chain-hygiene.md) |
-| **R-16** | **新功能必须随测试**:1) 新增的纯函数 / 组件 / IPC handler 必须配套 `tests/**/*.test.{ts,tsx}` 断言其行为契约(包括边界与失败路径);2) 修 bug 时必须先写一个会因该 bug 而失败的回归测试再修代码;3) `npm test` 必须 0 失败,不允许 `*.skip` 兜底;4) `npm test` 是 SOP 第 4 步的硬关卡(typecheck → lint → **test** → build),任何一步失败都不允许合并;5) 测试栈固定为 vitest 2.1.8 + happy-dom + @testing-library/react,Electron API 用 `vi.mock('electron', …)` 隔离;6) 强 I/O 模块(sniffer/headlessFetch/downloader/resolver)豁免单测,由 [harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios) 兜底,但其内部可纯化的子函数应当抽出再测 | 第 39 轮 "给所有功能增加测试用例，这样有利于回归测试功能的正常，后续新加的每个功能也都要需要这个规则" | [vitest.config.ts](file:///Users/guoshuyu/workspace/gif-toolkit/vitest.config.ts) + [tests/](file:///Users/guoshuyu/workspace/gif-toolkit/tests) + [R-16](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-16-tests-required.md) |
-| **R-22** | **长视频默认只跑第 1 段**:1) `ProcessOptions.maxSegmentSec` 默认 20(原 15);2) 新增 `selectedSegments?: number[]` 字段贯通 IPC,`undefined` = 全跑(向后兼容),`[0]` = 仅第 1 段,`[0,2]` = 跨段子集;3) renderer 在 `onStart`/`onProcessOne` 对 `kind==='video' && durationSec > maxSegmentSec` 的 task 自动注入 `selectedSegments=[0]`(用户已显式设 startSec/endSec/selectedSegments 时跳过)且必须给日志提示;4) processor.ts 必须走纯函数 [enumerateSegments](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor-utils.ts) + [filterSelectedSegments](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor-utils.ts),不允许内联;5) PreviewPanel 必须显示 chip 列表 + 全选/仅第1段按钮;6) main 层 `sanitizeOptions` 必须 dedup + 整数过滤 + 排序 + 越界 drop | 第 39 轮 "视频默认只支持 20s 最长，可配置，如果超过提示用户选择时段……一次处理一堆片段太夸张" | [R-22](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-22-clip-segment-cap.md) + [SC-19](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-19-clip-segment-cap.md) + [src/main/processor-utils.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor-utils.ts) |
-| **R-23** | **批处理前必须弹「分段选择」对话框**:1) [App.tsx onStart](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/App.tsx) 在派发任务前必须 `filter(t => t.media.kind==='video' && durationSec > maxSegmentSec)`,只要有 ≥1 个长视频且用户没显式全选,**必须**打开 [BatchSegmentModal](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/BatchSegmentModal.tsx),完全不打 IPC;2) modal 取消 / 点 backdrop = 不派发,modal 确认 = 注入 perId selectedSegments;3) 默认每个长视频只勾 `[0]`(等价 R-22 自动截断),用户取消等价默认行为 — 不会出错;4) [SegmentPicker](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/SegmentPicker.tsx) 必须抽成纯组件,PreviewPanel + BatchSegmentModal 共享;5) `dispatchBatch` 注入选项优先级:modal 选项 > task 已存在的 selectedSegments > R-22 fallback `[0]`;6) BatchSegmentModal 内 `setOne` 空数组归一为 `[0]`,确保至少 1 段 | 第 41 轮 "我点击批处理之后,没有让我选择片段的流程啊?你把流程坐在那里?" | [R-23](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-23-batch-confirm-modal.md) + [src/renderer/components/SegmentPicker.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/SegmentPicker.tsx) + [src/renderer/components/BatchSegmentModal.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/BatchSegmentModal.tsx) |
-| **R-24** | **ffmpeg single-pass + palettegen 抽帧 + yt-dlp section 下载**:1) **O6** [videoToGifPalette](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/ffmpeg.ts) 必须用一次 ffmpeg + `-filter_complex '[0:v]base,split[full][low];[low]fps=pf,palettegen[pal];[full][pal]paletteuse'`,不允许中间 palette.png + 二次 spawn;2) **O7** `paletteFps = Math.max(2, Math.round(p.fps/2))`,palettegen 抽帧采样,质量肉眼无感而解码量减半;3) **O8** SEG_CONCURRENCY 必须 = `Math.max(2, Math.min(4, Math.ceil(os.cpus().length/2)))`,不允许硬编码 2(8 核机器浪费 50%+ CPU);4) **net** yt-dlp 当 `resolved.source==='ytdlp'` && `selectedSegments` 是严格子集时必须直接 spawn binary `--download-sections "*s-e"` 多段(不走 ytdlp-nodejs 包装层),只下选中部分;5) partial-fetch 成功后 [processOneTask](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor.ts) 必须重置 `options.selectedSegments/startSec/endSec=undefined`(本地文件已是拼接结果),为此 `options` 必须是 `let` 而非 destructured const;6) section 下载失败必须静默 fallback 到全量 [downloadToFile](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor.ts),不抛错给用户 | 第 41 轮 "我总觉得现在的压缩速度还是有点慢" + "我们只需要下载需要处理的片段就好了吧" | [R-24](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-24-ffmpeg-single-pass-and-section-fetch.md) + [src/main/ffmpeg.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/ffmpeg.ts) + [src/main/resolver/ytdlp.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/resolver/ytdlp.ts) |
-| **R-25** | **UX 信号 + 默认收紧**(四件):1) **#1 加载 overlay** [PreviewModal.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/PreviewModal.tsx) 在 `naturalSize.w===0 && !mediaError` 期间必须渲染 `role="status"` `aria-label="media-loading"` 覆盖层(spinner + "正在加载视频元数据 / 首帧…"),metadata 到达或 onError 触发立即消失,不允许只是黑屏让用户猜;2) **#2 片段缩略图** [useSegmentThumbnails](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/useSegmentThumbnails.ts) 用单个共享 hidden video + canvas seek 串行抽帧,SegmentPicker `videoUrl` prop 启用,BatchSegmentModal 默认传 `media.url`,CORS taint 静默 null fallback;3) **#3 重复嗅探 confirm** [App.tsx onSniff](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/App.tsx) 当 `result?.pageUrl===trimmed && (items.length>0 ‖ warnings.length>0)` 必须 `window.confirm("已嗅探过该 URL,是否再次嗅探? … 确认会清空当前结果重新拉取")`,取消 = 不发请求;4) **#4 默认值** [DEFAULT_OPTIONS](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types.ts) `minSize=450`(原 240)+ `concurrency=3` 显式锁定。**反向**:不允许 overlay 用 setTimeout 延迟,不允许并发 seek 同一 video,不允许把 HARD_MIN_SIZE 联动改成 450 | 第 42 轮 "选择带有视频的片段后会消失一段时间" + "片段有办法显示缩略图吗" + "已经嗅探过的页面再点要弹框确认" + "默认最小尺寸 450,并发 3" | [R-25](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-25-ux-signals-and-defaults.md) + [src/shared/types.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types.ts) + [src/renderer/components/useSegmentThumbnails.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/useSegmentThumbnails.ts) |
-| **R-26** | **规格失败 vs 运行失败 二分 + 解析进度黄色阶段化**(五件):1) **#1 amber 表意** [styles.css](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/styles.css) `.thumb-error` / `.thumb-error-center` 必须用 `var(--warn)` / amber `rgba(240,198,116,*)`,不允许红色;2) **#2 阶段化 chip** [MediaGrid.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/MediaGrid.tsx) 必须用 `ResolvingChip` + `useResolveStageLabel`,4 个 stage label 1500ms 推进,**封顶不回退**,`role="status"` aria-live="polite";不允许循环 stage,不允许保留旧的静态 `⏳ 解析中…` 文案;3) **#3 errorCode 类型化** [shared/types.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types.ts) `TaskProgress.errorCode` 必须是 closed string-literal union(当前仅 `'ASPECT_RATIO_OUT_OF_RANGE'`),`errorMeta` 携带 origW/origH/minSide/maxSide/shortSideAtMax;[processor.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor.ts) batch 顶级 catch 必须 `instanceof AspectRatioConstraintError` 派发,不允许 IPC 边界丢类型;4) **#4 forceAllowSmallSide 私有/单次** `ProcessOptions.forceAllowSmallSide?: boolean` 仅生效一次,[App.tsx onProcessOne](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/App.tsx) 第二参 `override` 注入到本次 `optBase`,**不允许**写入组件级 options 或 DEFAULT_OPTIONS;[main/index.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/index.ts) sanitizeOptions 必须 `=== true` 严格 boolean 校验(拒绝 `'true'`/1/`{}`);[processor.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor.ts) 两处 throw 前判 flag,豁免时 `recordPhaseFailure('aspect-ratio-bypass', ...)` / `log(...)` 留诊断;5) **#5 「强制允许」vs「重试」互斥** [TaskTable.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/TaskTable.tsx) `errorCode === 'ASPECT_RATIO_OUT_OF_RANGE'` 时只渲染「强制允许」,其他失败只渲染「重试」,**永不同时显示**;spec 失败缺 `onForceAllow` 时渲染**空**,不允许 fallback 到「重试」 | 第 43 轮 "视频解析中的时候你应该给一个解析进度在 ui 上,放一个红色感叹号太敏感了" + "如图这种失败不应该是重试,重试是转换失败/运行失败/网络失败,这种失败属于是规格的,按键应该是强制允许" | [R-26](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-26-spec-vs-runtime-failure-and-resolve-progress.md) + [src/renderer/components/MediaGrid.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/MediaGrid.tsx) + [src/renderer/components/TaskTable.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/TaskTable.tsx) |
-| **R-27** | **持久化历史 + 二次处理 + 打开历史目录**(五件):1) **#1 localStorage 版本化** [useHistory.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/useHistory.ts) 必须用 `giftk.history.v1` 键,30 条 FIFO 上限,`writeAll` 必须 try/catch 静默吞 quota 异常,`readAll` 必须按 id/pageUrl/items 字段过滤防御性丢弃损坏条目;**不允许**存任何二进制(只存 url/元数据);2) **#2 mergeProgressIntoRecord 单调性** terminal status (`done`/`failed`/`cancelled`/`skipped`) **不许被晚到的非 terminal emit 倒退**;outputs 必须 `Array.from(new Set([...prev, ...next]))` 去重;3) **#3 registerOutputDir 永不 throw** [src/main/index.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/index.ts) `ipcMain.handle('app:registerOutputDir')` 必须双校验(`statSync isDirectory()` + `underDefault \|\| underAllowed`),失败一律返 `{ok:false}`;renderer mount 时遍历 history hydrate 调用,**单条失败不许影响其它**;4) **#4 HistoryPanel 纯展示** [HistoryPanel.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/HistoryPanel.tsx) **禁止** import `useHistory` / 直接读 `localStorage` / 直接调 `window.giftk`;只接 5 个 callback props (`history` + `onOpenOutputDir` + `onReprocessOne` + `onRemove` + `onClear`);5) **#5 重跑禁用条件 + 用 record.options** image 必 disabled(`image 不支持处理`);未解析的 embed 必 disabled(`该 embed 当时未解析直链,无法直接重跑`);视频/gif 启用时 [App.tsx onReprocessFromHistory](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/App.tsx) 必须用 `rec.options`(快照),**不许**读当前表单 options;`activeHistoryIdRef` 必须是 `useRef` 不是 `useState`(避免每个 progress 事件都触发整树 re-render) | 第 44 轮 "增加历史任务管理页面,每次解析有历史记录,可以再二次处理,每个历史页面还可以打开自己的结果目录" + AskUserQuestion 二次处理形态=逐条重跑/历史保留=最近 30 条 | [R-27](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-27-history-panel.md) + [src/renderer/components/useHistory.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/useHistory.ts) + [src/renderer/components/HistoryPanel.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/HistoryPanel.tsx) |
-| **R-80** | **本地历史迁移到 better-sqlite3 + native module ABI 自愈 + 启动期不丢数据**(八件,含 hardening A~F + post-mortem):1) **#1 主进程仓** [src/main/db/index.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/db/index.ts) 必须用 `better-sqlite3` + WAL + `PRAGMA foreign_keys=ON`;`upload_history` 必须父子两表 + FK CASCADE,`history` 用 hot 列(id/pageUrl/createdAt/updatedAt)+ JSON 列(items/options/uploadsByOutputPath)混合,sniff/toolbox 扁平化;2) **#2 17 个 `db:*` IPC** [src/main/db/dbIpc.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/db/dbIpc.ts) 全部经 `safeHandle<TArgs,TResult>(channel, fn)` 包裹:try/catch + `console.error` + **重抛**保留 renderer reject 契约,**不允许**裸 `ipcMain.handle`;3) **#3 hook 同步 API + 异步初始化** 4 个 hook(useHistory/useUploadHistory/useSniffHistory/useToolbox)必须保留旧公共 API,初始 `readAll` 异步且暴露 `isLoading`,mutation 走乐观更新 + fire-and-forget IPC,高频写**必须** 250ms 尾随合并,App 必须暴露 `flushPending()` 返回 `Promise.all(...)`;4) **#4 一次性 bootstrap import** [bootstrapImport.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/db/bootstrapImport.ts) 必须**每个 family 独立 try + 独立 transaction**,坏 family 不阻断其它三个;成功后删除 4 个 legacy localStorage key 并写 `giftk.db.bootstrap.v1=1`,失败保留 legacy 等下次重试;失败必须经 [storageSchema.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/storageSchema.ts) → `reportDbError('bootstrap','import',err)` 报到 dbErrorBus;5) **#5 `before-quit` 两阶段 flush** [src/main/index.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/index.ts) `before-quit` 必须 `event.preventDefault()` → `wc.send('db:flushBeforeQuit', requestId)` → 等 `db:flushBeforeQuit:ack` 或 1s 超时 → `setImmediate(() => app.quit())`;preload 必须暴露 `onFlushBeforeQuit(cb)`;App.tsx useEffect 必须 `Promise.allSettled([...flushPending])` 后 `acked()`;**不允许**裸退出导致 250ms 队列里的 upsert 丢失;6) **#6 dbErrorBus 单 toast** [dbErrorBus.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/dbErrorBus.ts) 必须模块级单 listener + per-session `firedOnce`,4 个 hook + storageSchema 的所有 `.catch` **禁止**继续 `console.error` 静默吞,统一走 `reportDbError(family, op, err)`;App.tsx 必须用稳定 id 把首条失败转**单条** warn toast,**不许**重复弹;7) **#7 native module ABI 验证 + 自愈**(post-mortem):a) `package.json` `predev` / `prestart` 必须挂 `node scripts/ensure-sqlite-abi.mjs`,启动前先 dlopen 探活,失败自动 `electron-rebuild -f -w better-sqlite3` 重建;b) `npm run test:db` 必须用 [scripts/test-db.mjs](file:///Users/guoshuyu/workspace/gif-toolkit/scripts/test-db.mjs) wrapper(`to-node` → `run` → **finally** `to-electron`),**禁止**直接教用户跑 `test:db:to-node` + `test:db:run` 两步(会留下 ABI 错配的坏环境);c) `release.yml` 打包前必须 verify ABI 匹配,失败 fail fast;**反向**:不允许直接 `ipcMain.handle('db:*')` 不包 safeHandle;不允许 hook 用 `try { … } catch {}` 静默 db 错误;不允许在 commit 中只跑 typecheck/lint/test 就交付 — **改 native module / db / preload 必须额外 `npm run dev` 起一次** 看主进程日志没有 `compiled against a different Node.js version` / `UnhandledPromiseRejection`,再交付 | 第 52~62 轮 R-79b 信封 → R-80 commit A(SQLite 主仓)→ R-80 commit B(renderer 切 IPC)→ R-80 hardening(A~F 5 项)→ post-mortem dev ABI 错配 | [src/main/db/](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/db) + [src/renderer/components/dbErrorBus.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/dbErrorBus.ts) + [scripts/ensure-sqlite-abi.mjs](file:///Users/guoshuyu/workspace/gif-toolkit/scripts/ensure-sqlite-abi.mjs) + [scripts/test-db.mjs](file:///Users/guoshuyu/workspace/gif-toolkit/scripts/test-db.mjs) + [docs/R-80-SQLITE-NOTES.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/R-80-SQLITE-NOTES.md) |
-| **R-81** | **gifsicle 4 旋钮全链路暴露(lossy ceiling / colors floor / -O lock / dither lock)**(八件):1) **#1 类型源** [src/shared/types/process.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types/process.ts) 必须沉淀 `GifOptimizeLevel = 1\|2\|3` / `GifDither = 'none'\|'floyd-steinberg'\|'ordered'` 字面量 + `GIF_OPTIMIZE_LEVELS` / `GIF_DITHER_MODES` / `GIF_LOSSY_MAX=200` / `GIF_COLORS_MIN=2` / `GIF_COLORS_MAX=256` 常量;`ProcessOptions` 加 `lossyCeiling? / colorsFloor? / optimizeLevel? / dither?` 4 个可选字段;`DEFAULT_OPTIONS = { 200, 2, 3, 'floyd-steinberg' }` 与 R-81 之前的 legacy 行为等价(**不允许**把默认值改"更狠"以代替 preset);[src/shared/types/toolbox.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types/toolbox.ts) `ToolboxParams` 必须镜像同 4 字段;2) **#2 ceiling vs lock 语义** `lossyCeiling` 是 [compressLoop](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor.ts) Phase B `--lossy=N` 二分搜索的**上界**;`colorsFloor` 是 Phase C `--colors=N` 几何缩边的**下界**;`optimizeLevel` / `dither` 是**锁**(每次 gifsicle 调用都用这个固定值);**不允许**把 `lossyCeiling` 当固定 `--lossy=ceiling` 直接传——那会绕过 adaptive 搜索;3) **#3 gifsicleOptimize 签名** [gifsicleOptimize](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/ffmpeg.ts#L495-L552) 必须接受 `opts?: { optimizeLevel?, dither? }`,emit `-O${level}`(默认 3),`colors<256` 时按 dither emit `--dither=floyd-steinberg` / `--dither=ordered` / `--no-dither`(`colors===256` 不 emit dither flag);**不允许**硬编码 `-O3`;**不允许**跳过 `colors<256` 守卫;4) **#4 compressLoop clamp** 必须在顶部从 options 读出 4 字段 + 声明 `clampLossy(n)` / `clampColors(n)` 闭包,每个 `tryOptimize(lossy, colors)` 调用必须**先 clamp 再生成 dedup hash key**(否则两个 clamp 后等价的用户值会浪费一次 gifsicle invocation);每次 tryOptimize 必须把 `{ optimizeLevel, dither }` 透传给 gifsicleOptimize;detail 日志必须写 `lossy=N colors=N -O${level} dither=${d}`;`hasExplicit` 快路径必须走相同传播链;5) **#5 IPC sanitize 末班防线** [main/index.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/index.ts) `sanitizeOptions` + `sanitizeToolboxParams` 必须 clamp:`lossyCeiling∈[0..200]` / `colorsFloor∈[2..256]` / `optimizeLevel∈GIF_OPTIMIZE_LEVELS`(闭枚举,未知 fall back 3) / `dither∈GIF_DITHER_MODES`(闭枚举,未知 fall back `'floyd-steinberg'`);**不允许**信任 renderer 值——畸形 payload 会让 gifsicle 因非数字 flag 崩溃;6) **#6 三处 UI 必须对齐** [OptionsForm.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/OptionsForm.tsx) 末尾必须有可折叠 `<details className="advanced-gif">` 抽屉,4 控件按 lossy 上限 → colors 下限 → -O 级别 → dither 顺序;[ManualOptimizeModal.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/ManualOptimizeModal.tsx) 必须有同 4 控件 + 4 PRESET 真去动 lossy/colors(`harder`→`lossyCeiling:160, colorsFloor:64`;`fidelity`→`lossyCeiling:20, colorsFloor:256`;`size` / `fps` 不锁,让 adaptive 自由);[App.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/App.tsx) `onProcessOne` override + `onManualOptimizeConfirm` 必须 `typeof` + clamp 透传 4 字段到 IPC;**不允许**只在一处加而其他两处不加(回归 R-81 之前的半成品状态);7) **#7 PRESET lock 约定** preset override 用 `lossyCeiling` / `colorsFloor` 塑造 adaptive 搜索子空间(**不**用直接 lock 值);想"几乎禁用 lossy"时用 `lossyCeiling:20`,**不**用 `lossyCeiling:0`(后者会让 gifsicle 完全跳过 `--lossy` flag,走另一条未优化的代码路径);8) **#8 测试 + smoke** clamp 闭包必须有单元测试(范围、越界 fall back、NaN/Infinity 拒绝);`gifsicleOptimize` 集成测试断言传 `{ optimizeLevel:2, dither:'ordered' }` 时 spawn 的 argv 包含 `-O2` + `--dither=ordered`;改本规则任何一条都必须走 SOP 第 5 步 R-80 smoke(`npm run dev` 验证 gifsicle 探活 + 至少一次 tryOptimize detail emit) | 第 67 轮 "这些处理的地方,为什么都没有 gif optimize,这个不是很重要的能力啊?" + 第 68 轮 AskUserQuestion 拍板"全套 4 钮" | [R-81](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-81-gif-optimize-knobs.md) + [src/shared/types/process.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types/process.ts) + [src/main/ffmpeg.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/ffmpeg.ts#L495-L552) + [src/main/processor.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor.ts) + [src/renderer/components/OptionsForm.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/OptionsForm.tsx) + [src/renderer/components/ManualOptimizeModal.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/ManualOptimizeModal.tsx) |
+> 每条规则的**详细条款 / 反向清单 / 验证步骤**全部沉淀在
+> [harness/rules/R-XX-*.md](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules)。
+> 本表只做**索引 + 一句话**。改代码前**至少**翻同 ID 的 rule 文件。
+
+| # | 一句话 | 详细 |
+|---|---|---|
+| **R-01** | 任何"嗅探"入口都必须走主进程,renderer 不许直接 fetch 跨域 | [R-01](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-01-sniff-must-go-through-main.md) |
+| **R-02** | 不要为某个 host 加白名单,所有规则要结构化适用任意网页 | [R-02](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-02-no-host-whitelist.md) |
+| **R-03** | maxSide 同时作用宽和高(取最长边),不能只调宽 | [R-03](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-03-maxside-applies-to-both-axes.md) |
+| **R-04** | 压缩管线必须四阶段:resize → adaptive lossy 二分 → 几何缩边(longSideFloor)→ 兜底 | [R-04](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-04-four-phase-compression.md) |
+| **R-05** | 双层目标:`softMaxBytes` (best 2MB) + `maxBytes` (fallback 4MB),UI 互相 clamp | [R-05](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-05-soft-and-hard-target.md) |
+| **R-06** | 缩边时必须保短边 ≥ minSide,做不到就 throw `AspectRatioConstraintError` 早 fail | [R-06](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-06-shortside-floor.md) |
+| **R-07** | 批处理走 PQueue,concurrency 默认 3 / 可配 1..8;不许硬编 1 不许无限并发 | [R-07](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-07-pqueue-concurrency.md) |
+| **R-08** | 进度必须有 substep / detail / elapsedMs / stepIndex,不能只有一个 percent | [R-08](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-08-progress-richness.md) |
+| **R-09** | iframe 第三方播放器(Vimeo / YouTube / Bilibili 等)只识别不下载,渲染端禁用按钮 | [R-09](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-09-iframe-embed-detect-only.md) |
+| **R-10** | renderer 永远不许直接读本地路径或 child_process;contextIsolation ON,nodeIntegration OFF | [R-10](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-10-electron-isolation.md) |
+| **R-11** | preload 暴露的 API 必须白名单,新增方法须同步 [global.d.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/global.d.ts) | [R-11](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-11-preload-whitelist.md) |
+| **R-12** | 不要为了让一个测试通过就改测试,要改的是代码 | [R-12](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-12-do-not-evade-tests.md) |
+| **R-13** | SPA / anti-bot 页面必须三级 fallback:静态正则 → headless → CF challenge 报警 | [R-13](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-13-spa-must-have-fallback.md) |
+| **R-14** | embed resolver 必须随包分发 + 自动解析(开箱即用,无 confirm 弹窗) | [R-14](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-14-resolver-bundled.md) |
+| **R-15** | npm 供应链卫生:`min-release-age=7d` + `ignore-scripts` allowlist + `save-exact` + `npm ci` + lockfile lint | [R-15](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-15-npm-supply-chain-hygiene.md) |
+| **R-16** | 新功能必须随测试,修 bug 先写会失败的回归测试,`npm test` 0 失败硬关卡 | [R-16](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-16-tests-required.md) |
+| **R-22** | 长视频默认只跑第 1 段(`maxSegmentSec=20`),`selectedSegments` 贯通 IPC | [R-22](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-22-clip-segment-cap.md) |
+| **R-23** | 批处理前必须弹「分段选择」对话框,modal 取消 = 不派发 | [R-23](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-23-batch-confirm-modal.md) |
+| **R-24** | ffmpeg single-pass + palettegen 抽帧 + yt-dlp `--download-sections` 多段下载 | [R-24](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-24-ffmpeg-single-pass-and-section-fetch.md) |
+| **R-25** | UX 信号 + 默认收紧:加载 overlay / 缩略图 / 重复嗅探 confirm / `minSize=450` `concurrency=3` | [R-25](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-25-ux-signals-and-defaults.md) |
+| **R-26** | 规格失败 vs 运行失败 二分;解析进度 amber 阶段化 chip;「强制允许」vs「重试」互斥 | [R-26](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-26-spec-vs-runtime-failure-and-resolve-progress.md) |
+| **R-27** | 持久化历史 + 二次处理 + 打开历史目录;HistoryPanel 纯展示组件 | [R-27](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-27-history-panel.md) |
+| **R-80** | 本地历史迁 better-sqlite3 + WAL + 外键;native ABI 自愈 + `before-quit` 两阶段 flush + dbErrorBus 单 toast | [R-80](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-80-sqlite-and-native-abi.md) |
+| **R-81** | gifsicle 4 旋钮全链路:`lossyCeiling` / `colorsFloor` / `optimizeLevel` / `dither` ceiling vs lock 语义 | [R-81](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-81-gif-optimize-knobs.md) |
+| **R-82** | 双保险 import 绕过 barrel + build 前清 dist + sanitize 抽纯模块单测 + NumField defaultValue 防御 | [R-82](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-82-stale-dist-shadow.md) |
 
 ---
 
@@ -62,7 +66,7 @@
 不变量:
 
 - **renderer 永远不直接调 ffmpeg / 文件系统**;有需要就在 [preload](file:///Users/guoshuyu/workspace/gif-toolkit/src/preload/index.ts) 加白名单 IPC。
-- **共享类型只放 [src/shared/types.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types.ts)**;主/渲两边都从这里 import,杜绝结构漂移。
+- **共享类型只放 [src/shared/types/](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types)**,主/渲两边都从这里 import。新加常量遵 R-82 双保险:**直接 import 源文件**而非 barrel。
 - **二进制路径只通过 [src/main/binaries.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/binaries.ts)** 解析(asar.unpacked 修正在这里)。
 
 ---
@@ -71,17 +75,17 @@
 
 每一次 Agent 改代码,必须按这个顺序走:
 
-1. **Read 触发场景** → 翻 [harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios) 看是否有同类问题已有沉淀。如果有,直接复用规则,**不再二次发明**。
-2. **Plan** → 用 TodoWrite 列出步骤;影响 R-01..R-16 / R-22..R-27 / R-80 / R-81 中任何一条要在计划里点名。
+1. **Read 触发场景** → 翻 [harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios) 看是否有同类问题已沉淀。如有,直接复用规则,**不再二次发明**。
+2. **Plan** → 用 TodoWrite 列步骤;影响第 1 节任何 R-* 要在计划里点名。
 3. **Execute** → 改代码。
 4. **Verify** → **四步顺序执行,全部通过才算完成**:
    - `npm run typecheck`
    - `npm run lint`
-   - `npm test`(默认 vitest 套件)+ 改了 [src/main/db/](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/db) 时**必须**额外跑 `npm run test:db`(R-80 hardening:wrapper 自动 to-node → run → to-electron 闭环)
+   - `npm test` + 改了 [src/main/db/](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/db) **必须** `npm run test:db`(R-80 wrapper)
    - `npm run build`
-5. **Smoke** — **改了 native module(better-sqlite3 / sharp / ffmpeg-static / ffprobe-static / gifsicle / ytdlp-nodejs)、db schema/IPC、preload bridge、`before-quit` 这一类的代码,必须额外跑一次 `npm run dev`**,看主进程日志没有 `compiled against a different Node.js version` / `UnhandledPromiseRejection` / `db init failed` 后才能交付。**这是 R-80 post-mortem 的硬规则:测试通过 ≠ 功能可用,只有起一次 dev 才能验证 ABI / dlopen / IPC contract 链路通**。
-6. **Regress** → 跑 [harness/run-harness.md](file:///Users/guoshuyu/workspace/gif-toolkit/harness/run-harness.md) 中和你改动相关的场景集。
-7. **Capture** → 如果你这次修了一个新发现的 bug,**必须在 [harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios) 中新增一个 SC-XX**,把现象 / 根因 / 期望行为 / 验证步骤都写下来。这是"不再犯"的唯一保证。
+5. **Smoke (R-80 #8 / R-82 铁规则)** — 改了 native module / db schema / IPC / preload bridge / `before-quit` / 共享 enum 常量,**必须**额外跑一次 `npm run dev` 实派发一次任务,主进程日志无 `compiled against a different Node.js version` / `UnhandledPromiseRejection` / `'includes' is undefined` / `db init failed` 才能交付。**测试通过 ≠ 功能可用**。
+6. **Regress** → 跑 [harness/run-harness.md](file:///Users/guoshuyu/workspace/gif-toolkit/harness/run-harness.md) 中相关场景集。
+7. **Capture** — 修了新发现的 bug,**必须在 [harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios) 新增 SC-XX**;新规则**必须**在 [harness/rules/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules) 新增 R-XX。这是"不再犯"的唯一保证。
 
 ---
 
@@ -91,68 +95,68 @@
 |---|---|
 | 类型检查(主+渲) | `npm run typecheck` |
 | Lint | `npm run lint` |
-| 全量构建 | `npm run build` |
-| 开发热更 | `npm run dev` |
+| 全量构建 | `npm run build`(自动 `clean`,R-82) |
+| 开发热更 | `npm run dev`(自动 `predev:main` 清 dist,R-82) |
 | 跑生产构建 | `npm start` |
 | Mac 打 dmg | `npm run package:mac` |
 | Win 打 nsis | `npm run package:win` |
-| 探一下嗅探规则的命中(grep) | `grep -nE "video-tag\|source-tag\|iframe-embed" src/main/sniffer.ts` |
-| 看主进程二进制路径 | `node -e "require('./dist/main/binaries.js').printPaths?.()"` |
-| 真实 e2e(yt-dlp resolver) | 直接在 main 进程层用 `new YtDlp({ binaryPath: ensureYtdlp() }).getInfoAsync(url)` 探测 YouTube + Bilibili must-pass case |
-| **db 测试套件**(R-80) | `npm run test:db` —— wrapper 会按顺序跑 `to-node → run → finally to-electron`,跑完天然可以 `npm run dev`,**禁止**手动两步走 |
-| **better-sqlite3 ABI 自检** | `node scripts/ensure-sqlite-abi.mjs` —— 已在 `predev` / `prestart` 自动挂上,但你想手动确认时可以直接调 |
-| **macOS dev dock tooltip 修复**(R-80) | `node scripts/patch-electron-plist.mjs` —— 已在 `postinstall` / `predev` / `prestart` 自动挂上;改 [node_modules/electron/dist/Electron.app/Contents/Info.plist](file:///Users/guoshuyu/workspace/gif-toolkit/node_modules/electron/dist/Electron.app/Contents/Info.plist) 的 `CFBundleName` / `CFBundleDisplayName` 为 `Gif Toolkit (dev)`,幂等 |
+| 嗅探规则命中 | `grep -nE "video-tag\|source-tag\|iframe-embed" src/main/sniffer.ts` |
+| 主进程二进制路径 | `node -e "require('./dist/main/binaries.js').printPaths?.()"` |
+| **db 测试套件**(R-80) | `npm run test:db` —— wrapper:`to-node → run → finally to-electron`,**禁止**手动两步走 |
+| **better-sqlite3 ABI 自检** | `node scripts/ensure-sqlite-abi.mjs` —— 已挂 `predev` / `prestart`,可手动调 |
+| **macOS dock tooltip 修复** | `node scripts/patch-electron-plist.mjs` —— 已挂 `postinstall` / `predev` / `prestart`,幂等 |
+| **R-82 dist barrel 自检** | `node -e "console.log(Object.keys(require('./dist/shared/types')))"` —— 必须包含全部 `GIF_*` 常量 |
 
 ---
 
 ## 5. 常见陷阱清单(Foot-guns)
 
-> 每一条都是"踩过的坑",触发时直接对照修。
+> 每条都是踩过的坑,触发时直接对照修。
 
-1. **改了 [src/shared/types.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types.ts) 但忘了 [src/preload/index.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/preload/index.ts) 同步**:`window.giftk.xxx` 是 undefined。
-2. **新加 IPC handler 在主进程,但 [src/renderer/global.d.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/global.d.ts) 没补类型**:typecheck 红。
-3. **直接修改 `compressLoop` 的某一个 Phase 而绕过 longSideFloor 守护**:长条图被压扁、内存炸。
-4. **新加嗅探规则用裸字符串 `if (host === 'vimeo.com')`**:违反 R-02,扩展性归零。`matchEmbedProvider` 已经把"白名单"做成结构化规则,**继续往那张表里填**。
-5. **看到任务"卡住"就以为死锁**:大概率是 [TaskProgress](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types.ts) 没带 substep。**先去补 substep,再考虑代码层**。
-6. **打包后 ffmpeg 找不到**:看 [package.json `asarUnpack`](file:///Users/guoshuyu/workspace/gif-toolkit/package.json#L61-L68) 是否覆盖了你新引入的二进制依赖。
+1. **改了 [src/shared/types/](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types) 但忘了 [src/preload/index.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/preload/index.ts) 同步** → `window.giftk.xxx` 是 undefined。
+2. **新加 IPC handler 在主进程,但 [global.d.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/global.d.ts) 没补类型** → typecheck 红。
+3. **直接修改 `compressLoop` 的某 Phase 而绕过 longSideFloor 守护** → 长条图被压扁、内存炸(违反 R-04 / R-06)。
+4. **嗅探规则用裸字符串 `if (host === 'vimeo.com')`** → 违反 R-02。`matchEmbedProvider` 已结构化,继续往那张表里填。
+5. **任务"卡住" → 大概率是 [TaskProgress](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types) 没带 substep**,先补 substep 再看代码层。
+6. **打包后 ffmpeg 找不到** → 看 [package.json `asarUnpack`](file:///Users/guoshuyu/workspace/gif-toolkit/package.json) 是否覆盖了新引入的二进制依赖。
+7. **新加 `GIF_*` / 任何 enum 常量后只走 barrel re-export** → 违反 R-82 双保险,生产可能走 stale dist;直接 `import { X } from '../shared/types/process'`。
 
 ---
 
 ## 6. 文档地图
 
-- **[README.md](file:///Users/guoshuyu/workspace/gif-toolkit/README.md)** —— 用户向,装/跑/用
-- **[AGENTS.md](file:///Users/guoshuyu/workspace/gif-toolkit/AGENTS.md)** —— 你正在看的(协作者向,改代码前必读)
-- **[docs/architecture.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/architecture.md)** —— 主/渲/preload 三段式架构详解
-- **[docs/sniffer-rules.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/sniffer-rules.md)** —— 嗅探 7 条规则 + iframe player 白名单
-- **[docs/compression-pipeline.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/compression-pipeline.md)** —— Phase A/B/C/D 压缩管线 & longSideFloor
-- **[docs/ipc-contract.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/ipc-contract.md)** —— preload 暴露的所有 IPC 方法及消息类型
-- **[docs/troubleshooting.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/troubleshooting.md)** —— 故障分类与对应规则
-- **[docs/embed-resolver.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/embed-resolver.md)** —— yt-dlp resolver 设计(随包分发 + 自动解析)、e2e 验证
-- **[harness/](file:///Users/guoshuyu/workspace/gif-toolkit/harness)** —— 工程级 harness 规则与回归场景库
-  - **[harness/run-harness.md](file:///Users/guoshuyu/workspace/gif-toolkit/harness/run-harness.md)** —— 怎么跑 harness
-  - **[harness/rules/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules)** —— R-01..R-16 + R-22..R-27 + R-80 + R-81 的细化版,每条一个文件
-  - **[harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios)** —— SC-01..SC-15 已沉淀的回归场景
-  - **[harness/checklists/pr-checklist.md](file:///Users/guoshuyu/workspace/gif-toolkit/harness/checklists/pr-checklist.md)** —— 改前自检清单
+- **[README.md](file:///Users/guoshuyu/workspace/gif-toolkit/README.md)** — 用户向,装/跑/用
+- **AGENTS.md** — 你正在看的(协作者向,改代码前必读)
+- **[docs/architecture.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/architecture.md)** — 主/渲/preload 三段式架构
+- **[docs/sniffer-rules.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/sniffer-rules.md)** — 嗅探 7 条规则 + iframe player 白名单
+- **[docs/compression-pipeline.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/compression-pipeline.md)** — Phase A/B/C/D 压缩管线
+- **[docs/ipc-contract.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/ipc-contract.md)** — preload 暴露的所有 IPC 方法
+- **[docs/troubleshooting.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/troubleshooting.md)** — 故障分类与对应规则
+- **[docs/embed-resolver.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/embed-resolver.md)** — yt-dlp resolver 设计
+- **[harness/](file:///Users/guoshuyu/workspace/gif-toolkit/harness)** — 工程级 harness
+  - **[harness/run-harness.md](file:///Users/guoshuyu/workspace/gif-toolkit/harness/run-harness.md)** — 怎么跑 harness
+  - **[harness/rules/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules)** — R-01..R-16 + R-22..R-27 + R-80..R-82 细化版,每条一个文件
+  - **[harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios)** — SC-01..SC-XX 已沉淀的回归场景
+  - **[harness/checklists/pr-checklist.md](file:///Users/guoshuyu/workspace/gif-toolkit/harness/checklists/pr-checklist.md)** — 改前自检清单
 
 ---
 
-## 7. 你写完代码以后的"门禁清单"
+## 7. 写完代码后的"门禁清单"
 
-> 复制以下清单粘到你 PR / 提交说明里,逐条打勾。
+> 复制以下清单粘到 PR / 提交说明,逐条打勾。
 
-- [ ] 我读了 AGENTS.md 第 1 节(R-01..R-16 + R-22..R-27 + R-80 + R-81),没违反任何一条
-- [ ] 我读了 [harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios),确认我的改动没有让任何已有 SC 失效
-- [ ] `npm run typecheck` 通过
-- [ ] `npm run lint` 通过(0 warning)
-- [ ] `npm run build` 通过
-- [ ] 如果改了主/渲共享类型 → preload 和 global.d.ts 已同步
-- [ ] 如果修了一个新发现的 bug → 已在 [harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios) 增加 SC-XX 沉淀
-- [ ] PR 描述里写清"踩了哪条 R-* / 触发了哪个 SC-*"
+- [ ] 我读了第 1 节 R-* 索引,没违反任何一条;改动直接关联的 rule 文件已细读
+- [ ] 我读了 [harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios),没让任何已有 SC 失效
+- [ ] `npm run typecheck` / `npm run lint` / `npm test` / `npm run build` 4 步全绿
+- [ ] 改了主/渲共享类型 → preload + global.d.ts 已同步
+- [ ] 改了 native module / db / preload / before-quit / 共享常量 → `npm run dev` 已 smoke 实派发任务
+- [ ] 修了新发现的 bug → [harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios) 增了 SC-XX;新规则增了 [harness/rules/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules) R-XX
+- [ ] PR 描述写清"踩了哪条 R-* / 触发了哪个 SC-*"
 
 ---
 
-## 8. 当你拿不准时
+## 8. 拿不准时
 
-1. 先看 [harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios) — 大概率别人已经踩过类似坑。
-2. 再看 [docs/troubleshooting.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/troubleshooting.md) — 把现象分类。
-3. 还不行 — 用 AskUserQuestion 问用户,**不要自己猜**。猜一次错一次,一次错一个 SC,得不偿失。
+1. 先看 [harness/rules/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules) — 大概率别人已踩过。
+2. 再看 [harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios) — 把现象分类。
+3. 还不行 — 用 AskUserQuestion 问用户,**不要自己猜**。猜一次错一次,得不偿失。

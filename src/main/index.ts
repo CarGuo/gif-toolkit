@@ -18,12 +18,8 @@ import { registerDbIpc } from './db/dbIpc';
 import {
   DEFAULT_OPTIONS,
   TOOLBOX_INPUT_EXTENSIONS,
-  GIF_OPTIMIZE_LEVELS,
-  GIF_DITHER_MODES,
-  GIF_LOSSY_MAX,
-  GIF_COLORS_MIN,
-  GIF_COLORS_MAX,
 } from '../shared/types';
+import { sanitizeGifOptimizeKnobs } from './sanitizeOptions';
 import type {
   ProcessOptions,
   ProcessTask,
@@ -32,8 +28,6 @@ import type {
   ToolboxJob,
   ToolboxKind,
   ToolboxParams,
-  GifOptimizeLevel,
-  GifDither
 } from '../shared/types';
 import { isPrivateHost, safeName } from './helpers';
 import { applySniffFilters, type SniffFilterOptions } from './sniffFilters';
@@ -358,21 +352,13 @@ function sanitizeOptions(o: unknown): ProcessOptions {
   // out-of-range / unknown enum string falls through silently to the
   // default rather than throwing, so a renderer that never sets these
   // fields gets the historical behaviour for free.
-  if (typeof obj.lossyCeiling === 'number' && Number.isFinite(obj.lossyCeiling)) {
-    result.lossyCeiling = Math.max(0, Math.min(GIF_LOSSY_MAX, Math.round(obj.lossyCeiling)));
-  }
-  if (typeof obj.colorsFloor === 'number' && Number.isFinite(obj.colorsFloor)) {
-    result.colorsFloor = Math.max(GIF_COLORS_MIN, Math.min(GIF_COLORS_MAX, Math.round(obj.colorsFloor)));
-  }
-  if (typeof obj.optimizeLevel === 'number' && Number.isFinite(obj.optimizeLevel)) {
-    const lvl = Math.round(obj.optimizeLevel) as GifOptimizeLevel;
-    if (GIF_OPTIMIZE_LEVELS.includes(lvl)) {
-      result.optimizeLevel = lvl;
-    }
-  }
-  if (typeof obj.dither === 'string' && GIF_DITHER_MODES.includes(obj.dither as GifDither)) {
-    result.dither = obj.dither as GifDither;
-  }
+  // R-82: extracted into a pure helper in ./sanitizeOptions.ts so it can
+  // be unit-tested without dragging electron/app/path side effects in.
+  // The helper imports GIF_OPTIMIZE_LEVELS / GIF_DITHER_MODES directly
+  // from '../shared/types/process' (not the barrel) — see R-82 post-mortem
+  // for the dist/shared/types.js stale-shadow bug that broke module
+  // resolution and made these constants `undefined` at runtime.
+  Object.assign(result, sanitizeGifOptimizeKnobs(obj));
 
   if (typeof obj.outDir === 'string' && obj.outDir) {
     result.outDir = assertOutputDir(obj.outDir);
@@ -486,22 +472,8 @@ function sanitizeToolboxParams(p: unknown): ToolboxParams {
   // dither). Mirrors the same clamp logic used by sanitizeOptions for
   // ProcessOptions; closed enums for level / dither prevent IPC-tampered
   // strings from smuggling unknown gifsicle flags.
-  const lossyCeiling = num(obj.lossyCeiling);
-  if (lossyCeiling !== undefined) {
-    result.lossyCeiling = Math.max(0, Math.min(GIF_LOSSY_MAX, Math.round(lossyCeiling)));
-  }
-  const colorsFloor = num(obj.colorsFloor);
-  if (colorsFloor !== undefined) {
-    result.colorsFloor = Math.max(GIF_COLORS_MIN, Math.min(GIF_COLORS_MAX, Math.round(colorsFloor)));
-  }
-  const optLevel = obj.optimizeLevel;
-  if (typeof optLevel === 'number' && (GIF_OPTIMIZE_LEVELS as readonly number[]).includes(optLevel)) {
-    result.optimizeLevel = optLevel as GifOptimizeLevel;
-  }
-  const ditherVal = obj.dither;
-  if (typeof ditherVal === 'string' && (GIF_DITHER_MODES as readonly string[]).includes(ditherVal)) {
-    result.dither = ditherVal as GifDither;
-  }
+  // R-82 — share the pure helper so the two call sites cannot drift.
+  Object.assign(result, sanitizeGifOptimizeKnobs(obj));
 
   // R-37 — Trim / Speed / Reverse / Rotate fields. Same defensive posture:
   // every numeric is clamped to its supported range and every enum is
