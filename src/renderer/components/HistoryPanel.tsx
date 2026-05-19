@@ -30,8 +30,20 @@
  * for the rationale). HistoryPanel is purely presentational and never
  * reads localStorage itself — the dependency graph stays one-way.
  */
-import React from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import type { HistoryRecord } from './useHistory';
+import { paginateHistory } from './useUploadHistory';
+
+/** R-84 — Default page size for the snapshot history grid.
+ *
+ *  The hook caps `history` at HISTORY_MAX_ENTRIES (=30) for now, but
+ *  pagination is still useful: a 4×3 grid (12 cards) reads as a single
+ *  scannable page on a 1280-wide laptop, the user can jump back and
+ *  forth without thumb-scrolling, and if we ever lift the 30-cap the
+ *  panel won't suddenly explode. We re-use the upload-history
+ *  paginateHistory helper (already covered by tests) so the two
+ *  panels share clamp / pageCount / safePage semantics. */
+export const HISTORY_PAGE_SIZE = 12;
 
 export interface HistoryPanelProps {
   history: HistoryRecord[];
@@ -50,6 +62,9 @@ export interface HistoryPanelProps {
    *  We render a distinct empty-state copy so users don't briefly
    *  see "还没有历史记录" before their actual rows appear. */
   isLoading?: boolean;
+  /** Override the page size (defaults to {@link HISTORY_PAGE_SIZE}).
+   *  Exposed for tests so they can render with a deterministic page size. */
+  pageSize?: number;
 }
 
 function fmtTime(ts: number): string {
@@ -173,8 +188,23 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
   onOpenOutputDir,
   onRemove,
   onClear,
-  isLoading
+  isLoading,
+  pageSize = HISTORY_PAGE_SIZE
 }) => {
+  // R-84 — pagination state.
+  // Local-only (resets on remount) — when the user reopens the
+  // history tab the most-recent page (page 1) is the right default.
+  const [page, setPage] = useState(1);
+  const { rows, pageCount, safePage } = useMemo(
+    () => paginateHistory(history, page, pageSize),
+    [history, page, pageSize]
+  );
+  // Walk the page back if the current one disappeared (last record on
+  // the page deleted, or background clear shrank the list).
+  useEffect(() => {
+    if (safePage !== page) setPage(safePage);
+  }, [safePage, page]);
+
   if (history.length === 0) {
     return (
       <div className="hist-panel">
@@ -197,7 +227,10 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
   return (
     <div className="hist-panel">
       <div className="hist-toolbar">
-        <span className="hist-count">{history.length} / 30</span>
+        <span className="hist-count">
+          {history.length} / 30
+          {pageCount > 1 ? <span className="muted"> · 第 {safePage} / {pageCount} 页</span> : null}
+        </span>
         <span className="hist-tip muted">单击卡片打开详情(可调参 / 重跑)</span>
         <div className="spacer" />
         <button
@@ -214,7 +247,7 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
         </button>
       </div>
       <div className="hist-grid">
-        {history.map((rec) => (
+        {rows.map((rec) => (
           <HistoryCard
             key={rec.id}
             rec={rec}
@@ -224,6 +257,54 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
           />
         ))}
       </div>
+      {/* R-84 — pagination controls. Only rendered when more than
+          one page exists; mirrors UploadHistoryPanel's prev/next +
+          jump-to-page interaction so the two history surfaces feel
+          like one feature. */}
+      {pageCount > 1 ? (
+        <div
+          className="hist-pager"
+          role="navigation"
+          aria-label="历史记录分页"
+        >
+          <button
+            type="button"
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            disabled={safePage <= 1}
+            aria-label="上一页"
+            title="上一页"
+          >
+            ← 上一页
+          </button>
+          <span className="hist-pager-pos muted">
+            {safePage} / {pageCount}
+          </span>
+          <button
+            type="button"
+            onClick={() => setPage((p) => Math.min(pageCount, p + 1))}
+            disabled={safePage >= pageCount}
+            aria-label="下一页"
+            title="下一页"
+          >
+            下一页 →
+          </button>
+          <input
+            type="number"
+            min={1}
+            max={pageCount}
+            value={safePage}
+            onChange={(e) => {
+              const n = Number(e.target.value);
+              if (Number.isFinite(n)) {
+                setPage(Math.max(1, Math.min(pageCount, Math.round(n))));
+              }
+            }}
+            aria-label="跳转到页码"
+            title="跳转到页码"
+            className="hist-pager-jump"
+          />
+        </div>
+      ) : null}
     </div>
   );
 };

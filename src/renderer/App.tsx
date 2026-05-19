@@ -2183,7 +2183,44 @@ const App: React.FC = () => {
   return (
     <div className="app" style={{ ['--bottom-h' as string]: `${bottomH}px` } as React.CSSProperties}>
       <div className="titlebar">
-        <h1>Gif Toolkit · 网页媒体抓取 · 转换 · 上传</h1>
+        {/* R-84 — Brand cluster.
+            Inline SVG (no extra asset file → ships clean in dev and
+            in the asar bundle) styled to feel like the home-grown
+            "film-strip + GIF" mark. .brand-logo gets a subtle
+            gradient background so the 14px h1 still reads as the
+            primary affordance and the icon as a chip / badge.
+            -webkit-app-region:no-drag on the cluster lets users
+            click-to-focus the title without starting a window drag. */}
+        <div className="brand" aria-label="Gif Toolkit">
+          <span className="brand-logo" aria-hidden="true">
+            <svg viewBox="0 0 32 32" width="22" height="22" focusable="false">
+              <defs>
+                <linearGradient id="gtkBrandG" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%" stopColor="#5aa9ff" />
+                  <stop offset="100%" stopColor="#7d6bff" />
+                </linearGradient>
+              </defs>
+              <rect x="2" y="6" width="28" height="20" rx="4" fill="url(#gtkBrandG)" />
+              <rect x="4.5" y="8.5" width="3" height="3" rx="0.6" fill="rgba(255,255,255,0.85)" />
+              <rect x="4.5" y="13.5" width="3" height="3" rx="0.6" fill="rgba(255,255,255,0.85)" />
+              <rect x="4.5" y="18.5" width="3" height="3" rx="0.6" fill="rgba(255,255,255,0.85)" />
+              <rect x="24.5" y="8.5" width="3" height="3" rx="0.6" fill="rgba(255,255,255,0.85)" />
+              <rect x="24.5" y="13.5" width="3" height="3" rx="0.6" fill="rgba(255,255,255,0.85)" />
+              <rect x="24.5" y="18.5" width="3" height="3" rx="0.6" fill="rgba(255,255,255,0.85)" />
+              <text
+                x="16"
+                y="20"
+                textAnchor="middle"
+                fontFamily="-apple-system, 'Segoe UI', sans-serif"
+                fontSize="9"
+                fontWeight="700"
+                fill="#fff"
+                letterSpacing="0.5"
+              >GIF</text>
+            </svg>
+          </span>
+          <h1>Gif Toolkit · 网页媒体抓取 · 转换 · 上传</h1>
+        </div>
         <div className="tabs">
           <button
             type="button"

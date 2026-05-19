@@ -81,6 +81,28 @@ input[type="text"]:focus { border-color: var(--accent); }
   font-weight: 600;
   letter-spacing: 0.3px;
 }
+/* R-84 — Brand cluster. .brand groups the inline-SVG logo + h1
+   so they share spacing and so the SVG's gradient stays visually
+   coupled to the title. The cluster opts out of -webkit-app-region
+   drag so the user can click directly on it (e.g. to focus the
+   window) without inadvertently starting a window-drag gesture. */
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  -webkit-app-region: no-drag;
+}
+.brand-logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  background: rgba(255, 255, 255, 0.04);
+}
+.brand-logo svg { display: block; }
 .titlebar .spacer { flex: 1; }
 .titlebar .actions { -webkit-app-region: no-drag; display: flex; gap: 8px; }
 
@@ -1463,6 +1485,29 @@ details.advanced-gif > summary {
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: 14px;
   align-content: start;
+}
+/* R-84 — Pagination strip below the history grid.
+   Only rendered when pageCount > 1 (HistoryPanel handles the toggle).
+   Mirrors UploadHistoryPanel's inline-styled pager but uses CSS so the
+   theme can pick it up. */
+.hist-pager {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px 16px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+}
+.hist-pager-pos {
+  font-size: 12px;
+  min-width: 56px;
+  text-align: center;
+}
+.hist-pager-jump {
+  width: 60px;
+  padding: 2px 6px;
+  font-size: 12px;
 }
 
 .hist-card {

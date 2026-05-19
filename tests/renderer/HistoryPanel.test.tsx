@@ -231,3 +231,77 @@ describe('HistoryPanel cover (R-34, fixed)', () => {
     expect(container.querySelector('.card-thumb')).toBeNull();
   });
 });
+
+/**
+ * R-84 — Pagination.
+ *
+ * The history panel now exposes a 「← 上一页 / 第 X / Y 页 / 下一页 →」
+ * + jump-to-page input strip when the record count exceeds the page
+ * size. We pin three properties:
+ *   1. With <= pageSize records, the pager strip is NOT rendered.
+ *   2. With > pageSize records, only the first `pageSize` are visible
+ *      until the user pages forward.
+ *   3. Removing the only record on the last page auto-walks back to
+ *      the previous page (paginateHistory's safePage clamp).
+ */
+describe('HistoryPanel pagination (R-84)', () => {
+  function manyRecords(n: number): HistoryRecord[] {
+    return Array.from({ length: n }, (_, i) =>
+      fixture({ id: `rec-${i + 1}`, title: `示例文章 #${i + 1}` })
+    );
+  }
+
+  it('does not render the pager strip when records fit a single page', () => {
+    const { container } = render(
+      <HistoryPanel
+        history={manyRecords(3)}
+        pageSize={5}
+        onOpenDetail={() => undefined}
+        onOpenOutputDir={() => undefined}
+        onRemove={() => undefined}
+        onClear={() => undefined}
+      />
+    );
+    expect(container.querySelector('.hist-pager')).toBeNull();
+  });
+
+  it('paginates: only the first page is visible until ▶ is clicked', () => {
+    render(
+      <HistoryPanel
+        history={manyRecords(7)}
+        pageSize={3}
+        onOpenDetail={() => undefined}
+        onOpenOutputDir={() => undefined}
+        onRemove={() => undefined}
+        onClear={() => undefined}
+      />
+    );
+    // page 1 of 3 (ceil(7/3) = 3)
+    expect(screen.getByText('示例文章 #1')).toBeInTheDocument();
+    expect(screen.getByText('示例文章 #3')).toBeInTheDocument();
+    expect(screen.queryByText('示例文章 #4')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText('下一页'));
+    expect(screen.getByText('示例文章 #4')).toBeInTheDocument();
+    expect(screen.getByText('示例文章 #6')).toBeInTheDocument();
+    expect(screen.queryByText('示例文章 #1')).not.toBeInTheDocument();
+  });
+
+  it('jump-to-page input clamps and navigates', () => {
+    render(
+      <HistoryPanel
+        history={manyRecords(10)}
+        pageSize={3}
+        onOpenDetail={() => undefined}
+        onOpenOutputDir={() => undefined}
+        onRemove={() => undefined}
+        onClear={() => undefined}
+      />
+    );
+    const jump = screen.getByLabelText('跳转到页码') as HTMLInputElement;
+    // 10 / 3 = 4 pages. Asking for 99 must clamp to 4.
+    fireEvent.change(jump, { target: { value: '99' } });
+    expect(screen.getByText('示例文章 #10')).toBeInTheDocument();
+    expect(screen.queryByText('示例文章 #1')).not.toBeInTheDocument();
+  });
+});
