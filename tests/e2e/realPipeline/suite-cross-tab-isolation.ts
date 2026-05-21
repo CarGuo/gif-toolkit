@@ -122,12 +122,45 @@ test('SUITE D — workspace cross-tab task isolation', async () => {
     );
     expect(sawProgress).toBeTruthy();
 
-    // (4) 切回 tab A 验证 task 行 = 0（隔离 oracle）
+    // (4) 切回 tab A 验证 task 行 = 0（任务隔离 oracle）
+    //   AND tab A 的 sniff result 仍然在屏（R-WS-89 oracle —
+    //   用户原话："嗅探出 A workspace，然后工作中又嗅探出 B workspace，
+    //   切换 tab 后 A workspace 里的内容就看不到了"）。
+    //   修前：tab A 切回后是空白（B 的 sniff 在 active 漂移期间用
+    //         active-shim setResult 把 A 的 result 顶掉了）。
+    //   修后：tab A 的 result 应仍然存在 — 由 useSniffSession 的
+    //         per-ws patchById(wsId, ...) 保证。
     await tabs.nth(0).click();
     await expect(tabs.nth(0)).toHaveAttribute('aria-selected', 'true');
 
     const tabATaskRowCount = await page.locator('.tasks .task').count();
     expect(tabATaskRowCount).toBe(0);
+
+    // R-WS-89 result-survival oracle: tab A's sniff result panel must
+    // still be on screen. We assert via tab label (set from the sniff
+    // result's title/url, not "新工作区") and at least one media card
+    // / sniff-warning on the page.
+    const tabALabel = await tabs.nth(0).locator('.ws-tab-label').textContent();
+    expect((tabALabel ?? '').trim()).not.toBe('');
+    expect((tabALabel ?? '').trim()).not.toBe('新工作区');
+    // The sniff result region renders `.grid-pane` (the media grid
+    // shell) once a sniff has populated `result`. Pre-sniff state has
+    // no `.grid-pane` at all. We further allow `.media-grid:not(.empty)`
+    // OR `.grid-empty` to be present — either proves a `result` object
+    // exists on the workspace.
+    const tabASniffArea = await page.evaluate(() => {
+      const root = document.querySelector('.app');
+      if (!root) return { hasGridPane: false, raw: '' };
+      const hasGridPane = root.querySelector('.grid-pane') !== null;
+      return {
+        hasGridPane,
+        raw: (root.textContent ?? '').slice(0, 200)
+      };
+    });
+    expect(
+      tabASniffArea.hasGridPane,
+      `tab A's sniff result must survive cross-tab sniff B (R-WS-89 oracle). Got: ${tabASniffArea.raw}`
+    ).toBe(true);
 
     // (5) 切回 tab B 等任务收敛
     await tabs.nth(tabBIndex).click();
