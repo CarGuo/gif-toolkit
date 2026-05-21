@@ -185,6 +185,66 @@ input[type="text"]:focus { border-color: var(--accent); }
   letter-spacing: 0.6px;
   color: var(--muted);
 }
+
+/* R-WS-90 P5b — 「全局 vs 工作区」视觉分组。
+   spec-r90 §2.1 规定:SniffPanel(输入 URL + 嗅探入口)是 *全局*
+   单例,与 active workspace 解耦;OptionsSection(处理参数)则
+   per-workspace。两者原本同用 `.section.fixed`,中间只隔一根
+   `border-bottom`,看起来像同一个 connected block,语义混淆。
+   这里加两条规则用「底色 + 顶/左 accent 边」表达差异,但都基于
+   现有 --accent / --bg-2 / --border token,避免突兀。 */
+
+/* 全局区(SniffPanel):略微提亮底色 + 顶部一根 2px accent 横条
+   作为「应用级控制条」标识。下方仍保留 1px border-bottom 让它
+   与 OptionsSection 之间有清晰的分隔线。 */
+.section-sniff-panel {
+  position: relative;
+  background:
+    linear-gradient(180deg, rgba(91, 141, 239, 0.06) 0%, transparent 60%),
+    var(--bg-2);
+}
+.section-sniff-panel::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  opacity: 0.8;
+  pointer-events: none;
+}
+
+/* 工作区区(OptionsSection):左侧 3px accent 竖条提示「跟随当前
+   工作区」,h2 旁挂一个 muted 小 chip 显式说明 scope。背景保持
+   --bg-2 不变,避免与 SniffPanel 的轻微提亮形成强对比。 */
+.section-workspace-options {
+  position: relative;
+  padding-left: 19px; /* 16 默认 + 3 让出竖条空间,视觉对齐不漂移 */
+}
+.section-workspace-options::before {
+  content: '';
+  position: absolute;
+  inset: 8px auto 8px 0;
+  width: 3px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--accent), var(--accent-2));
+  opacity: 0.85;
+  pointer-events: none;
+}
+.section-scope-chip {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.3px;
+  text-transform: none;
+  color: var(--muted);
+  background: rgba(91, 141, 239, 0.1);
+  border: 1px solid rgba(91, 141, 239, 0.25);
+  border-radius: 999px;
+  vertical-align: middle;
+}
+
 /* R-47/R-48 — URL row. Input must stay the dominant element; on narrow
    layouts the row wraps so the URL field gets a full row to itself
    instead of being squeezed to a few characters. */

@@ -81,7 +81,7 @@ export function SniffSection(props: SniffSectionProps): JSX.Element {
   const onWebviewMenuItemKeyDown = webviewMenu.onItemKeyDown;
 
   return (
-    <div className="section fixed">
+    <div className="section fixed section-sniff-panel" data-scope="global">
       <h2>输入文章 URL</h2>
       <div className="url-bar">
         <input

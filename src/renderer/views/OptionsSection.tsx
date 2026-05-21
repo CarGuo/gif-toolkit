@@ -35,8 +35,11 @@ export const OptionsSection: React.FC<OptionsSectionProps> = ({
   onFinalizeSystemChromeSniff
 }) => {
   return (
-    <div className="section fixed left-bottom">
-      <h2>处理参数</h2>
+    <div className="section fixed left-bottom section-workspace-options" data-scope="workspace">
+      <h2>
+        处理参数
+        <span className="section-scope-chip" aria-label="此区域跟随当前工作区">当前工作区</span>
+      </h2>
       <OptionsForm value={options} onChange={setOptions} />
       {/* R-50 — 旧的内嵌「▶ 开始批处理 / ▶ 追加排队」按钮已迁移到
           位于视口右下角的悬浮 FAB(见下方 .fab-start-batch)。FAB
