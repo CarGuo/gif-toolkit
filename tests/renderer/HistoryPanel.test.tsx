@@ -198,6 +198,115 @@ describe('HistoryPanel (R-28)', () => {
   });
 });
 
+describe('HistoryPanel stage stepper (R-WS-90 P5g)', () => {
+  /**
+   * R-WS-90 P5g — three-stage status stepper on each card:
+   *   ✦ 嗅探 → ⚙ 处理 → ☁ 上传
+   * The stepper reads three independent signals already present on
+   * the HistoryRecord (no extra IPC):
+   *   - sniff   : items.length > 0
+   *   - process : any taskStatus value === 'done' || 'failed'
+   *   - upload  : any uploadsByOutputPath entry with
+   *               status === 'done' && url非空
+   * The user signed off "只嗅探 / 有处理过 / 有上传 要能一眼看出来",
+   * so we pin three orthogonal scenarios + the data-reached-stage
+   * marker that the CSS keys off for ambient tinting.
+   */
+  it('shows only the sniff stage as active when no batch has run', () => {
+    const { container } = render(
+      <HistoryPanel
+        history={[fixture()]}
+        onOpenDetail={() => undefined}
+        onOpenOutputDir={() => undefined}
+        onRemove={() => undefined}
+        onClear={() => undefined}
+      />
+    );
+    const card = container.querySelector('.hist-card') as HTMLElement;
+    expect(card.getAttribute('data-reached-stage')).toBe('sniff');
+    expect(card.querySelector('.hist-stage-sniff')?.classList.contains('is-active')).toBe(true);
+    expect(card.querySelector('.hist-stage-process')?.classList.contains('is-active')).toBe(false);
+    expect(card.querySelector('.hist-stage-upload')?.classList.contains('is-active')).toBe(false);
+  });
+
+  it('lights up the process stage when at least one task reached a terminal status', () => {
+    const rec = fixture({
+      taskStatus: { 'v-1': 'done', 'i-1': 'failed' }
+    });
+    const { container } = render(
+      <HistoryPanel
+        history={[rec]}
+        onOpenDetail={() => undefined}
+        onOpenOutputDir={() => undefined}
+        onRemove={() => undefined}
+        onClear={() => undefined}
+      />
+    );
+    const card = container.querySelector('.hist-card') as HTMLElement;
+    expect(card.getAttribute('data-reached-stage')).toBe('process');
+    expect(card.querySelector('.hist-stage-process')?.classList.contains('is-active')).toBe(true);
+    expect(card.querySelector('.hist-stage-upload')?.classList.contains('is-active')).toBe(false);
+  });
+
+  it('lights up the upload stage and ribbons the card once any output is uploaded', () => {
+    const rec = fixture({
+      taskStatus: { 'v-1': 'done' },
+      outputsByTaskId: { 'v-1': ['/Users/me/out/clip.gif'] },
+      uploadsByOutputPath: {
+        '/Users/me/out/clip.gif': {
+          url: 'https://cdn.example.com/clip.gif',
+          status: 'done',
+          uploadedAt: 1700000001000,
+          backend: 'github'
+        }
+      }
+    });
+    const { container } = render(
+      <HistoryPanel
+        history={[rec]}
+        onOpenDetail={() => undefined}
+        onOpenOutputDir={() => undefined}
+        onRemove={() => undefined}
+        onClear={() => undefined}
+      />
+    );
+    const card = container.querySelector('.hist-card') as HTMLElement;
+    expect(card.getAttribute('data-reached-stage')).toBe('upload');
+    expect(card.querySelector('.hist-stage-upload')?.classList.contains('is-active')).toBe(true);
+    expect(card.querySelector('.hist-stage-process')?.classList.contains('is-active')).toBe(true);
+    expect(card.querySelector('.hist-stage-sniff')?.classList.contains('is-active')).toBe(true);
+  });
+
+  it('treats a failed/cancelled upload as NOT reaching the upload stage', () => {
+    // 关键边界:upload status 必须是 'done' 且 url 非空才算"已上传",
+    // 'failed' / 'cancelled' 仅计入失败计数,不点亮第三段。
+    const rec = fixture({
+      taskStatus: { 'v-1': 'done' },
+      outputsByTaskId: { 'v-1': ['/Users/me/out/clip.gif'] },
+      uploadsByOutputPath: {
+        '/Users/me/out/clip.gif': {
+          url: '',
+          status: 'failed',
+          uploadedAt: 1700000001000,
+          backend: 'github'
+        }
+      }
+    });
+    const { container } = render(
+      <HistoryPanel
+        history={[rec]}
+        onOpenDetail={() => undefined}
+        onOpenOutputDir={() => undefined}
+        onRemove={() => undefined}
+        onClear={() => undefined}
+      />
+    );
+    const card = container.querySelector('.hist-card') as HTMLElement;
+    expect(card.getAttribute('data-reached-stage')).toBe('process');
+    expect(card.querySelector('.hist-stage-upload')?.classList.contains('is-active')).toBe(false);
+  });
+});
+
 /**
  * R-34 — fixed cover policy.
  *

@@ -1679,6 +1679,7 @@ details.advanced-gif > summary {
 }
 
 .hist-card {
+  position: relative; /* anchor for P5g ::after ribbon */
   display: flex;
   flex-direction: column;
   background: var(--panel);
@@ -1782,6 +1783,102 @@ details.advanced-gif > summary {
 .hist-card-stats .hist-done { color: var(--good); }
 .hist-card-stats .hist-failed { color: var(--bad); }
 .hist-card-stats .muted { color: var(--muted); }
+
+/* R-WS-90 P5g — 3-stage stepper on each history card.
+   设计原则:
+   - 复用 P5b 既有 token (--accent / --accent-2 / --border / --muted),
+     不引入新色。
+   - 三段胶囊 + 两段连接线;active = accent 描边 + 微填充,
+     inactive = border 描边 + 透明底。
+   - 整张 .hist-card 还会按 data-reached-stage 属性给出极淡的
+     "进展氛围" — sniff = 中性, process = 蓝调, upload = 蓝紫
+     调。强度极小(rgba alpha ≤ 0.06),保证不抢标题信息。 */
+.hist-card-stages {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px 4px;
+  flex-wrap: nowrap;
+  /* The detail spans (e.g. "12", "✓3 ✗1") use tabular-nums so
+     glyph drift between cards stays minimal when scanning. */
+  font-variant-numeric: tabular-nums;
+}
+.hist-stage {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  background: transparent;
+  white-space: nowrap;
+  transition: color 0.15s ease, border-color 0.15s ease, background-color 0.15s ease;
+}
+.hist-stage .hist-stage-icon { font-size: 10.5px; opacity: 0.85; }
+.hist-stage .hist-stage-label { font-weight: 500; }
+.hist-stage .hist-stage-detail { font-size: 10.5px; opacity: 0.85; }
+.hist-stage.is-active {
+  color: var(--text);
+  border-color: rgba(91, 141, 239, 0.55); /* --accent @55% */
+  background: rgba(91, 141, 239, 0.10);
+}
+.hist-stage.is-active .hist-stage-icon { opacity: 1; }
+.hist-stage.is-active .hist-stage-detail { color: var(--text); opacity: 0.95; }
+.hist-stage.is-inactive {
+  /* Slightly stronger contrast than transparent so the user
+     can still read "—" in dark mode. */
+  background: rgba(255, 255, 255, 0.02);
+}
+/* upload-stage 用 accent-2(蓝紫)做轻微差异化,与"最后一段是
+   云端"的隐喻吻合。process-stage 维持 accent 蓝。 */
+.hist-stage-upload.is-active {
+  border-color: rgba(124, 91, 239, 0.55); /* --accent-2 @55% */
+  background: rgba(124, 91, 239, 0.10);
+}
+.hist-stage-connector {
+  flex: 0 0 14px;
+  height: 1px;
+  background: var(--border);
+  align-self: center;
+  transition: background-color 0.15s ease;
+}
+.hist-stage-connector.is-active {
+  background: linear-gradient(90deg, rgba(91, 141, 239, 0.6), rgba(124, 91, 239, 0.6));
+  height: 2px;
+  border-radius: 1px;
+}
+
+/* Whole-card "ambient" tint by reached stage. Very subtle —
+   we only want it to assist scanning, not to color-code
+   information that's already in the chips. */
+.hist-card[data-reached-stage='process'] {
+  background:
+    linear-gradient(180deg, rgba(91, 141, 239, 0.03) 0%, transparent 60%),
+    var(--bg);
+}
+.hist-card[data-reached-stage='upload'] {
+  background:
+    linear-gradient(180deg, rgba(124, 91, 239, 0.05) 0%, transparent 60%),
+    var(--bg);
+}
+.hist-card[data-reached-stage='upload']::after {
+  /* Tiny corner ribbon for the most-progressed cards so they pop
+     in a dense grid. Pure decoration; the chips remain the
+     authoritative source of truth. */
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 6px;
+  height: 28px;
+  border-top-right-radius: inherit;
+  background: linear-gradient(180deg, var(--accent), var(--accent-2));
+  opacity: 0.85;
+  pointer-events: none;
+}
 
 .hist-card-actions {
   display: flex;

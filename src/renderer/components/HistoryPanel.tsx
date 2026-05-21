@@ -113,9 +113,96 @@ function HistoryCard(props: {
     if (s === 'done') totalDone++;
     else if (s === 'failed') totalFailed++;
   }
+  // R-WS-90 P5g — Three-stage status stepper.
+  // 用户反馈"历史那里需要优化下,只嗅探 / 有处理过 / 有上传,
+  // 要能一眼看出来"。我们直接从 record 自带数据出发计算 3 阶段
+  // 状态(无任何额外 IPC),让卡片底部的三段胶囊 ✦ 嗅探 → ⚙️ 处理
+  //  → ☁️ 上传 颜色化:active 段(已完成且至少有 1 项)用 accent
+  // 系填色,inactive 段是中性 muted。这样:
+  //   - 只嗅探未处理   → 仅第 1 段亮
+  //   - 处理中/已处理  → 1+2 段亮
+  //   - 已上传过      → 1+2+3 段亮
+  // 三段配上各自的成功/失败计数,用户扫一眼就知道当前记录走到了
+  // 哪一步,而不必点开详情。
+  const sniffCount = rec.items.length;
+  // 处理段:taskStatus 是权威 — done/failed 任一即代表"处理过"。
+  // 注意 done==0 但 failed>0 也是"处理过(失败了)"。
+  const processedDone = totalDone;
+  const processedFailed = totalFailed;
+  const processed = processedDone + processedFailed;
+  // 上传段:uploadsByOutputPath 是 R-54 起的字段,key 是磁盘路径,
+  // value.status 反映该输出文件最近一次上传的终态('done' / 'failed'
+  // / 'cancelled')。"成功上传" = status === 'done' && url 非空;
+  // "上传失败" = 'failed' / 'cancelled'。
+  let uploadedDone = 0;
+  let uploadedFailed = 0;
+  if (rec.uploadsByOutputPath) {
+    for (const u of Object.values(rec.uploadsByOutputPath)) {
+      if (!u || typeof u !== 'object') continue;
+      if (u.status === 'done' && typeof u.url === 'string' && u.url.length > 0) {
+        uploadedDone++;
+      } else if (u.status === 'failed' || u.status === 'cancelled') {
+        uploadedFailed++;
+      }
+    }
+  }
+  const stages: Array<{
+    key: 'sniff' | 'process' | 'upload';
+    label: string;
+    icon: string;
+    active: boolean;
+    detail: string;
+    title: string;
+  }> = [
+    {
+      key: 'sniff',
+      label: '嗅探',
+      icon: '✦',
+      active: sniffCount > 0,
+      detail: `${sniffCount}`,
+      title: `已嗅探 ${sniffCount} 项媒体`
+    },
+    {
+      key: 'process',
+      label: '处理',
+      icon: '⚙',
+      active: processed > 0,
+      detail:
+        processedDone > 0 || processedFailed > 0
+          ? `${processedDone}${processedFailed > 0 ? `/${processedFailed}✗` : ''}`
+          : '—',
+      title:
+        processed === 0
+          ? '未处理'
+          : `已处理 ${processedDone} 项${processedFailed > 0 ? `,失败 ${processedFailed} 项` : ''}`
+    },
+    {
+      key: 'upload',
+      label: '上传',
+      icon: '☁',
+      active: uploadedDone > 0,
+      detail:
+        uploadedDone > 0 || uploadedFailed > 0
+          ? `${uploadedDone}${uploadedFailed > 0 ? `/${uploadedFailed}✗` : ''}`
+          : '—',
+      title:
+        uploadedDone === 0 && uploadedFailed === 0
+          ? '未上传'
+          : `已上传 ${uploadedDone} 项${uploadedFailed > 0 ? `,失败 ${uploadedFailed} 项` : ''}`
+    }
+  ];
+  // 把整体阶段也挂到 card 上,这样 CSS 可以根据"最远到达的阶段"
+  // 给整张卡微微上色(uploaded > processed > sniffed),进一步加
+  // 强一眼可读性。
+  const reachedStage: 'sniff' | 'process' | 'upload' = uploadedDone > 0
+    ? 'upload'
+    : processed > 0
+      ? 'process'
+      : 'sniff';
   return (
     <div
       className="hist-card"
+      data-reached-stage={reachedStage}
       role="button"
       tabIndex={0}
       onClick={() => onOpenDetail(rec)}
@@ -147,6 +234,28 @@ function HistoryCard(props: {
             {totalFailed > 0 ? <span className="hist-failed">✗ {totalFailed}</span> : null}
             {totalDone === 0 && totalFailed === 0 ? <span className="muted">未处理</span> : null}
           </span>
+        </div>
+        {/* R-WS-90 P5g — 3-stage stepper. 用户一眼可读最远阶段。 */}
+        <div className="hist-card-stages" role="group" aria-label="处理阶段">
+          {stages.map((s, i) => (
+            <React.Fragment key={s.key}>
+              <span
+                className={`hist-stage hist-stage-${s.key} ${s.active ? 'is-active' : 'is-inactive'}`}
+                title={s.title}
+                aria-label={s.title}
+              >
+                <span className="hist-stage-icon" aria-hidden="true">{s.icon}</span>
+                <span className="hist-stage-label">{s.label}</span>
+                <span className="hist-stage-detail">{s.detail}</span>
+              </span>
+              {i < stages.length - 1 ? (
+                <span
+                  className={`hist-stage-connector ${stages[i + 1].active ? 'is-active' : 'is-inactive'}`}
+                  aria-hidden="true"
+                />
+              ) : null}
+            </React.Fragment>
+          ))}
         </div>
       </div>
       <div className="hist-card-actions" onClick={(e) => e.stopPropagation()}>
