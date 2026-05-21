@@ -214,6 +214,19 @@ function makeDeps(opts: {
 }
 
 describe('useSniffSession', () => {
+  // Helper: find a patchById call that matches both the wsId and a
+  // predicate over its patch payload. Returns undefined if none.
+  const findPatch = (
+    mock: ReturnType<typeof vi.fn>,
+    wsId: string,
+    pred: (patch: Record<string, unknown>) => boolean
+  ): Record<string, unknown> | undefined => {
+    const c = mock.mock.calls.find(
+      ([id, patch]) => id === wsId && patch && typeof patch === 'object' && pred(patch as Record<string, unknown>)
+    );
+    return c ? (c[1] as Record<string, unknown>) : undefined;
+  };
+
   it('runEmbed happy path: calls giftk.sniff, creates HistoryRecord, drains flags', async () => {
     const r = makeResult('https://host.test/page', [makeMedia('a'), makeMedia('b')]);
     const handles = makeDeps({ sniffImpl: async () => r });
@@ -223,15 +236,32 @@ describe('useSniffSession', () => {
       await result.current.runEmbed();
     });
 
-    expect(handles.giftk.sniff).toHaveBeenCalledWith('https://host.test/page');
-    // Lifecycle flags
-    expect(handles.setSniffing).toHaveBeenCalledWith(true);
+    expect(handles.giftk.sniff).toHaveBeenCalledTimes(1);
+    const sniffCall = handles.giftk.sniff.mock.calls[0];
+    expect(sniffCall[0]).toBe('https://host.test/page');
+    // R-WS-90 P4 — sniff IPC now carries opts.sessionId so the main
+    // process can stamp it onto SniffProgress events for routing.
+    expect(sniffCall[1]).toEqual(expect.objectContaining({
+      sessionId: expect.any(String)
+    }));
+    const mintedSessionId = (sniffCall[1] as { sessionId: string }).sessionId;
+    // R-WS-89 — lifecycle flags now go through patchById(wsId, …)
+    // instead of the active-shim setX. Verify the sniffing:true open
+    // patch and the sniffing:false drain patch both targeted ws-1.
+    // R-WS-90 P4 — the open patch must also carry sniffSessionId so
+    // close(wsId) can cancel via that token.
+    const openPatch = findPatch(handles.patchByIdMock, 'ws-1', (p) => p.sniffing === true);
+    expect(openPatch).toBeDefined();
+    expect(openPatch?.sniffSessionId).toBe(mintedSessionId);
     expect(handles.resetEmbedResolve).toHaveBeenCalled();
-    expect(handles.setResult).toHaveBeenCalledWith(r);
-    // Auto-select non-embed video/gif rows.
-    const lastSetSelected = handles.setSelected.mock.calls.at(-1)?.[0] as Set<string>;
-    expect(lastSetSelected).toBeInstanceOf(Set);
-    expect(lastSetSelected.has('a') && lastSetSelected.has('b')).toBe(true);
+    // Result patch — the success branch must patch ws-1 with the
+    // resolved SniffResult and an auto-select Set of its video/gif ids.
+    const resultPatch = findPatch(handles.patchByIdMock, 'ws-1', (p) => 'result' in p && (p.result as SniffResult)?.pageUrl === r.pageUrl);
+    expect(resultPatch).toBeDefined();
+    expect(resultPatch?.result).toEqual(r);
+    const sel = resultPatch?.selected as Set<string> | undefined;
+    expect(sel).toBeInstanceOf(Set);
+    expect(sel?.has('a') && sel?.has('b')).toBe(true);
     // History record + workspace pin.
     expect(handles.pushOrReplace).toHaveBeenCalledTimes(1);
     const rec = handles.pushOrReplace.mock.calls[0][0] as HistoryRecord;
@@ -243,8 +273,12 @@ describe('useSniffSession', () => {
       title: undefined,
       itemCount: 2
     });
-    // Finally block flips sniffing → false.
-    expect(handles.setSniffing).toHaveBeenLastCalledWith(false);
+    // Finally block flips sniffing → false (also via patchById).
+    // R-WS-90 P4 — finally also clears sniffSessionId so close(wsId)
+    // doesn't mistakenly cancel after the run ended.
+    const sniffOff = findPatch(handles.patchByIdMock, 'ws-1', (p) => p.sniffing === false);
+    expect(sniffOff).toBeDefined();
+    expect(sniffOff?.sniffSessionId).toBeNull();
   });
 
   it('runEmbed stale-guard: a second runEmbed bumps sniffReqId so the first resolve no-ops', async () => {
@@ -277,7 +311,8 @@ describe('useSniffSession', () => {
     // Now release the first call. Its `myId === 1` no longer matches
     // sniffReqId.current === 2, so EVERY post-await branch must bail
     // BEFORE re-running setResult / pushOrReplace / addSniffHistory.
-    handles.setResult.mockClear();
+    // R-WS-89 — same contract via patchByIdMock now.
+    handles.patchByIdMock.mockClear();
     handles.pushOrReplace.mockClear();
     handles.addSniffHistory.mockClear();
     await act(async () => {
@@ -285,7 +320,8 @@ describe('useSniffSession', () => {
       await firstRun;
     });
 
-    expect(handles.setResult).not.toHaveBeenCalled();
+    // The stale resolve must NOT touch any per-ws state.
+    expect(handles.patchByIdMock).not.toHaveBeenCalled();
     expect(handles.pushOrReplace).not.toHaveBeenCalled();
     expect(handles.addSniffHistory).not.toHaveBeenCalled();
   });
@@ -312,14 +348,16 @@ describe('useSniffSession', () => {
 
       // Watchdog should have:
       //  1) bumped sniffReqId.current itself (1 → 2)
-      //  2) flipped sniffing back to false
-      //  3) written the timeout warning into setResult
+      //  2) patched ws-1 with sniffing:false + a timeout warning result
+      // R-WS-89 — patchById, not setX.
       expect(result.current.sniffReqId.current).toBe(2);
-      expect(handles.setSniffing).toHaveBeenLastCalledWith(false);
-      const timeoutResult = handles.setResult.mock.calls
-        .map((c) => c[0])
-        .find((v) => v && typeof v === 'object' && 'warnings' in v && (v as SniffResult).warnings?.[0]?.includes('嗅探超时'));
-      expect(timeoutResult).toBeDefined();
+      const timeoutPatch = findPatch(handles.patchByIdMock, 'ws-1', (p) =>
+        p.sniffing === false &&
+        'result' in p &&
+        Array.isArray((p.result as SniffResult)?.warnings) &&
+        ((p.result as SniffResult).warnings?.[0] ?? '').includes('嗅探超时')
+      );
+      expect(timeoutPatch).toBeDefined();
     } finally {
       vi.useRealTimers();
     }
@@ -340,12 +378,19 @@ describe('useSniffSession', () => {
     expect(handles.giftk.sniffWithSystemChrome).toHaveBeenCalledTimes(1);
     const call = handles.giftk.sniffWithSystemChrome.mock.calls[0];
     expect(call[0]).toBe('https://host.test/page');
-    expect(call[1]).toBeUndefined();
+    // R-WS-90 P4 — opts is no longer undefined; it carries sessionId.
+    expect(call[1]).toEqual(expect.objectContaining({
+      sessionId: expect.any(String)
+    }));
     expect(call[2]).toEqual({ useRealProfile: true });
-    // Active mode flips system-chrome → null across the lifecycle.
+    // Active mode flips system-chrome → null across the lifecycle
+    // (this remains a global flag, still on the shim setter).
     expect(handles.setActiveSniffMode).toHaveBeenCalledWith('system-chrome');
     expect(handles.setActiveSniffMode).toHaveBeenLastCalledWith(null);
-    expect(handles.setResult).toHaveBeenCalledWith(r);
+    // Result patch — R-WS-89 — must land via patchById on ws-1.
+    const resultPatch = findPatch(handles.patchByIdMock, 'ws-1', (p) => 'result' in p && (p.result as SniffResult)?.pageUrl === r.pageUrl);
+    expect(resultPatch).toBeDefined();
+    expect(resultPatch?.result).toEqual(r);
   });
 
   it('runOffline picker-cancel: r === null silently bails', async () => {
@@ -356,14 +401,378 @@ describe('useSniffSession', () => {
       await result.current.runOffline();
     });
 
-    // Happy-path side-effects MUST NOT have fired.
-    expect(handles.setResult).not.toHaveBeenCalledWith(
-      expect.objectContaining({ items: expect.any(Array) })
+    // Happy-path side-effects MUST NOT have fired. The cancelled
+    // picker bails BEFORE any result patch (the only patches we
+    // expect on ws-1 are the open patch and the finally drain).
+    const happyResultPatch = findPatch(handles.patchByIdMock, 'ws-1', (p) =>
+      'result' in p && (p.result as SniffResult | null) !== null && Array.isArray((p.result as SniffResult).items) && (p.result as SniffResult).items.length > 0
     );
+    expect(happyResultPatch).toBeUndefined();
     expect(handles.pushOrReplace).not.toHaveBeenCalled();
     // But the lifecycle flags still drain in the finally block.
     await waitFor(() => {
-      expect(handles.setSniffing).toHaveBeenLastCalledWith(false);
+      const sniffOff = findPatch(handles.patchByIdMock, 'ws-1', (p) => p.sniffing === false);
+      expect(sniffOff).toBeDefined();
+      expect(handles.setActiveSniffMode).toHaveBeenLastCalledWith(null);
+    });
+  });
+
+  it('R-WS-89 cross-tab isolation: runWebview keeps writing to the wsId it claimed even after the user switches tabs mid-flight', async () => {
+    // Scenario the user reported on 2026-05-21:
+    //   1. Sniff URL_A in workspace ws-A (claimForSniff returns ws-A).
+    //   2. While that sniff is still loading, the user kicks off a
+    //      sniff for URL_B which claims a fresh ws-B AND flips active
+    //      to ws-B (claimForSniff's documented behaviour).
+    //   3. The user then switches tab back to ws-A — but ws-A still
+    //      has no result, because the resolve of sniff_A used the
+    //      active-shim setResult which wrote into ws-B (the active
+    //      tab at the moment the promise resolved), overwriting B's
+    //      half-finished state and leaving A blank.
+    //
+    // The fix: every per-workspace mutation in run* must target the
+    // wsId captured locally at claim time via ws.patchById(wsId, …),
+    // never via the active-shim setX. This test pins that contract
+    // for runWebview specifically (runEmbed/runOffline are pinned in
+    // their own happy-path cases via the same patchByIdMock checks).
+
+    let releaseA: (r: SniffResult) => void = () => undefined;
+    const slowA = new Promise<SniffResult>((res) => { releaseA = res; });
+    let releaseB: (r: SniffResult) => void = () => undefined;
+    const slowB = new Promise<SniffResult>((res) => { releaseB = res; });
+
+    const sniffWithWebview = vi.fn()
+      .mockImplementationOnce(() => slowA)
+      .mockImplementationOnce(() => slowB);
+
+    const patchByIdMock = vi.fn();
+    let activeWsId = 'ws-A';
+    const claimForSniff = vi.fn(() => {
+      // Mimic real claimForSniff: first call returns the existing
+      // blank ws (ws-A); second call opens a new ws-B AND flips
+      // active to ws-B.
+      if (claimForSniff.mock.calls.length === 1) {
+        activeWsId = 'ws-A';
+        return 'ws-A';
+      }
+      activeWsId = 'ws-B';
+      return 'ws-B';
+    });
+
+    const ws = {
+      workspaces: [] as Workspace[],
+      get activeWs() { return { id: activeWsId } as unknown as Workspace; },
+      get activeWsId() { return activeWsId; },
+      switchTo: vi.fn((id: string) => { activeWsId = id; }),
+      openNew: vi.fn(),
+      close: vi.fn(),
+      claimForSniff,
+      patchActive: vi.fn(),
+      patchById: patchByIdMock,
+      patchByHistoryId: vi.fn(() => false),
+      isBusy: vi.fn(() => false)
+    } as unknown as UseWorkspacesApi;
+
+    const giftk: SniffSessionGiftk = {
+      sniff: vi.fn(),
+      sniffWithWebview: sniffWithWebview as unknown as SniffSessionGiftk['sniffWithWebview'],
+      importOfflinePage: vi.fn()
+    };
+
+    const setSniffing = vi.fn();
+    const setResult = vi.fn();
+    const setSelected = vi.fn();
+    const activeHistoryIdRef = { current: null as string | null };
+    const deps: SniffSessionDeps = {
+      giftk,
+      ws,
+      url: 'https://host.test/A',
+      result: null,
+      useRealChromeProfile: false,
+      options: makeOptions(),
+      setUrlError: vi.fn(),
+      setSniffing,
+      setSniffProgress: vi.fn(),
+      setResult,
+      setSelected,
+      setActiveId: vi.fn(),
+      setPreview: vi.fn(),
+      setLogs: vi.fn(),
+      setActiveSniffMode: vi.fn(),
+      resetEmbedResolve: vi.fn(),
+      activeHistoryIdRef,
+      makeHistoryRecord: vi.fn((input: { pageUrl: string; items: SniffedMedia[] }): HistoryRecord => ({
+        id: `rec-${input.pageUrl}`,
+        sniffedAt: 0,
+        pageUrl: input.pageUrl,
+        items: input.items,
+        options: makeOptions(),
+        tasks: {},
+        uploadsByOutputPath: {}
+      } as HistoryRecord)),
+      pushOrReplace: vi.fn(),
+      addSniffHistory: vi.fn(),
+      SNIFF_TIMEOUT_MS
+    };
+
+    const { result, rerender } = renderHook(
+      (props: SniffSessionDeps) => useSniffSession(props),
+      { initialProps: deps }
+    );
+
+    // Step 1: kick off sniff A on ws-A.
+    let runA: Promise<void> = Promise.resolve();
+    await act(async () => { runA = result.current.runWebview('embed'); });
+    expect(claimForSniff).toHaveBeenCalledTimes(1);
+    expect(activeWsId).toBe('ws-A');
+
+    // Step 2: while A is still pending, kick off sniff B on ws-B.
+    // claimForSniff flips active → ws-B internally.
+    const depsForB: SniffSessionDeps = { ...deps, url: 'https://host.test/B' };
+    rerender(depsForB);
+    let runB: Promise<void> = Promise.resolve();
+    await act(async () => { runB = result.current.runWebview('embed'); });
+    expect(claimForSniff).toHaveBeenCalledTimes(2);
+    expect(activeWsId).toBe('ws-B');
+
+    // Step 3: user switches tab back to ws-A while B is still pending.
+    activeWsId = 'ws-A';
+
+    // Now resolve A first, then B. Snapshot the patchById call list so
+    // we can inspect it after both runs settle.
+    patchByIdMock.mockClear();
+    await act(async () => {
+      releaseA(makeResult('https://host.test/A', [makeMedia('a')]));
+      releaseB(makeResult('https://host.test/B', [makeMedia('b')]));
+      await runA;
+      await runB;
+    });
+
+    // The CONTRACT: every per-ws write that happened after both
+    // resolves landed must carry an explicit wsId — and the result
+    // payload of A must have been written to ws-A, not the
+    // currently-active ws-B (and vice versa for B).
+    const calls = patchByIdMock.mock.calls;
+    const aResultCall = calls.find(
+      ([id, patch]) =>
+        id === 'ws-A' &&
+        patch &&
+        typeof patch === 'object' &&
+        'result' in patch &&
+        (patch.result as SniffResult)?.pageUrl === 'https://host.test/A'
+    );
+    const bResultCall = calls.find(
+      ([id, patch]) =>
+        id === 'ws-B' &&
+        patch &&
+        typeof patch === 'object' &&
+        'result' in patch &&
+        (patch.result as SniffResult)?.pageUrl === 'https://host.test/B'
+    );
+    expect(aResultCall, "ws-A's result must be patched into ws-A even though active is ws-B").toBeDefined();
+    expect(bResultCall, "ws-B's result must be patched into ws-B").toBeDefined();
+
+    // Negative side: A's result must NEVER have been patched into
+    // ws-B and vice versa (that's exactly the original bug).
+    const aWrittenIntoB = calls.find(
+      ([id, patch]) =>
+        id === 'ws-B' &&
+        patch &&
+        typeof patch === 'object' &&
+        'result' in patch &&
+        (patch.result as SniffResult)?.pageUrl === 'https://host.test/A'
+    );
+    const bWrittenIntoA = calls.find(
+      ([id, patch]) =>
+        id === 'ws-A' &&
+        patch &&
+        typeof patch === 'object' &&
+        'result' in patch &&
+        (patch.result as SniffResult)?.pageUrl === 'https://host.test/B'
+    );
+    expect(aWrittenIntoB, "A's result leaked into B (R-WS-89 regression)").toBeUndefined();
+    expect(bWrittenIntoA, "B's result leaked into A (R-WS-89 regression)").toBeUndefined();
+  });
+
+  it('R-WS-90 P4 T7 concurrent sniff isolation: two in-flight sniffs mint distinct sessionIds and route results to their own wsId', async () => {
+    // P4 T7 — when two sniffs are in flight at once, each mints its
+    // own sessionId; the IPC carries opts.sessionId so the main
+    // process can route progress events back to the right tab; and
+    // the resolve branch patches the result onto the wsId captured
+    // at claim time, never the currently-active ws. This is the
+    // multi-tab analog of R-WS-89's cross-tab isolation but pinned
+    // specifically on the sessionId routing token.
+    let releaseA: (r: SniffResult) => void = () => undefined;
+    const slowA = new Promise<SniffResult>((res) => { releaseA = res; });
+    let releaseB: (r: SniffResult) => void = () => undefined;
+    const slowB = new Promise<SniffResult>((res) => { releaseB = res; });
+
+    const sniff = vi.fn()
+      .mockImplementationOnce(() => slowA)
+      .mockImplementationOnce(() => slowB);
+
+    const patchByIdMock = vi.fn();
+    let activeWsId = 'ws-A';
+    const claimForSniff = vi.fn(() => {
+      if (claimForSniff.mock.calls.length === 1) {
+        activeWsId = 'ws-A';
+        return 'ws-A';
+      }
+      activeWsId = 'ws-B';
+      return 'ws-B';
+    });
+
+    const ws = {
+      workspaces: [] as Workspace[],
+      get activeWs() { return { id: activeWsId } as unknown as Workspace; },
+      get activeWsId() { return activeWsId; },
+      switchTo: vi.fn((id: string) => { activeWsId = id; }),
+      openNew: vi.fn(),
+      close: vi.fn(),
+      claimForSniff,
+      patchActive: vi.fn(),
+      patchById: patchByIdMock,
+      patchByHistoryId: vi.fn(() => false),
+      isBusy: vi.fn(() => false)
+    } as unknown as UseWorkspacesApi;
+
+    const giftk: SniffSessionGiftk = {
+      sniff: sniff as unknown as SniffSessionGiftk['sniff'],
+      sniffWithWebview: vi.fn(),
+      importOfflinePage: vi.fn()
+    };
+
+    const baseDeps: SniffSessionDeps = {
+      giftk,
+      ws,
+      url: 'https://host.test/A',
+      result: null,
+      useRealChromeProfile: false,
+      options: makeOptions(),
+      setUrlError: vi.fn(),
+      setSniffing: vi.fn(),
+      setSniffProgress: vi.fn(),
+      setResult: vi.fn(),
+      setSelected: vi.fn(),
+      setActiveId: vi.fn(),
+      setPreview: vi.fn(),
+      setLogs: vi.fn(),
+      setActiveSniffMode: vi.fn(),
+      resetEmbedResolve: vi.fn(),
+      activeHistoryIdRef: { current: null as string | null },
+      makeHistoryRecord: vi.fn((input: { pageUrl: string; items: SniffedMedia[] }): HistoryRecord => ({
+        id: `rec-${input.pageUrl}`,
+        sniffedAt: 0,
+        pageUrl: input.pageUrl,
+        items: input.items,
+        options: makeOptions(),
+        tasks: {},
+        uploadsByOutputPath: {}
+      } as HistoryRecord)),
+      pushOrReplace: vi.fn(),
+      addSniffHistory: vi.fn(),
+      SNIFF_TIMEOUT_MS
+    };
+
+    const { result, rerender } = renderHook(
+      (props: SniffSessionDeps) => useSniffSession(props),
+      { initialProps: baseDeps }
+    );
+
+    let runA: Promise<void> = Promise.resolve();
+    await act(async () => { runA = result.current.runEmbed(); });
+    rerender({ ...baseDeps, url: 'https://host.test/B' });
+    let runB: Promise<void> = Promise.resolve();
+    await act(async () => { runB = result.current.runEmbed(); });
+
+    // Both sniff IPC calls fired with distinct, non-empty sessionIds.
+    expect(sniff).toHaveBeenCalledTimes(2);
+    const optsA = sniff.mock.calls[0][1] as { sessionId: string };
+    const optsB = sniff.mock.calls[1][1] as { sessionId: string };
+    expect(optsA.sessionId).toEqual(expect.any(String));
+    expect(optsB.sessionId).toEqual(expect.any(String));
+    expect(optsA.sessionId.length).toBeGreaterThan(0);
+    expect(optsB.sessionId.length).toBeGreaterThan(0);
+    expect(optsA.sessionId).not.toBe(optsB.sessionId);
+
+    // The open-patch for each ws stamped its corresponding sessionId
+    // onto the workspace, so close(wsId) can cancel via that token.
+    const openA = patchByIdMock.mock.calls.find(
+      ([id, patch]) => id === 'ws-A' && (patch as { sniffSessionId?: string } | undefined)?.sniffSessionId === optsA.sessionId
+    );
+    const openB = patchByIdMock.mock.calls.find(
+      ([id, patch]) => id === 'ws-B' && (patch as { sniffSessionId?: string } | undefined)?.sniffSessionId === optsB.sessionId
+    );
+    expect(openA, 'ws-A open patch must carry its sessionId').toBeDefined();
+    expect(openB, 'ws-B open patch must carry its sessionId').toBeDefined();
+
+    // Resolve in reverse order to maximise cross-talk pressure: B
+    // first while active is ws-B, then A while active is still ws-B.
+    patchByIdMock.mockClear();
+    await act(async () => {
+      releaseB(makeResult('https://host.test/B', [makeMedia('b')]));
+      await runB;
+    });
+    // Switch active back to ws-A (user clicks tab) — A still pending.
+    activeWsId = 'ws-A';
+    await act(async () => {
+      releaseA(makeResult('https://host.test/A', [makeMedia('a')]));
+      await runA;
+    });
+
+    const calls = patchByIdMock.mock.calls;
+    const aResultCall = calls.find(
+      ([id, patch]) =>
+        id === 'ws-A' &&
+        (patch as { result?: SniffResult } | undefined)?.result?.pageUrl === 'https://host.test/A'
+    );
+    const bResultCall = calls.find(
+      ([id, patch]) =>
+        id === 'ws-B' &&
+        (patch as { result?: SniffResult } | undefined)?.result?.pageUrl === 'https://host.test/B'
+    );
+    expect(aResultCall).toBeDefined();
+    expect(bResultCall).toBeDefined();
+
+    // The drain patch for each run must clear its OWN sniffSessionId.
+    const drainA = calls.find(
+      ([id, patch]) => id === 'ws-A' && (patch as { sniffing?: boolean } | undefined)?.sniffing === false
+    );
+    const drainB = calls.find(
+      ([id, patch]) => id === 'ws-B' && (patch as { sniffing?: boolean } | undefined)?.sniffing === false
+    );
+    expect((drainA?.[1] as { sniffSessionId?: string | null } | undefined)?.sniffSessionId).toBeNull();
+    expect((drainB?.[1] as { sniffSessionId?: string | null } | undefined)?.sniffSessionId).toBeNull();
+  });
+
+  it('runOffline picker-cancel (R-WS-89 patchById form): r === null silently bails', async () => {
+    // Companion to the L378 happy-path picker-cancel test; this one
+    // pins the same contract through the patchById channel rather
+    // than via the legacy setSniffing shim, since R-WS-89 moved
+    // every per-ws lifecycle flag onto patchById.
+    const handles = makeDeps({ offlineImpl: async () => null });
+    const { result } = renderHook(() => useSniffSession(handles.deps));
+
+    await act(async () => {
+      await result.current.runOffline();
+    });
+
+    // Happy-path side-effects MUST NOT have fired — no result patch
+    // with a non-null SniffResult was ever issued for ws-1.
+    const happyResultPatch = findPatch(handles.patchByIdMock, 'ws-1', (p) =>
+      'result' in p &&
+      (p.result as SniffResult | null) !== null &&
+      Array.isArray((p.result as SniffResult).items) &&
+      (p.result as SniffResult).items.length > 0
+    );
+    expect(happyResultPatch).toBeUndefined();
+    expect(handles.pushOrReplace).not.toHaveBeenCalled();
+
+    // But the lifecycle flags still drain in the finally block via
+    // patchById, including sniffSessionId cleared back to null.
+    await waitFor(() => {
+      const drainPatch = findPatch(handles.patchByIdMock, 'ws-1', (p) => p.sniffing === false);
+      expect(drainPatch).toBeDefined();
+      expect(drainPatch?.sniffSessionId).toBeNull();
       expect(handles.setActiveSniffMode).toHaveBeenLastCalledWith(null);
     });
   });

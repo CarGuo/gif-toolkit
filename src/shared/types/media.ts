@@ -86,4 +86,15 @@ export interface SniffProgress {
   found?: number;        // total media items discovered so far
   probed?: number;       // probed count (during 'probing')
   total?: number;        // total to probe
+  /**
+   * R-WS-90 — routing token. The main process emits a `sessionId` on
+   * every progress event so the renderer can route the payload to the
+   * correct workspace tab via its sniffSessionId → wsId map.
+   *
+   * Older fixtures and tests that build SniffProgress by hand may
+   * still omit this; renderer code should treat absence as "global
+   * progress, fall back to active ws" for back-compat. New main-side
+   * call sites MUST emit it so multi-tab sniff doesn't cross-write.
+   */
+  sessionId?: string;
 }

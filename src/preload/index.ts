@@ -44,7 +44,7 @@ function ensureObject<T>(v: unknown, name: string): T {
 }
 
 const api = {
-  async sniff(url: string, opts?: { includeStaticImages?: boolean }): Promise<SniffResult> {
+  async sniff(url: string, opts?: { includeStaticImages?: boolean; sessionId?: string }): Promise<SniffResult> {
     ensureString(url, 'url');
     return ipcRenderer.invoke('sniff:url', url, opts ?? {});
   },
@@ -54,7 +54,7 @@ const api = {
   // user clicks "✅ 完成嗅探" in the injected toolbar, this resolves with
   // the same `SniffResult` shape as `sniff()`, so the renderer can feed
   // both pipelines into the same dedupe/history flow.
-  async sniffWithWebview(url: string, opts?: { includeStaticImages?: boolean }): Promise<SniffResult> {
+  async sniffWithWebview(url: string, opts?: { includeStaticImages?: boolean; sessionId?: string }): Promise<SniffResult> {
     ensureString(url, 'url');
     return ipcRenderer.invoke('sniff:webview', url, opts ?? {});
   },
@@ -65,7 +65,7 @@ const api = {
   // CDP. Same `SniffResult` shape as the other two sniff entries.
   async sniffWithSystemChrome(
     url: string,
-    opts?: { includeStaticImages?: boolean },
+    opts?: { includeStaticImages?: boolean; sessionId?: string },
     chromeOpts?: { useRealProfile?: boolean }
   ): Promise<SniffResult> {
     ensureString(url, 'url');
@@ -90,8 +90,8 @@ const api = {
    *
    * Returns `true` if a sniff was actually in flight.
    */
-  async finalizeSystemChromeSniff(): Promise<boolean> {
-    return ipcRenderer.invoke('sniff:system-chrome:finalize');
+  async finalizeSystemChromeSniff(opts?: { sessionId?: string }): Promise<boolean> {
+    return ipcRenderer.invoke('sniff:system-chrome:finalize', opts ?? {});
   },
   /**
    * R-55 Fix #3 — Offline import. Hand a fully-saved web page (or any
@@ -113,7 +113,7 @@ const api = {
    */
   async importOfflinePage(
     absPath?: string,
-    opts?: { includeStaticImages?: boolean }
+    opts?: { includeStaticImages?: boolean; sessionId?: string }
   ): Promise<SniffResult | null> {
     if (typeof absPath === 'string') ensureString(absPath, 'absPath');
     return ipcRenderer.invoke('sniff:offlineImport', absPath, opts ?? {});
@@ -123,7 +123,7 @@ const api = {
   // SniffResult shape as the other entries, with a single SniffedMedia
   // whose `resolved` field is already populated so the renderer can
   // dispatch it into the processor without an extra resolve step.
-  async sniffWithYtdlpDirect(url: string, opts?: { includeStaticImages?: boolean }): Promise<SniffResult> {
+  async sniffWithYtdlpDirect(url: string, opts?: { includeStaticImages?: boolean; sessionId?: string }): Promise<SniffResult> {
     ensureString(url, 'url');
     return ipcRenderer.invoke('sniff:ytdlp-direct', url, opts ?? {});
   },
@@ -160,8 +160,8 @@ const api = {
   async cancelTask(taskId: string): Promise<{ ok: boolean; cancelled: boolean; error?: string }> {
     return ipcRenderer.invoke('process:cancelTask', taskId);
   },
-  async cancelSniff(): Promise<void> {
-    return ipcRenderer.invoke('sniff:cancel');
+  async cancelSniff(opts?: { sessionId?: string }): Promise<void> {
+    return ipcRenderer.invoke('sniff:cancel', opts ?? {});
   },
   async getLogBuffer(): Promise<string[]> {
     return ipcRenderer.invoke('app:logBuffer');

@@ -702,12 +702,22 @@ async function createWindow(): Promise<void> {
 
 /* ----------------------- IPC handlers ----------------------- */
 
-let currentSniffCtrl: AbortController | null = null;
-// R-55 Fix #2 — separate controller used to *finalize* an in-flight
-// system-chrome sniff cooperatively. Distinct from currentSniffCtrl
-// because finalize means "I'm done, take what you have, return
-// success" while abort means "cancel + show empty".
-let currentSystemChromeFinalizeCtrl: AbortController | null = null;
+// R-WS-90 P2 — Map-routed sniff controllers (was: single global
+// `currentSniffCtrl: AbortController | null`). Multi-tab workspaces
+// need *concurrent* sniffs from different sessions, so we key every
+// in-flight AbortController by its renderer-supplied sessionId.
+//
+// Semantic change: the old single-flight discipline ("kicking off any
+// new mode aborts the in-flight one") is **removed**. Different
+// sessionIds are now 100% isolated; only an explicit `sniff:cancel`
+// for that sessionId (or a no-arg cancel-all fallback) tears a sniff
+// down.
+const sniffCtrls = new Map<string, AbortController>();
+// R-WS-90 P2 — Per-session finalize controller for system-chrome sniff
+// (was: single global `currentSystemChromeFinalizeCtrl`). Distinct from
+// `sniffCtrls` because finalize means "I'm done, take what you have,
+// return success" while abort means "cancel + show empty".
+const finalizeCtrls = new Map<string, AbortController>();
 
 /**
  * R-57 — Parse the optional `SniffFilterOptions` bag handed in as the
@@ -753,19 +763,26 @@ ipcMain.handle('sniff:url', async (_e, url: unknown, maybeFilterOpts: unknown) =
   const filterOpts = readSniffFilterOpts(maybeFilterOpts);
   const sessionId = readOrMintSessionId(maybeFilterOpts, 'sniff');
   openLogSession({ sessionId, pageUrl: safe, origin: 'sniff:url' });
-  // Cancel any sniff that is still mid-flight before starting a new one.
-  if (currentSniffCtrl) {
-    try { currentSniffCtrl.abort(); } catch { /* ignore */ }
+  // R-WS-90 P2 — Per-session routing: only abort a *prior* in-flight
+  // sniff that shares THIS sessionId (i.e. the renderer re-issued the
+  // same tab's sniff). Other sessionIds run concurrently — no more
+  // global single-flight here.
+  const prior = sniffCtrls.get(sessionId);
+  if (prior) {
+    try { prior.abort(); } catch { /* ignore */ }
   }
   const ctrl = new AbortController();
-  currentSniffCtrl = ctrl;
+  sniffCtrls.set(sessionId, ctrl);
   try {
     logSession({ sessionId, stage: 'sniff', substep: 'url.start', message: `headless sniff start: ${safe}`, data: { url: safe, filterOpts } });
     const r = await sniffPage(
       safe,
       (p) => {
         if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('sniff:progress', p);
+          // R-WS-90 — stamp sessionId so renderer can route progress
+          // to the workspace tab that owns this sniff (not the
+          // currently-active tab, which may have changed mid-flight).
+          mainWindow.webContents.send('sniff:progress', { ...p, sessionId });
         }
         logSession({
           sessionId,
@@ -800,52 +817,72 @@ ipcMain.handle('sniff:url', async (_e, url: unknown, maybeFilterOpts: unknown) =
     closeLogSession({ sessionId, outcome: 'error', message: (e as Error).message });
     throw e;
   } finally {
-    if (currentSniffCtrl === ctrl) currentSniffCtrl = null;
+    // R-WS-90 P2 — release this session's slot only if we still own it.
+    if (sniffCtrls.get(sessionId) === ctrl) sniffCtrls.delete(sessionId);
   }
 });
 
-ipcMain.handle('sniff:cancel', async () => {
-  if (currentSniffCtrl) {
-    try { currentSniffCtrl.abort(); } catch { /* ignore */ }
-    currentSniffCtrl = null;
+ipcMain.handle('sniff:cancel', async (_e, opts?: unknown) => {
+  // R-WS-90 P2 — sessionId-aware cancel. New renderers pass
+  // `{ sessionId }` to cancel exactly one tab's sniff; legacy
+  // (no-arg) callers fall through to a cancel-all sweep so older
+  // renderer builds keep working without multi-tab isolation.
+  const wantSession =
+    opts && typeof opts === 'object'
+      ? (opts as Record<string, unknown>).sessionId
+      : undefined;
+  if (typeof wantSession === 'string' && wantSession.length > 0) {
+    const ctrl = sniffCtrls.get(wantSession);
+    if (ctrl) {
+      try { ctrl.abort(); } catch { /* ignore */ }
+      sniffCtrls.delete(wantSession);
+    }
+    // R-56 Fix #B — also tear down any system-chrome finalize ctrl
+    // pinned to the same session so a stale ctrl from the just-cancelled
+    // run cannot leak into the next sniff.
+    const fin = finalizeCtrls.get(wantSession);
+    if (fin) {
+      try { fin.abort(); } catch { /* ignore */ }
+      finalizeCtrls.delete(wantSession);
+    }
+    return { ok: true };
   }
-  // R-56 Fix #B — also detach the system-chrome finalize controller so
-  // a stale ctrl from the just-cancelled run cannot leak into the next
-  // sniff. Without this, the next 真 Chrome sniff's finalize button
-  // would either fire on the wrong run or the renderer's
-  // `finalizeSystemChromeSniff()` would resolve to `true` even though
-  // no sniff is in flight.
-  if (currentSystemChromeFinalizeCtrl) {
-    try { currentSystemChromeFinalizeCtrl.abort(); } catch { /* ignore */ }
-    currentSystemChromeFinalizeCtrl = null;
+  // Legacy / safety fallback: cancel every in-flight sniff.
+  for (const [, ctrl] of sniffCtrls) {
+    try { ctrl.abort(); } catch { /* ignore */ }
   }
+  sniffCtrls.clear();
+  for (const [, fin] of finalizeCtrls) {
+    try { fin.abort(); } catch { /* ignore */ }
+  }
+  finalizeCtrls.clear();
   return { ok: true };
 });
 
 // R-44 — webview-assisted sniff. Spawns a real Chromium window, lets the
 // user log in, then merges webRequest captures + DOM scan into a SniffResult.
 //
-// R-53 — Single-flight discipline is now unified across all four sniff
-// entries (sniff:url, sniff:webview, sniff:system-chrome, sniff:ytdlp-direct).
-// They share `currentSniffCtrl`, so kicking off any new mode aborts the
-// in-flight one in any other mode. This collapses the previous "race A":
-// switching from embedded webview to yt-dlp would orphan the embedded
-// window because the embedded path didn't even own a controller.
-let webviewSniffInFlight = false;
+// R-WS-90 P2 — Single-flight tracking is now per-session: a Set of
+// sessionIds currently mid-flight, NOT a global boolean. Different
+// tabs can each open their own webview sniff in parallel; the Set
+// only prevents the *same* sessionId from re-entering its own handler.
+const webviewSniffInFlight = new Set<string>();
 ipcMain.handle('sniff:webview', async (_e, url: unknown, maybeFilterOpts: unknown) => {
-  if (webviewSniffInFlight) {
-    throw new Error('已经有一个 Webview 嗅探窗口在进行中,请先关闭它');
-  }
   const safe = assertHttpUrl(url);
   const filterOpts = readSniffFilterOpts(maybeFilterOpts);
   const sessionId = readOrMintSessionId(maybeFilterOpts, 'sniff-wv');
+  if (webviewSniffInFlight.has(sessionId)) {
+    throw new Error('已经有一个 Webview 嗅探窗口在进行中,请先关闭它');
+  }
   openLogSession({ sessionId, pageUrl: safe, origin: 'sniff:webview' });
-  if (currentSniffCtrl) {
-    try { currentSniffCtrl.abort(); } catch { /* ignore */ }
+  // R-WS-90 P2 — only abort a prior sniff that owns THIS session.
+  const prior = sniffCtrls.get(sessionId);
+  if (prior) {
+    try { prior.abort(); } catch { /* ignore */ }
   }
   const ctrl = new AbortController();
-  currentSniffCtrl = ctrl;
-  webviewSniffInFlight = true;
+  sniffCtrls.set(sessionId, ctrl);
+  webviewSniffInFlight.add(sessionId);
   try {
     logSession({ sessionId, stage: 'sniff', substep: 'webview.start', message: `webview sniff start: ${safe}`, data: { url: safe, filterOpts } });
     const r = await openWebviewSniff(safe, mainWindow, { signal: ctrl.signal });
@@ -878,8 +915,10 @@ ipcMain.handle('sniff:webview', async (_e, url: unknown, maybeFilterOpts: unknow
     closeLogSession({ sessionId, outcome: 'error', message: (e as Error).message });
     throw e;
   } finally {
-    webviewSniffInFlight = false;
-    if (currentSniffCtrl === ctrl) currentSniffCtrl = null;
+    // R-WS-90 P2 — release this session's webview slot + its sniff ctrl
+    // (only if we still own them — defensive against late aborts).
+    webviewSniffInFlight.delete(sessionId);
+    if (sniffCtrls.get(sessionId) === ctrl) sniffCtrls.delete(sessionId);
   }
 });
 
@@ -888,17 +927,18 @@ ipcMain.handle('sniff:webview', async (_e, url: unknown, maybeFilterOpts: unknow
 // whose JA3/JA4 fingerprint is in Cloudflare's whitelist; the user
 // manually clicks through any Turnstile / login flow in that real
 // window, and we passively scrape the network log + final DOM via CDP.
-let systemChromeSniffInFlight = false;
+// R-WS-90 P2 — Per-session in-flight Set (was: global boolean).
+const systemChromeSniffInFlight = new Set<string>();
 ipcMain.handle('sniff:system-chrome:detect', async () => {
   return findInstalledBrowsers();
 });
 ipcMain.handle('sniff:system-chrome', async (_e, url: unknown, maybeFilterOpts: unknown, maybeChromeOpts: unknown) => {
-  if (systemChromeSniffInFlight) {
-    throw new Error('已经有一个真 Chrome 嗅探窗口在进行中,请先关闭它');
-  }
   const safe = assertHttpUrl(url);
   const filterOpts = readSniffFilterOpts(maybeFilterOpts);
   const sessionId = readOrMintSessionId(maybeFilterOpts, 'sniff-sc');
+  if (systemChromeSniffInFlight.has(sessionId)) {
+    throw new Error('已经有一个真 Chrome 嗅探窗口在进行中,请先关闭它');
+  }
   openLogSession({ sessionId, pageUrl: safe, origin: 'sniff:system-chrome' });
   // R-59 — Renderer can opt in to using the user's REAL Chrome profile
   // (rather than our isolated per-host one). This is the highest-impact
@@ -908,18 +948,20 @@ ipcMain.handle('sniff:system-chrome', async (_e, url: unknown, maybeFilterOpts: 
     !!maybeChromeOpts &&
     typeof maybeChromeOpts === 'object' &&
     (maybeChromeOpts as Record<string, unknown>).useRealProfile === true;
-  // Sniff progress + cancellation share the same channel & controller as
-  // headless sniff so the renderer's existing 嗅探中… spinner / cancel
-  // button keeps working unchanged.
-  if (currentSniffCtrl) {
-    try { currentSniffCtrl.abort(); } catch { /* ignore */ }
+  // R-WS-90 P2 — only abort a prior sniff for THIS sessionId; other
+  // tabs' sniffs run independently.
+  const prior = sniffCtrls.get(sessionId);
+  if (prior) {
+    try { prior.abort(); } catch { /* ignore */ }
   }
   const ctrl = new AbortController();
-  currentSniffCtrl = ctrl;
-  // R-55 Fix #2 — fresh finalize controller for this run.
+  sniffCtrls.set(sessionId, ctrl);
+  // R-55 Fix #2 — fresh finalize controller for this run, also
+  // R-WS-90 P2 — keyed by sessionId so the per-session
+  // `sniff:system-chrome:finalize` can target it.
   const finalizeCtrl = new AbortController();
-  currentSystemChromeFinalizeCtrl = finalizeCtrl;
-  systemChromeSniffInFlight = true;
+  finalizeCtrls.set(sessionId, finalizeCtrl);
+  systemChromeSniffInFlight.add(sessionId);
   try {
     logSession({ sessionId, stage: 'sniff', substep: 'system-chrome.start', message: `system-chrome sniff start: ${safe}`, data: { url: safe, useRealProfile, filterOpts } });
     const r = await sniffViaSystemChrome(safe, {
@@ -928,7 +970,8 @@ ipcMain.handle('sniff:system-chrome', async (_e, url: unknown, maybeFilterOpts: 
       useRealProfile,
       onProgress: (p) => {
         if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('sniff:progress', p);
+          // R-WS-90 — stamp sessionId for renderer-side ws routing.
+          mainWindow.webContents.send('sniff:progress', { ...p, sessionId });
         }
         logSession({
           sessionId, stage: 'sniff', level: 'debug', substep: `system-chrome.${p.stage}`,
@@ -951,9 +994,10 @@ ipcMain.handle('sniff:system-chrome', async (_e, url: unknown, maybeFilterOpts: 
     closeLogSession({ sessionId, outcome: 'error', message: (e as Error).message });
     throw e;
   } finally {
-    systemChromeSniffInFlight = false;
-    if (currentSniffCtrl === ctrl) currentSniffCtrl = null;
-    if (currentSystemChromeFinalizeCtrl === finalizeCtrl) currentSystemChromeFinalizeCtrl = null;
+    // R-WS-90 P2 — release this session's slots only if we still own them.
+    systemChromeSniffInFlight.delete(sessionId);
+    if (sniffCtrls.get(sessionId) === ctrl) sniffCtrls.delete(sessionId);
+    if (finalizeCtrls.get(sessionId) === finalizeCtrl) finalizeCtrls.delete(sessionId);
   }
 });
 
@@ -961,13 +1005,31 @@ ipcMain.handle('sniff:system-chrome', async (_e, url: unknown, maybeFilterOpts: 
 // renderer fires this when the user clicks「✓ 完成嗅探」at the 60%
 // stage. Returns true iff a finalize signal was actually sent (i.e.
 // there was a real-Chrome sniff in flight).
-ipcMain.handle('sniff:system-chrome:finalize', async () => {
-  if (currentSystemChromeFinalizeCtrl) {
-    try { currentSystemChromeFinalizeCtrl.abort(); } catch { /* ignore */ }
-    currentSystemChromeFinalizeCtrl = null;
-    return true;
+//
+// R-WS-90 P2 — sessionId-aware. New renderers pass `{ sessionId }` to
+// finalize exactly one tab; legacy (no-arg) callers fall through to a
+// finalize-all sweep so older renderer builds still work.
+ipcMain.handle('sniff:system-chrome:finalize', async (_e, opts?: unknown) => {
+  const wantSession =
+    opts && typeof opts === 'object'
+      ? (opts as Record<string, unknown>).sessionId
+      : undefined;
+  if (typeof wantSession === 'string' && wantSession.length > 0) {
+    const fin = finalizeCtrls.get(wantSession);
+    if (fin) {
+      try { fin.abort(); } catch { /* ignore */ }
+      finalizeCtrls.delete(wantSession);
+      return true;
+    }
+    return false;
   }
-  return false;
+  // Legacy / safety fallback: finalize every in-flight system-chrome sniff.
+  let any = false;
+  for (const [, fin] of finalizeCtrls) {
+    try { fin.abort(); any = true; } catch { /* ignore */ }
+  }
+  finalizeCtrls.clear();
+  return any;
 });
 
 // R-55 Fix #3 — Offline import. Bypasses all four online sniff
@@ -980,15 +1042,15 @@ ipcMain.handle('sniff:system-chrome:finalize', async () => {
 //    here. The picker accepts both files and directories so the
 //    user can choose a Chrome "Webpage, complete" folder in one go.
 //
-// R-56 — Now wired into the same single-flight `currentSniffCtrl`
-// + `sniff:progress` channel as the other four sniff entries, so
-// `sniff:cancel` actually cancels offline imports and the renderer
-// progress spinner reflects real per-stage milestones (read-mhtml
-// → stage-parts → rewrite-html → extract-media) instead of the old
-// hard-pinned 50% placeholder. The renderer can also pass a third
-// IPC argument `{ includeStaticImages: true }` to opt static-image
-// references back in (default = filtered out so png/webp thumbnails
-// don't pollute the result grid).
+// R-56 — Now wired into the same `sniff:progress` channel + per-session
+// abort controller (R-WS-90 P2: `sniffCtrls.get(sessionId)`) as the
+// other four sniff entries, so `sniff:cancel` actually cancels offline
+// imports and the renderer progress spinner reflects real per-stage
+// milestones (read-mhtml → stage-parts → rewrite-html → extract-media)
+// instead of the old hard-pinned 50% placeholder. The renderer can also
+// pass a third IPC argument `{ includeStaticImages: true }` to opt
+// static-image references back in (default = filtered out so png/webp
+// thumbnails don't pollute the result grid).
 ipcMain.handle('sniff:offlineImport', async (_e, maybePath: unknown, maybeOpts: unknown) => {
   const { importOfflinePath } = await import('./offlineImport');
   let absPath: string | null = null;
@@ -1014,13 +1076,14 @@ ipcMain.handle('sniff:offlineImport', async (_e, maybePath: unknown, maybeOpts: 
   // R-57 — Always pass `includeStaticImages: true` to the offline parser
   // so it harvests every <img>; the global filter then decides what to
   // drop based on `filterOpts`. Single chokepoint, single rule set.
-  // Single-flight: cancel any in-flight sniff (online or offline)
-  // before kicking off this offline import.
-  if (currentSniffCtrl) {
-    try { currentSniffCtrl.abort(); } catch { /* ignore */ }
+  // R-WS-90 P2 — Per-session: only abort an in-flight sniff for THIS
+  // sessionId; concurrent offline imports from other tabs are allowed.
+  const prior = sniffCtrls.get(sessionId);
+  if (prior) {
+    try { prior.abort(); } catch { /* ignore */ }
   }
   const ctrl = new AbortController();
-  currentSniffCtrl = ctrl;
+  sniffCtrls.set(sessionId, ctrl);
   try {
     logSession({ sessionId, stage: 'sniff', substep: 'offline.start', message: `offline import start: ${absPath}`, data: { absPath, filterOpts } });
     const r = await importOfflinePath(absPath, {
@@ -1028,7 +1091,8 @@ ipcMain.handle('sniff:offlineImport', async (_e, maybePath: unknown, maybeOpts: 
       includeStaticImages: true,
       onProgress: (p) => {
         if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('sniff:progress', p);
+          // R-WS-90 — stamp sessionId for renderer-side ws routing.
+          mainWindow.webContents.send('sniff:progress', { ...p, sessionId });
         }
         logSession({
           sessionId, stage: 'sniff', level: 'debug', substep: `offline.${p.stage}`,
@@ -1056,7 +1120,8 @@ ipcMain.handle('sniff:offlineImport', async (_e, maybePath: unknown, maybeOpts: 
     closeLogSession({ sessionId, outcome: 'error', message: (e as Error).message });
     throw e;
   } finally {
-    if (currentSniffCtrl === ctrl) currentSniffCtrl = null;
+    // R-WS-90 P2 — release this session's slot only if we still own it.
+    if (sniffCtrls.get(sessionId) === ctrl) sniffCtrls.delete(sessionId);
   }
 });
 
@@ -1065,28 +1130,33 @@ ipcMain.handle('sniff:offlineImport', async (_e, maybePath: unknown, maybeOpts: 
 // URL straight to yt-dlp's 1900+ extractors and return the resolved
 // direct media as a single SniffedMedia. Best for sites where ① is too
 // fragile (Cloudflare) AND ② is too heavy (user just wants the file).
-let ytdlpDirectSniffInFlight = false;
+//
+// R-WS-90 P2 — Per-session in-flight Set (was: global boolean).
+const ytdlpDirectSniffInFlight = new Set<string>();
 ipcMain.handle('sniff:ytdlp-direct', async (_e, url: unknown, maybeFilterOpts: unknown) => {
-  if (ytdlpDirectSniffInFlight) {
-    throw new Error('已经有一个 yt-dlp 直链解析在进行中,请先取消');
-  }
   const safe = assertHttpUrl(url);
   const filterOpts = readSniffFilterOpts(maybeFilterOpts);
   const sessionId = readOrMintSessionId(maybeFilterOpts, 'sniff-yt');
+  if (ytdlpDirectSniffInFlight.has(sessionId)) {
+    throw new Error('已经有一个 yt-dlp 直链解析在进行中,请先取消');
+  }
   openLogSession({ sessionId, pageUrl: safe, origin: 'sniff:ytdlp-direct' });
-  if (currentSniffCtrl) {
-    try { currentSniffCtrl.abort(); } catch { /* ignore */ }
+  // R-WS-90 P2 — only abort a prior sniff for THIS sessionId.
+  const prior = sniffCtrls.get(sessionId);
+  if (prior) {
+    try { prior.abort(); } catch { /* ignore */ }
   }
   const ctrl = new AbortController();
-  currentSniffCtrl = ctrl;
-  ytdlpDirectSniffInFlight = true;
+  sniffCtrls.set(sessionId, ctrl);
+  ytdlpDirectSniffInFlight.add(sessionId);
   try {
     logSession({ sessionId, stage: 'sniff', substep: 'ytdlp.start', message: `ytdlp direct sniff start: ${safe}`, data: { url: safe } });
     const r = await sniffViaYtdlp(safe, {
       signal: ctrl.signal,
       onProgress: (p) => {
         if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('sniff:progress', p);
+          // R-WS-90 — stamp sessionId for renderer-side ws routing.
+          mainWindow.webContents.send('sniff:progress', { ...p, sessionId });
         }
         logSession({
           sessionId, stage: 'sniff', level: 'debug', substep: `ytdlp.${p.stage}`,
@@ -1109,8 +1179,9 @@ ipcMain.handle('sniff:ytdlp-direct', async (_e, url: unknown, maybeFilterOpts: u
     closeLogSession({ sessionId, outcome: 'error', message: (e as Error).message });
     throw e;
   } finally {
-    ytdlpDirectSniffInFlight = false;
-    if (currentSniffCtrl === ctrl) currentSniffCtrl = null;
+    // R-WS-90 P2 — release this session's slots only if we still own them.
+    ytdlpDirectSniffInFlight.delete(sessionId);
+    if (sniffCtrls.get(sessionId) === ctrl) sniffCtrls.delete(sessionId);
   }
 });
 

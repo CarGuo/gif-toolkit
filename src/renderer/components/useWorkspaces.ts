@@ -79,6 +79,19 @@ export interface Workspace {
   result: SniffResult | null;
   /** True while a sniff network call is in flight. */
   sniffing: boolean;
+  /**
+   * R-WS-90 — when a sniff is in flight, this is the per-session
+   * AbortController routing id (matches `SniffProgress.sessionId` and
+   * the `opts.sessionId` passed into `giftk.sniff*`). Null when no sniff
+   * is in flight. Used by `close(wsId)` to cancel the right backend
+   * controller when the user closes a tab mid-sniff, and (in P4) by
+   * `useIpcEvents` to route `sniff:progress` events back to the owning
+   * workspace via a `sessionId → wsId` lookup. NOT a broader "sniff
+   * progress / sniff mode / url-error" container — those live inside
+   * `SniffPanel` itself, since the user clarified that the sniff input
+   * area is detached from any specific workspace.
+   */
+  sniffSessionId: string | null;
   selected: Set<string>;
   options: ProcessOptions;
   progress: Record<string, TaskProgress>;
@@ -109,6 +122,9 @@ const blankWorkspace = (): Workspace => ({
   url: '',
   result: null,
   sniffing: false,
+  // R-WS-90 — null until a sniff in flight, set by useSniffSession before
+  // calling giftk.sniff*; cleared in finally / catch.
+  sniffSessionId: null,
   selected: new Set(),
   options: { ...DEFAULT_OPTIONS },
   progress: {},
@@ -248,6 +264,23 @@ export function useWorkspaces(): UseWorkspacesApi {
   }, []);
 
   const close = useCallback((id: string) => {
+    // R-WS-90 — if the workspace being closed has an in-flight sniff,
+    // route a per-session cancel into the main process so the backend
+    // AbortController for THIS sniff is torn down (not the global "cancel
+    // all sniffs" of the legacy single-flight era). preload's cancelSniff
+    // accepts an optional `{ sessionId }` opts object; the main process
+    // routes via the sessionId → ctrl Map landed in P2.
+    const closing = listRef.current.find((w) => w.id === id);
+    if (closing && closing.sniffing && closing.sniffSessionId) {
+      try {
+        // Fire-and-forget; the main-process handler is idempotent and
+        // tolerates a sessionId that has already finished (the Map.get
+        // will simply return undefined).
+        void window.giftk?.cancelSniff?.({ sessionId: closing.sniffSessionId });
+      } catch {
+        // never let cancellation throw block the UI close path
+      }
+    }
     setList((cur) => {
       const idx = cur.findIndex((w) => w.id === id);
       if (idx === -1) return cur;
