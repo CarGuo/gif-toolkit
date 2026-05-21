@@ -94,6 +94,12 @@ export interface ModalsHostProps {
   uploadResult: string | null;
   setUploadResult: React.Dispatch<React.SetStateAction<string | null>>;
   uploadHistory: Parameters<typeof UploadResultModal>[0]['record'][];
+  /**
+   * R-WS-90 P5h — switch the main tab. Used by HistoryDetailModal's
+   * 「📤 在上传历史中查看本批」 button to jump from sniff history detail
+   * to the matching upload-history batch in the global Uploads tab.
+   */
+  setView: React.Dispatch<React.SetStateAction<'home' | 'history' | 'toolbox' | 'uploads'>>;
 
   // Toaster
   toasterHandleSetter: Parameters<typeof Toaster>[0]['registerHandle'];
@@ -110,6 +116,7 @@ export const ModalsHost: React.FC<ModalsHostProps> = (props) => {
     manualOpt, setManualOpt, onManualOptimizeConfirm,
     uploadSettingsOpen, setUploadSettingsOpen, onSaveUploadSettings,
     uploadResult, setUploadResult, uploadHistory,
+    setView,
     toasterHandleSetter
   } = props;
 
@@ -176,6 +183,27 @@ export const ModalsHost: React.FC<ModalsHostProps> = (props) => {
           // rec.uploadsByOutputPath.
           onUploadFromRecord={(rec, plan) => void dispatchUpload(plan, { sniffRecId: rec.id })}
           isUploadConfigured={isUploadConfigured(uploadConfigs)}
+          // R-WS-90 P5h — UploadHistoryRecord schema 没有 sniffRecId 字段,
+          // 所以这里通过远端 url 集合反查最新批次:
+          //   rec.uploadsByOutputPath[*].url ∩ uploadHistory[*].items[*].url ≠ ∅
+          // uploadHistory 已按 createdAt 倒序;遇到第一条命中即跳转 +
+          // 切到 uploads tab + 关闭当前 detail modal。
+          onJumpToUploadHistory={(rec) => {
+            const ups = rec.uploadsByOutputPath || {};
+            const targetUrls = new Set<string>();
+            for (const fp of Object.keys(ups)) {
+              const u = ups[fp];
+              if (u && u.status === 'done' && u.url) targetUrls.add(u.url);
+            }
+            if (targetUrls.size === 0) return;
+            const matched = uploadHistory.find((batch) =>
+              batch.items.some((it) => !!it.url && targetUrls.has(it.url))
+            );
+            if (!matched) return;
+            setHistoryDetail(null);
+            setView('uploads');
+            setUploadResult(matched.id);
+          }}
         />
       ) : null}
 

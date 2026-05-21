@@ -64,6 +64,7 @@ import type { HistoryRecord } from './useHistory';
 import { backendLabel } from './useUploadHistory';
 import { useSessionLogs } from './useSessionLogs';
 import { copyToClipboard } from './copyToClipboard';
+import { FileThumb } from './UploadResultModal';
 import type { SessionLogEntry } from '../../shared/types';
 
 const giftk = (typeof window !== 'undefined' ? window.giftk : undefined);
@@ -127,6 +128,13 @@ export interface HistoryDetailModalProps {
    *  backend has all required fields. Surfacing it as a prop avoids
    *  the modal having to reach into App.tsx state to check. */
   isUploadConfigured?: boolean;
+  /**
+   * R-WS-90 P5h — 跳转到上传历史 tab,定位包含本记录产物的最新上传批次。
+   * 由 ModalsHost 实现:扫描 uploadHistory[*].items[*].url ↔
+   * rec.uploadsByOutputPath[*].url 反查 batch.id,然后 setView('uploads')
+   * + setUploadResult(batchId)。可选 prop,旧 caller 不传也不影响。
+   */
+  onJumpToUploadHistory?: (rec: HistoryRecord) => void;
 }
 
 export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
@@ -144,7 +152,8 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
   // unused parameter while preserving the prop for existing callers.
   taskRecordMap,
   onUploadFromRecord,
-  isUploadConfigured = false
+  isUploadConfigured = false,
+  onJumpToUploadHistory
 }) => {
   // Modal-local state. We seed `options` from the snapshot at first
   // open so the user sees the same parameters they used when they
@@ -472,6 +481,7 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
                     rec={rec}
                     onUpload={onUploadFromRecord}
                     uploadConfigured={isUploadConfigured}
+                    onJumpToUploadHistory={onJumpToUploadHistory}
                   />
                 }
               />
@@ -596,7 +606,8 @@ const UploadsSection: React.FC<{
   rec: HistoryRecord;
   onUpload?: (rec: HistoryRecord, plan: Array<{ media: SniffedMedia; filePath: string }>) => void;
   uploadConfigured: boolean;
-}> = ({ rec, onUpload, uploadConfigured }) => {
+  onJumpToUploadHistory?: (rec: HistoryRecord) => void;
+}> = ({ rec, onUpload, uploadConfigured, onJumpToUploadHistory }) => {
   // Flatten outputs keeping a stable order: by task id then by
   // emit-order array index. We index back into rec.items to attach a
   // SniffedMedia handle for the upload dispatch.
@@ -640,6 +651,18 @@ const UploadsSection: React.FC<{
         ? '本记录的所有产物都已上传'
         : `把本记录里 ${pendingPlan.length} 个未上传的产物全部派发到当前默认图床`;
 
+  // R-WS-90 P5h — 是否存在 done 上传(用于「在上传历史中查看本批」按钮)。
+  // 跨表反查需要至少有一条带 url 的 done 记录,否则上传历史里压根找不到。
+  // 这里直接同步计算,避免在 early return 之后调 useMemo 触发 rules-of-hooks。
+  let hasAnyDoneUpload = false;
+  for (const fp of Object.keys(ups)) {
+    const u = ups[fp];
+    if (u && u.status === 'done' && u.url) {
+      hasAnyDoneUpload = true;
+      break;
+    }
+  }
+
   return (
     <div className="upload-section" role="region" aria-label="上传记录">
       <div className="upload-section-header">
@@ -648,6 +671,19 @@ const UploadsSection: React.FC<{
           {flat.length} 个产物 · {flat.length - pendingPlan.length} 已上传 / {pendingPlan.length} 未传
         </span>
         <span className="upload-section-spacer" />
+        {/* R-WS-90 P5h — 跳转到主上传历史 tab 看本批的完整上下文(其它批
+            次、其它图床记录、清单导出等)。仅当至少有一条 done 上传可用
+            url 反查时显示,否则按钮无意义直接隐藏。 */}
+        {onJumpToUploadHistory && hasAnyDoneUpload ? (
+          <button
+            type="button"
+            className="ghost"
+            onClick={() => onJumpToUploadHistory(rec)}
+            title="跳转到「上传历史」tab,定位包含本记录产物的上传批次"
+          >
+            📤 在上传历史中查看本批
+          </button>
+        ) : null}
         <button
           type="button"
           className="ghost"
@@ -685,6 +721,8 @@ const UploadsSection: React.FC<{
                   : '·';
           return (
             <div key={row.filePath} className="upload-row">
+              {/* R-WS-90 P5h — 24×24 缩略图,done → 远端 url,未传 → ffmpeg 抽帧 */}
+              <FileThumb filePath={row.filePath} remoteUrl={u?.url} fileName={fileName} size={24} />
               <span className={`upload-row-icon ${iconClass}`} aria-hidden>
                 {iconText}
               </span>

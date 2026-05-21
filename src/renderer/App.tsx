@@ -1335,6 +1335,7 @@ const App: React.FC = () => {
         uploadResult={uploadResult}
         setUploadResult={setUploadResult}
         uploadHistory={uploadHistory}
+        setView={setView}
         toasterHandleSetter={toaster.handleSetter}
       />
     </div>

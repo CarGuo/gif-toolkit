@@ -22,7 +22,7 @@ import type { UploadHistoryRecord, UploadStatus } from '../../shared/types';
 import { backendLabel, paginateHistory, UPLOAD_HISTORY_PAGE_SIZE } from './useUploadHistory';
 import { copyToClipboard } from './copyToClipboard';
 import { formatBytes } from './formatBytes';
-import { UploadResultModal } from './UploadResultModal';
+import { UploadResultModal, FileThumb } from './UploadResultModal';
 
 interface Props {
   history: UploadHistoryRecord[];
@@ -179,6 +179,8 @@ const UploadHistoryRow: React.FC<{ item: UploadHistoryRecord['items'][number] }>
   };
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
+      {/* R-WS-90 P5h — 24×24 缩略图,与卡片密度匹配 */}
+      <FileThumb filePath={item.filePath} remoteUrl={item.url} fileName={item.fileName} size={24} />
       <span style={{ width: 14 }}>{statusIcon(item.status)}</span>
       <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.fileName}>{item.fileName}</span>
       {/* R-WS-90 P5f — 文件大小 chip,与 UploadResultModal 风格一致。 */}

@@ -39,6 +39,7 @@ import type { UploadHistoryItem, UploadHistoryRecord, UploadStatus } from '../..
 import { backendLabel } from './useUploadHistory';
 import { copyToClipboard } from './copyToClipboard';
 import { formatBytes } from './formatBytes';
+import { useFileThumbnail } from './useFileThumbnail';
 
 type CopyFormat = 'markdown' | 'html' | 'bbcode' | 'url';
 
@@ -189,69 +190,9 @@ export const UploadResultModal: React.FC<Props> = ({ record, onClose }) => {
             gap: 4
           }}
         >
-          {record.items.map((it) => {
-            const badge = statusBadge(it.status);
-            const showBar = it.status === 'uploading' || it.status === 'pending';
-            const pct = typeof it.percent === 'number' ? it.percent : 0;
-            return (
-              <div
-                key={it.jobId || it.filePath}
-                style={{
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: 2,
-                  padding: '4px 6px',
-                  borderRadius: 3,
-                  background: 'rgba(255,255,255,0.03)',
-                  fontSize: 12
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <span style={{ color: badge.color, width: 16, textAlign: 'center', fontWeight: 600 }} aria-label={badge.label}>
-                    {badge.icon}
-                  </span>
-                  <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={it.filePath}>
-                    {it.fileName}
-                    {it.reused ? <span style={{ marginLeft: 6, color: '#7ce7c1' }}>♻️ 复用</span> : null}
-                  </span>
-                  {/* R-WS-90 P5f — 文件大小 chip:bytesTotal 已端到端
-                      持久化,这里渲染人类可读尺寸,disabled-row 同样显
-                      示(便于上传前后估算用量)。 */}
-                  {typeof it.bytesTotal === 'number' && it.bytesTotal > 0 ? (
-                    <span style={{
-                      color: 'var(--muted)',
-                      fontVariantNumeric: 'tabular-nums',
-                      fontSize: 11,
-                      padding: '0 6px',
-                      borderRadius: 999,
-                      border: '1px solid var(--border)',
-                      whiteSpace: 'nowrap'
-                    }} title={`${it.bytesTotal} bytes`}>
-                      {formatBytes(it.bytesTotal)}
-                    </span>
-                  ) : null}
-                  {showBar ? (
-                    <span style={{ color: 'var(--muted)', fontVariantNumeric: 'tabular-nums' }}>{pct.toFixed(0)}%</span>
-                  ) : null}
-                </div>
-                {showBar ? (
-                  <div style={{ height: 4, background: 'rgba(255,255,255,0.08)', borderRadius: 2, overflow: 'hidden' }}>
-                    <div style={{ height: '100%', width: `${pct}%`, background: badge.color, transition: 'width 120ms linear' }} />
-                  </div>
-                ) : null}
-                {it.status === 'done' && it.url ? (
-                  <div style={{ color: '#7ce7c1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={it.url}>
-                    {it.url}
-                  </div>
-                ) : null}
-                {it.status === 'failed' && it.error ? (
-                  <div style={{ color: '#ef5b6e', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={it.error}>
-                    {it.error}
-                  </div>
-                ) : null}
-              </div>
-            );
-          })}
+          {record.items.map((it) => (
+            <UploadResultRow key={it.jobId || it.filePath} item={it} />
+          ))}
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
@@ -268,6 +209,145 @@ export const UploadResultModal: React.FC<Props> = ({ record, onClose }) => {
           <button className="primary" onClick={copyAll} disabled={!text}>{copied ? '已复制 ✓' : `复制全部 (${FORMAT_LABEL[format]})`}</button>
         </div>
       </div>
+    </div>
+  );
+};
+
+/* ---------------------- R-WS-90 P5h — Per-row thumbnail ---------------------- */
+
+/**
+ * 上传结果详情里的单行渲染。
+ *
+ * 原本是一段巨型 `record.items.map((it) => <div…/>)` 内联在 modal 中,
+ * 但加缩略图后每行需要持有 `useFileThumbnail(filePath, url)` 的状态,
+ * 必须抽出独立组件 — react hooks 规则不允许在 map 回调里直接调用 hook。
+ *
+ * 缩略图渲染策略 (cf. useFileThumbnail JSDoc):
+ *   - done + url      → <img src={url}>,远端 CDN
+ *   - 其它态 + filePath → 主进程 firstFrame dataUrl (已有 IPC,扩展名白名单
+ *                        覆盖 .gif/.webp/.mp4/.mov/.webm/.mkv/.m4v)
+ *   - 失败/不支持      → 文件名扩展名 chip 占位 (例:".gif")
+ */
+const UploadResultRow: React.FC<{ item: UploadHistoryItem }> = ({ item }) => {
+  const it = item;
+  const badge = statusBadge(it.status);
+  const showBar = it.status === 'uploading' || it.status === 'pending';
+  const pct = typeof it.percent === 'number' ? it.percent : 0;
+  return (
+    <div
+      style={{
+        display: 'flex',
+        gap: 8,
+        padding: '4px 6px',
+        borderRadius: 3,
+        background: 'rgba(255,255,255,0.03)',
+        fontSize: 12,
+        alignItems: 'flex-start'
+      }}
+    >
+      <FileThumb filePath={it.filePath} remoteUrl={it.url} fileName={it.fileName} size={40} />
+      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ color: badge.color, width: 16, textAlign: 'center', fontWeight: 600 }} aria-label={badge.label}>
+            {badge.icon}
+          </span>
+          <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={it.filePath}>
+            {it.fileName}
+            {it.reused ? <span style={{ marginLeft: 6, color: '#7ce7c1' }}>♻️ 复用</span> : null}
+          </span>
+          {typeof it.bytesTotal === 'number' && it.bytesTotal > 0 ? (
+            <span
+              style={{
+                color: 'var(--muted)',
+                fontVariantNumeric: 'tabular-nums',
+                fontSize: 11,
+                padding: '0 6px',
+                borderRadius: 999,
+                border: '1px solid var(--border)',
+                whiteSpace: 'nowrap'
+              }}
+              title={`${it.bytesTotal} bytes`}
+            >
+              {formatBytes(it.bytesTotal)}
+            </span>
+          ) : null}
+          {showBar ? (
+            <span style={{ color: 'var(--muted)', fontVariantNumeric: 'tabular-nums' }}>{pct.toFixed(0)}%</span>
+          ) : null}
+        </div>
+        {showBar ? (
+          <div style={{ height: 4, background: 'rgba(255,255,255,0.08)', borderRadius: 2, overflow: 'hidden' }}>
+            <div style={{ height: '100%', width: `${pct}%`, background: badge.color, transition: 'width 120ms linear' }} />
+          </div>
+        ) : null}
+        {it.status === 'done' && it.url ? (
+          <div style={{ color: '#7ce7c1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={it.url}>
+            {it.url}
+          </div>
+        ) : null}
+        {it.status === 'failed' && it.error ? (
+          <div style={{ color: '#ef5b6e', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={it.error}>
+            {it.error}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+};
+
+/**
+ * 通用本地产物缩略图 — 也被 UploadHistoryPanel 的行 / 历史详情上传区
+ * 复用,所以 export 出去。
+ */
+export const FileThumb: React.FC<{
+  filePath: string | undefined | null;
+  remoteUrl?: string | undefined | null;
+  fileName?: string;
+  size?: number;
+}> = ({ filePath, remoteUrl, fileName, size = 36 }) => {
+  const { src, loading } = useFileThumbnail(filePath, remoteUrl);
+  const dot = (fileName || filePath || '').lastIndexOf('.');
+  const ext = dot > 0 ? (fileName || filePath || '').slice(dot).toLowerCase() : '';
+  const baseStyle: React.CSSProperties = {
+    width: size,
+    height: size,
+    flex: '0 0 auto',
+    borderRadius: 4,
+    border: '1px solid var(--border)',
+    background: 'var(--bg-2, rgba(255,255,255,0.04))',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+    fontSize: 10,
+    color: 'var(--muted)',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    userSelect: 'none'
+  };
+  if (src) {
+    return (
+      <img
+        src={src}
+        alt=""
+        loading="lazy"
+        decoding="async"
+        draggable={false}
+        style={{
+          ...baseStyle,
+          objectFit: 'cover'
+        }}
+        onError={(e) => {
+          // CDN/dataurl 偶尔失效时降级到占位符 — 把 src 清空让 img 失去图,
+          // 父级 styling + 下一次 render 的占位文字接管。
+          (e.currentTarget as HTMLImageElement).style.display = 'none';
+        }}
+      />
+    );
+  }
+  return (
+    <div style={baseStyle} title={fileName || filePath || ''} aria-hidden="true">
+      {loading ? '…' : (ext.replace('.', '') || '?')}
     </div>
   );
 };
