@@ -35,10 +35,10 @@
 
 ## 反向断言
 
-- ❌ **不允许**直接用 `media.pageUrl` 喂 yt-dlp（B 站文章页 URL 经常带各种 tracking query，generic extractor 抓错视频）
-- ❌ **不允许**`sanitizeHeaders` 漏掉 `Referer`（B 站 403）
-- ❌ **不允许**`pickBestFormat` 选 `m3u8_native`（B 站默认会暴露 m3u8 + flv + mp4 多种 protocol，选错会导致 axios 拿到清单文本）
-- ❌ **不允许**resolver 失败时把 `media` 从 sniff result 删除（用户可能是 yt-dlp 临时抽风，留卡片让用户重试）
+- No **不允许**直接用 `media.pageUrl` 喂 yt-dlp（B 站文章页 URL 经常带各种 tracking query，generic extractor 抓错视频）
+- No **不允许**`sanitizeHeaders` 漏掉 `Referer`（B 站 403）
+- No **不允许**`pickBestFormat` 选 `m3u8_native`（B 站默认会暴露 m3u8 + flv + mp4 多种 protocol，选错会导致 axios 拿到清单文本）
+- No **不允许**resolver 失败时把 `media` 从 sniff result 删除（用户可能是 yt-dlp 临时抽风，留卡片让用户重试）
 
 ---
 
@@ -50,7 +50,7 @@ node /tmp/giftk-resolver-e2e.js
 
 预期输出包含：
 ```
-[case*] Bilibili   https://www.bilibili.com/video/BV1GJ411x7h7 ... OK 206  852x480 mp4 ct=video/mp4
+[case*] Bilibili https://www.bilibili.com/video/BV1GJ411x7h7 ... OK 206 852x480 mp4 ct=video/mp4
 ```
 
 `OK 206` 表示 axios `Range: bytes=0-1023` 探测请求被 B 站 CDN 接受，证明：

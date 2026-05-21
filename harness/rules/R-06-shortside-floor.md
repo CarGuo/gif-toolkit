@@ -18,8 +18,8 @@ longSideFloor = max(minSide, min(longestSide, fromShort))
 - 在 Phase C/D 缩边时:`newLongest = max(newLongest, longSideFloor)`
 
 ## 反例
-- ❌ Phase C 直接 `newLong = oldLong * 0.85`,不算 longSideFloor
-- ❌ 把 AspectRatioConstraintError 改成 console.warn 然后继续压
+- No Phase C 直接 `newLong = oldLong * 0.85`,不算 longSideFloor
+- No 把 AspectRatioConstraintError 改成 console.warn 然后继续压
 
 ## 关联场景
 - [SC-02](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-02-aspect-ratio-early-fail.md)

@@ -32,10 +32,10 @@
 
 ## 反向断言
 
-- ❌ **不允许** renderer 把空数组 `selectedSegments=[]` 传给 main(会被 main 内 sanitize 折叠成 undefined → 行为变成"全跑",和"取消所有勾选"的用户意图相反;PreviewPanel 应在最后一段被取消时落到 `[0]` 兜底或 disable 取消按钮)。
-- ❌ **不允许** processor.ts 直接计算 segments 数组(必须走两个纯函数,否则单测无法覆盖,违反 R-16)。
-- ❌ **不允许** 自动注入 `[0]` 时不在日志中提示用户(用户会困惑"为什么 90s 视频只输出了 1 个 GIF")。
-- ❌ **不允许** 文件名中的 `s${seg.index}` 用密集 i 替代(选 `[0, 2]` 时输出文件必须是 `.s0.gif` + `.s2.gif`,保留可识别性,而不是 `.s0.gif` + `.s1.gif`)。
+- No **不允许** renderer 把空数组 `selectedSegments=[]` 传给 main(会被 main 内 sanitize 折叠成 undefined → 行为变成"全跑",和"取消所有勾选"的用户意图相反;PreviewPanel 应在最后一段被取消时落到 `[0]` 兜底或 disable 取消按钮)。
+- No **不允许** processor.ts 直接计算 segments 数组(必须走两个纯函数,否则单测无法覆盖,违反 R-16)。
+- No **不允许** 自动注入 `[0]` 时不在日志中提示用户(用户会困惑"为什么 90s 视频只输出了 1 个 GIF")。
+- No **不允许** 文件名中的 `s${seg.index}` 用密集 i 替代(选 `[0, 2]` 时输出文件必须是 `.s0.gif` + `.s2.gif`,保留可识别性,而不是 `.s0.gif` + `.s1.gif`)。
 
 ---
 

@@ -18,9 +18,9 @@
 
 | 站点 | L1 (cheerio) | L2 (正则) | L3 (headless) | 解释 |
 |---|---|---|---|---|
-| 知乎专栏 | ✅ | — | — | 标准 `<img>.gif` |
-| Android Developers Blog | ✅ | — | — | 标准 `<iframe>` |
-| OpenAI ChatGPT 广告页 | ❌(0 iframe)| ✅ vimeo embed | ❌(被 Cloudflare Turnstile 拦) | Next.js + JSON 序列化 + Turnstile |
+| 知乎专栏 | Yes | — | — | 标准 `<img>.gif` |
+| Android Developers Blog | Yes | — | — | 标准 `<iframe>` |
+| OpenAI ChatGPT 广告页 | No(0 iframe)| Yes vimeo embed | No(被 Cloudflare Turnstile 拦) | Next.js + JSON 序列化 + Turnstile |
 
 只有 L1 的实现会让 OpenAI 这类页面**永远嗅不出**;只有 L1+L3 的实现会被 Turnstile 拦死;**L2 是 SPA 时代的真正主力**。
 
@@ -30,10 +30,10 @@
 - normaliseEmbed 的替换顺序必须是 `\u0026` → `&amp;` → `&`,顺序错会留 `&amp;` 残渣。
 
 ## 反例
-- ❌ 仅用 `cheerio.load(html); $('iframe')` 然后报 0 项就交付。
-- ❌ 用 `noMedia && looksLikeCsr` 当 fallback 触发条件 — Cloudflare 给的 200+11KB challenge 既不像 `__NEXT_DATA__` 也不像 stub。
-- ❌ headless 不关 QUIC,在中国大陆机器跑会大量 `handshake failed; net_error -100`。
-- ❌ 命中 Turnstile 不报警,让用户以为页面"真没视频"。
+- No 仅用 `cheerio.load(html); $('iframe')` 然后报 0 项就交付。
+- No 用 `noMedia && looksLikeCsr` 当 fallback 触发条件 — Cloudflare 给的 200+11KB challenge 既不像 `__NEXT_DATA__` 也不像 stub。
+- No headless 不关 QUIC,在中国大陆机器跑会大量 `handshake failed; net_error -100`。
+- No 命中 Turnstile 不报警,让用户以为页面"真没视频"。
 
 ## 关联场景 / 文档
 - [SC-04 iframe-embed-vimeo](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-04-iframe-embed-vimeo.md)

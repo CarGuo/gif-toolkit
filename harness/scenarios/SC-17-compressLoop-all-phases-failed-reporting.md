@@ -42,10 +42,10 @@
 
 ## 反向断言
 
-- ❌ **不允许**任何 swallow 处只 `log()` 而不 push `phaseFailures`(用户永远看不到诊断)。
-- ❌ **不允许**`allPhasesFailed === true` 时 task 仍 emit `done`(必须 `failed`)。
-- ❌ **不允许**warning 文案不区分 "试过了打不下来" 和 "什么都没成功"(用户不会知道发生了什么)。
-- ❌ **不允许**新增 phase 后忘记把对应 catch 接到 `recordPhaseFailure`(R-04 + R-08 双重违反)。
+- No **不允许**任何 swallow 处只 `log()` 而不 push `phaseFailures`(用户永远看不到诊断)。
+- No **不允许**`allPhasesFailed === true` 时 task 仍 emit `done`(必须 `failed`)。
+- No **不允许**warning 文案不区分 "试过了打不下来" 和 "什么都没成功"(用户不会知道发生了什么)。
+- No **不允许**新增 phase 后忘记把对应 catch 接到 `recordPhaseFailure`(R-04 + R-08 双重违反)。
 
 ---
 

@@ -14,8 +14,8 @@
 - [sanitizeOptions](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/index.ts) 必须 clamp:`soft = min(soft, hard)`、`hard = max(soft, hard)`
 
 ## 反例
-- ❌ UI 允许 soft > hard
-- ❌ Phase D 命中 fallback 后还把日志标 `(best)`
+- No UI 允许 soft > hard
+- No Phase D 命中 fallback 后还把日志标 `(best)`
 
 ## 关联场景
 - [SC-03](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-03-soft-vs-hard-target.md)

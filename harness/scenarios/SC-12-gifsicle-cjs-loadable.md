@@ -26,5 +26,5 @@
 - [package.json gifsicle pin](file:///Users/guoshuyu/workspace/gif-toolkit/package.json)
 
 ## 反例
-- ❌ `gifsicle@^5.x` 是 ESM,在 CommonJS 主进程会 `ERR_REQUIRE_ESM`,所有 GIF 任务直接挂。
-- ❌ 不做 `printPaths()` 自检 — 用户安装失败时只看到模糊错误,不知道是哪个二进制坏了。
+- No `gifsicle@^5.x` 是 ESM,在 CommonJS 主进程会 `ERR_REQUIRE_ESM`,所有 GIF 任务直接挂。
+- No 不做 `printPaths()` 自检 — 用户安装失败时只看到模糊错误,不知道是哪个二进制坏了。

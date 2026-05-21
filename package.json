@@ -123,7 +123,7 @@
       "node_modules/file-uri-to-path/**"
     ],
     "mac": {
-      "icon": "build/icon.png",
+      "icon": "build/icon.icns",
       "identity": null,
       "target": [
         {
@@ -155,7 +155,7 @@
       ]
     },
     "linux": {
-      "icon": "build/icon.png",
+      "icon": "build/icons",
       "category": "Graphics",
       "maintainer": "gif-toolkit <gif-toolkit@users.noreply.github.com>",
       "target": [

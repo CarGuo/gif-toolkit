@@ -1,95 +1,172 @@
 <p align="center">
-  <img src="./build/icon.png" alt="Gif Toolkit logo" width="128" />
+  <img src="./build/icon.png" alt="Gif Toolkit logo" width="160" />
 </p>
 
 <h1 align="center">Gif Toolkit</h1>
 
 <p align="center">
-  <b>English</b> · <a href="./README.md">简体中文</a>
+  <b>A local, cross-platform desktop app that turns "fetch web media → trim → convert to GIF / WebP → fit the platform's hard limit → grab a Markdown link" into just a few clicks. Nothing leaves your machine.</b>
 </p>
 
 <p align="center">
-  <b>Cross-platform desktop app · macOS / Windows / Linux</b><br/>
-  A one-stop pipeline that goes <b>scrape → video-to-GIF/WebP → adaptive compression → image hosting upload</b>,<br/>
-  turning "feed me an article URL, give me a set of size-compliant GIFs and a ready-to-paste Markdown snippet" into a few clicks.
+  <b>English</b> · <a href="./README.md">简体中文</a>
+  <br/><br/>
+  <img alt="platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-1f6feb">
+  <img alt="electron" src="https://img.shields.io/badge/Electron-31-2b3137">
+  <img alt="react" src="https://img.shields.io/badge/React-18-149eca">
+  <img alt="typescript" src="https://img.shields.io/badge/TypeScript-5-3178c6">
+  <img alt="license" src="https://img.shields.io/badge/license-MIT-2ea44f">
 </p>
-
-Gif Toolkit solves a very specific pain point — every content platform enforces strict size caps on animated images (WeChat MP ≤ 10 MB, Slack / Weibo ≤ 5 MB, Discord ≤ 8 MB, …), and manually tweaking dimensions, frame rate, and palette is tedious. This tool automates the whole chain. **It runs offline, requires no login, and never uploads any data to third-party servers.**
 
 ---
 
-## 📸 Screenshots
+## What is this
+
+Anyone who ships GIFs into Slack, Discord, X, blogs or WeChat hits the same wall: **every platform has its own hard caps** (WeChat 10 MB AND <= 300 frames, Weibo 5 MB, Discord 8 MB, Slack 5 MB ...). Hand-tuning side length, fps and palette every time is tedious and never reproducible.
+
+Gif Toolkit automates the whole pipeline:
+
+- Paste an article URL and **auto-sniff** every GIF / video / embed inside (Bilibili / YouTube / X / TikTok / Instagram, ...)
+- **Convert video → GIF / WebP** with a two-pass palette + Lanczos scaling + Bayer dithering — quality stays predictable
+- **Four-phase adaptive compression** lands the output between your "soft target" and "hard target" — never silently emits an over-budget file
+- One-click upload to your own host / GitHub / Qiniu / Aliyun OSS / Tencent COS, **auto-generates a Markdown link** ready to paste
+
+Everything runs locally. **Offline-friendly, no login, nothing sent to any third-party server.**
+
+---
+
+## Three pains you have probably hit
+
+### 1. "Video → GIF" is either blurry or huge
+
+`ffmpeg -i x.mp4 out.gif` ships output that is either unreadable text, or 30 MB. Hand-tuning `palettegen / paletteuse / lossy` a few times and most people give up.
+
+> Gif Toolkit gives you **two-pass palette + binary-search lossy** out of the box, aiming to land **exactly** on your target size. Hits the target, stop. Misses, geometrically shrink the long side. Still misses, mark `skipped`. **It will never quietly hand you an over-budget file.**
+
+### 2. WeChat's invisible 300-frame cap
+
+WeChat's editor enforces two unrelated hard caps on GIFs: **frame count <= 300** and a **clean header** (no diff-frame / comment / offset frame). Counter-intuitively, `gifsicle -O3` adds diff-frames back. So "I compressed it to 1 MB and WeChat still rejects it" is a trap nearly everyone runs into once.
+
+> Gif Toolkit ships a dedicated **WeChat-safe sanitize sub-pipeline**: gifsicle probe → ffmpeg `-gifflags -transdiff-offsetting` full re-encode → gifsicle `-O0 --no-extensions --no-comments --lossy=80`. Output has frames <= 300, variants=1, offset=0 — **drops straight into WeChat's editor**.
+
+### 3. Sniffing fails — JS, login walls, Cloudflare ...
+
+Plain `axios + cheerio` cannot reach pages that need JS rendering, login cookies, or pages gated by Cloudflare's JA3 fingerprinting. Those sites happen to be the richest sources of animated content.
+
+> Gif Toolkit offers a **5-tier sniffer cascade**, ramping up only when needed:
+>
+> ![Sniffer cascade](./docs/images/sniffer-cascade.png)
+>
+> No matter how locked down the page is, one of the tiers usually gets you the direct URL.
+
+---
+
+## Screenshots
 
 <table>
   <tr>
-    <td width="50%"><img src="./docs/images/screenshots/01-home.png" alt="Home: URL sniff + media grid + options + task table" /></td>
-    <td width="50%"><img src="./docs/images/screenshots/02-toolbox.png" alt="Toolbox: 9 sub-tools + drop zone + params + history" /></td>
+    <td width="50%"><img src="./docs/images/screenshots/01-home.png" alt="Home: URL sniffer + media grid + options + task table" /></td>
+    <td width="50%"><img src="./docs/images/screenshots/02-toolbox.png" alt="Toolbox: 10 sub-tools + drag area + options" /></td>
   </tr>
   <tr>
-    <td align="center"><sub>① Home: URL → Sniff → Media grid → Batch</sub></td>
-    <td align="center"><sub>② Toolbox: Video→GIF / WebP / Optimize / Trim / Crop …</sub></td>
+    <td align="center"><sub><b>Home</b> · paste URL → sniff → tick → batch</sub></td>
+    <td align="center"><sub><b>Toolbox</b> · 10 standalone tools, drop a file and go</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="./docs/images/screenshots/03-history.png" alt="History tab: sniff + artifact history in one place" /></td>
-    <td width="50%"><img src="./docs/images/screenshots/04-uploads.png" alt="Upload history tab: hosting records + Markdown copy" /></td>
+    <td width="50%"><img src="./docs/images/screenshots/03-history.png" alt="History tab: sniffs and outputs in one place" /></td>
+    <td width="50%"><img src="./docs/images/screenshots/04-uploads.png" alt="Uploads tab: image-host log + Markdown copy" /></td>
   </tr>
   <tr>
-    <td align="center"><sub>③ History: every sniff round + artifacts + logs persisted</sub></td>
-    <td align="center"><sub>④ Upload history: 5 backends + hash dedup + Markdown</sub></td>
+    <td align="center"><sub><b>History</b> · every sniff / output / log archived</sub></td>
+    <td align="center"><sub><b>Uploads</b> · 5 hosts + hash dedup + Markdown</sub></td>
   </tr>
 </table>
 
 ---
 
-## ✨ Highlights
+## Quickstart
 
-### 🔍 One-click scraping
-- Paste any page URL; the tool detects GIFs, videos, and embedded players (YouTube / Bilibili / Vimeo / X / TikTok / Instagram, …).
-- Four scraping modes, ordered by anti-bot resistance:
-  - **Plain URL scrape** — fastest path, ideal for blogs, news sites, direct links.
-  - **Embedded WebView** — handles login / interaction-required sites.
-  - **Real Chrome** — drives your installed Chrome / Edge / Brave to bypass Cloudflare-class bot walls.
-  - **yt-dlp direct** — covers 1900+ video sites without launching any browser.
-- **Offline import**: `.mhtml`, `.html + _files/`, single files, or drag-and-drop. Works even if the original site is offline.
+### Three steps
 
-### 🎞️ Video → GIF / animated WebP
-- Two-pass `palettegen + paletteuse` + Lanczos scaling + Bayer dithering for stable visual quality.
-- Timeline preview with key-frame thumbnails; drag handles to pick a segment; freely drag a crop rectangle on the source frame.
-- Long videos are auto-segmented; you can tick 0–20s / 20–40s / … and export each as a separate GIF.
+```bash
+git clone <repo-url>
+cd gif-toolkit
+npm install     # auto-prepares ffmpeg / gifsicle / sharp / yt-dlp
+npm run dev     # main + renderer with hot reload
+```
 
-### ⚙️ Adaptive compression pipeline
-A four-phase progressive strategy. On average ~12 gifsicle invocations are enough to land on the target size:
+After the app launches:
 
-1. **Resize first** — clamp the long edge to `maxWidth`.
-2. **Adaptive lossy** — binary-search lossy levels, aiming for `softMaxBytes` (default 2 MB).
-3. **Geometric shrink** — keep short edge ≥ floor while progressively reducing resolution.
-4. **Fallback** — if it still exceeds `maxBytes`, mark the task `skipped` instead of emitting an over-sized file.
+1. Paste a page URL (any page with GIFs / videos / embeds) into the address bar and click **Sniff**
+2. Tick what you want from the media grid; tweak `softMaxBytes` / `maxWidth` / `fps` / `colors`
+3. Click **Run batch**, wait for the task table; switch to the **Uploads** tab to push to a host and copy the Markdown link
 
-Tunable knobs include `maxBytes` / `softMaxBytes` / `maxWidth` / `minSize` / `fps` / `colors` / `concurrency` / `maxSegmentSec`. Built-in presets cover WeChat MP, Zhihu, Weibo, etc.
+### Packaging
 
-### 🧰 GIF / WebP toolbox
-The "Toolbox" tab offers 10 standalone tools that work on any local file you drop in:
+```bash
+npm run package:mac     # macOS: dmg + zip (Intel + Apple Silicon)
+npm run package:win     # Windows: NSIS x64
+npm run package:linux   # Linux: AppImage / deb / tar.gz
+```
+
+> No Apple notarization / Authenticode / Linux code signing yet. First launch may show "unidentified developer" — the app surfaces a toast with right-click-open / SmartScreen-skip instructions.
+
+---
+
+## Toolbox (10 standalone tools)
+
+The **Toolbox** tab exposes 10 standalone tools, each accepting drag-and-dropped local files for batch use:
 
 | Tool | Purpose |
 | --- | --- |
-| Video → GIF | Convert + compress |
-| Video → WebP | Convert to animated WebP |
+| Video → GIF | Video to GIF + adaptive compression |
+| Video → WebP | Video to animated WebP |
 | GIF Resize | Proportional width scaling |
 | GIF Optimize | gifsicle `-O3` / lossy / colors / dither |
-| Trim | Lossless time-range cut |
-| Speed | 0.25× – 4× playback speed |
-| Reverse | Play in reverse |
+| GIF WeChat-safe | 3-step sanitize, output drops straight into WeChat (<= 300 frames / clean header) |
+| Trim | Lossless time-range cutting |
+| Speed | 0.25x ~ 4x speed change |
+| Reverse | Reverse playback |
 | Rotate | Rotate + flip |
-| Crop | Visual crop selector |
-| GIF ↔ WebP | Convert between animated formats |
+| Crop | Visual rectangular crop |
+| GIF ↔ WebP | Convert between the two animation formats |
 
-### 📦 Batch processing + history
-- Single-click batch run from the home screen, with the ability to enqueue more while a batch is running. Long videos surface a confirmation modal listing each segment.
-- Scrape and processing history are persisted to SQLite. You can re-run a single item or a whole batch, open the output directory, and inspect the artifact list.
-- Each run keeps a complete operation log that can be exported to `.log` or `.json`. This makes "why did it fail to compress?" or "why are there duplicates?" easy to audit.
+---
 
-### ☁️ Image hosting upload
-Five built-in backends, configurable in parallel:
+## Adaptive compression pipeline (why outputs are stable)
+
+Four-phase progressive strategy; on average about 12 gifsicle calls land the target size:
+
+![Four-phase adaptive compression](./docs/images/compression-1-targets.png)
+
+1. **Resize first** — bring the long side down to `maxWidth` (often enough on its own)
+2. **Adaptive lossy** — binary-search lossy in `[0, 200]`, aim for `softMaxBytes` (default 2 MB)
+3. **Geometric shrink** — guard `minSize` short-side floor, multiply long side by 0.85 repeatedly
+4. **Hard fallback** — if still > `maxBytes` (default 4 MB), mark `skipped`. **Never emit an over-budget file.**
+
+> Full state machine, hit conditions and emit-signal contract: see [docs/compression-pipeline.md](./docs/compression-pipeline.md). The WeChat-safe sub-pipeline is documented in section 8 of the same doc.
+
+Tunables: `maxBytes` / `softMaxBytes` / `maxWidth` / `minSize` / `fps` / `colors` / `concurrency` / `maxSegmentSec`. Built-in presets for WeChat / Zhihu / Weibo etc.
+
+---
+
+## Five-tier sniffer cascade (why fetching works)
+
+| Tier | Implementation | Suits |
+| --- | --- | --- |
+| (1) URL sniff | main process axios + cheerio | Plain blogs / news / direct links / `og:video` exposed |
+| (2) Embedded WebView | `WebContentsView` + `webRequest.onBeforeRequest` | Sites needing login / cookies / OAuth / light interaction |
+| (3) Real Chrome sniff | spawn local Chrome / Edge / Brave + chrome-remote-interface (CDP) | Cloudflare / JA3-gated sites |
+| (4) yt-dlp direct | ytdlp-nodejs `--dump-single-json` | 1900+ video sites (Bilibili / YouTube / X / TikTok / Instagram ...) |
+| (5) Offline import | `.mhtml` / `.html + _files/` / single file / drag drop | Site is dead / network is down / page already saved |
+
+> Sniffer rules, dedupKey algorithm and embed-provider list: see [docs/sniffer-cascade.md](./docs/sniffer-cascade.md) and [docs/sniffer-rules.md](./docs/sniffer-rules.md).
+
+---
+
+## Image hosting
+
+5 backends built in, configurable, multiple per backend:
 
 - **Self-hosted Web** (custom signed endpoint)
 - **GitHub Contents API**
@@ -97,144 +174,121 @@ Five built-in backends, configurable in parallel:
 - **Aliyun OSS**
 - **Tencent COS**
 
-A SHA-256 hash cache (30-day TTL) reuses the previously uploaded URL when the same file hits the same backend, saving bandwidth and quota. After upload the tool generates Markdown snippets that you can paste straight into your article. All tokens / secrets are masked in the UI and **never written to logs**.
+File-hash dedup with 30-day TTL — same file hits the cache and reuses the remote URL, saving bandwidth and quota. Markdown links are auto-generated and one-click copyable. **Tokens / secrets are masked everywhere and never written to logs.**
 
-### 🌐 Cross-platform support
+---
+
+## Cross-platform
 
 | Capability | macOS | Windows | Linux |
 | --- | --- | --- | --- |
-| Installer | ✅ dmg / zip (Intel + Apple Silicon) | ✅ NSIS x64 | ⚠️ AppImage / deb / tar.gz (x64 + arm64, not yet validated on real hardware) |
-| FFmpeg / Sharp / yt-dlp | ✅ | ✅ | ✅ (armv7 / Alpine musl require manual setup) |
-| Real-Chrome scrape | ✅ Chrome / Canary / Edge / Brave / Chromium | ✅ Program Files / per-user paths | ⚠️ Includes Snap / Flatpak / .deb / .rpm |
-| Startup capability probe | ✅ | ✅ | ✅ |
+| Installer | dmg / zip (Intel + Apple Silicon) | NSIS x64 | AppImage / deb / tar.gz (x64 + arm64) |
+| FFmpeg / Sharp / yt-dlp | Yes | Yes | Yes (armv7 / Alpine musl is on you) |
+| Real-Chrome sniff | Chrome / Canary / Edge / Brave / Chromium | Program Files / per-user paths | Snap / Flatpak / .deb / .rpm |
+| Capability probing | Yes | Yes | Yes |
+| App Icon | `.icns` (10-tier iconset) | `.ico` (7-tier) | `.png` 8 sizes |
 
-> Apple notarization, Authenticode signing, and Linux code signing are not configured yet. On first launch you may need to right-click → Open (macOS) or skip SmartScreen (Windows); the app surfaces platform-specific instructions via toasts.
-
----
-
-## 🚀 Getting started
-
-### End users (prebuilt)
-
-> No official release is published yet. Build from source per the section below.
-
-### Run from source
-
-```bash
-git clone <repo-url>
-cd gif-toolkit
-npm install            # Pulls ffmpeg / gifsicle / sharp / yt-dlp binaries
-npm run dev            # Dev mode (main + renderer with hot reload)
-```
-
-### Package
-
-```bash
-npm run package:mac    # macOS: dmg + zip (Intel + Apple Silicon)
-npm run package:win    # Windows: NSIS x64
-npm run package:linux  # Linux: AppImage / deb / tar.gz
-```
-
-### Workflow
-
-1. Launch the app and paste a URL containing GIFs / videos into the address bar.
-2. Pick a scrape mode (the default "Plain URL" works for most blogs) and click **Start Sniff**.
-3. Tick the desired media in the grid, adjust `maxWidth` / `softMaxBytes` etc. if needed.
-4. Click **Start Process** and wait for the task table to drain.
-5. Configure an image-hosting backend in the "Upload History" tab, then click **⚡ Upload all artifacts** and copy the generated Markdown link.
+> The icon pipeline uses Apple HIG's 824 / 1024 safe area + squircle rounding. All distribution artefacts are produced from a single source by [scripts/normalize-app-icon.mjs](./scripts/normalize-app-icon.mjs) with **zero new npm dependencies**. See [docs/architecture.md § 8](./docs/architecture.md).
 
 ---
 
-## 🛠️ Tech stack
+## Stack
 
 | Layer | Tech |
 | --- | --- |
 | Framework | Electron 31 + React 18 + TypeScript 5 + Vite 5 |
-| Scraping | axios + cheerio (main process, no CORS limits) |
+| Fetching | axios + cheerio (main process, bypassing CORS) + chrome-remote-interface (CDP) |
 | Video processing | ffmpeg-static + ffprobe-static + sharp 0.33 |
 | GIF optimization | gifsicle 5.3 |
-| Direct-link resolver | yt-dlp (bundled, Unlicense) |
+| Direct-link extraction | yt-dlp (bundled, Unlicense) |
 | Persistence | better-sqlite3 |
 | Queue | p-queue (default concurrency 3, configurable 1–8) |
-| Tests | vitest + happy-dom + @testing-library/react |
+| Tests | vitest + happy-dom + @testing-library/react + playwright (e2e) |
 
 ---
 
-## 🔒 Security & privacy
-
-- `contextIsolation=true` and `nodeIntegration=false` — the renderer has no Node access.
-- Only an explicit IPC whitelist is exposed; downloads, parsing, transcoding, and uploads happen in the main process.
-- Every URL is processed locally. **Nothing is sent to third-party servers.**
-- yt-dlp link resolution forwards only a whitelist of headers (User-Agent / Referer / Origin / Range, …); Authorization / Cookie are never passed through. Signed URLs and tokens are redacted before any log line is written.
-- Backend tokens / secrets render as `••••••` in the UI with masked-merge persistence and **never appear in logs**.
-
----
-
-## ❓ FAQ
-
-**Q: Why does direct-link scraping fail on some sites?**
-A: Some sites do TLS / cookie fingerprinting against unauthenticated devices. Switch to "Real Chrome" mode and tick "Use my real Chrome profile" so Cloudflare-class systems treat you as a normal user.
-
-**Q: My GIF still exceeds the size target — what now?**
-A: The pipeline marks the task `skipped` rather than emitting an oversized file. You can raise `maxBytes`, or use the toolbox to manually re-compress with more aggressive lossy / colors settings.
-
-**Q: Can I use it offline?**
-A: Yes. yt-dlp, ffmpeg, gifsicle, and sharp ship with the app. Only the "scrape an online URL" step itself needs the network.
-
-**Q: Do GitHub-hosted images count as code?**
-A: No. GitHub Contents API returns raw image URLs you can drop straight into Markdown without affecting the repository code.
-
----
-
-## 🏗️ Architecture
+## Architecture portal
 
 Process topology (Renderer ↔ Preload ↔ Main):
 
 ![Architecture · process topology](./docs/images/architecture-1-topology.png)
 
-End-to-end data flow (URL → sniff → 4-Phase compression → artifacts):
+End-to-end data flow (URL → sniff → 4-Phase compression → output):
 
 ![Architecture · end-to-end data flow](./docs/images/architecture-2-dataflow.png)
 
-> Every architecture diagram is a derived PNG generated from a mermaid source. To edit, change the mermaid block in [docs/architecture.md](./docs/architecture.md) and run `npm run docs:render` to re-export the PNG.
+Concurrency and cancellation propagation (per-task `AbortController`, signal threaded down to ffmpeg child processes):
+
+![Architecture · concurrency and cancellation](./docs/images/architecture-6-cancel.png)
+
+> Every architecture diagram is a derived PNG generated from a mermaid block. To change a diagram, edit the mermaid block in [docs/architecture.md](./docs/architecture.md) / [docs/compression-pipeline.md](./docs/compression-pipeline.md) / [docs/sniffer-cascade.md](./docs/sniffer-cascade.md), then run `npm run docs:render`.
 
 ---
 
-## 📚 Documentation
+## Security & privacy
+
+- `contextIsolation=true` / `nodeIntegration=false` — the renderer has **zero** Node capability
+- Only whitelisted IPC is exposed; all download / parse / encode / upload happens in the main process
+- Any URL is processed **locally only** and **never sent to any third-party server**
+- yt-dlp passes through only an allow-listed header set (User-Agent / Referer / Origin / Range, ...) — Authorization / Cookie are explicitly **not** forwarded; signed URLs and tokens are auto-masked before anything is logged
+- Image-host tokens / secrets render as `••••••` with masked-merge in the UI; persisted as a separately encrypted field; **never enter logs**
+
+---
+
+## FAQ
+
+**Q: Why can't I sniff a particular video URL?**
+A: The site is probably TLS-fingerprinting / cookie-checking. Switch to the "Real Chrome sniff" tier and tick "use my real Chrome profile" so Cloudflare etc. recognise you as a normal user.
+
+**Q: Some GIFs still exceed my target after compression. What now?**
+A: The tool marks them `skipped` instead of emitting an oversized file. Either raise `maxBytes`, or hand-tune lossy / colors more aggressively in the Toolbox.
+
+**Q: WeChat still says "image failed to load"?**
+A: Run **GIF WeChat-safe** in the Toolbox. It forces a full re-encode with `-transdiff-offsetting` and uses `gifsicle -O0`. Full reasoning in [docs/compression-pipeline.md § 8](./docs/compression-pipeline.md).
+
+**Q: Does it work offline?**
+A: Yes. yt-dlp / ffmpeg / gifsicle / sharp are all bundled. The only step that requires network is "sniff a live URL".
+
+**Q: Will GitHub treat uploaded images as code?**
+A: No. The GitHub Contents API returns raw URLs you embed in Markdown. They are unrelated to your code commits.
+
+---
+
+## Documentation
 
 For developers / contributors:
 
-- [Architecture overview](./docs/architecture.md)
-- [Compression pipeline](./docs/compression-pipeline.md)
-- [Sniffer cascade](./docs/sniffer-cascade.md)
+- [Architecture overview](./docs/architecture.md) — process topology, data flow, IPC sequence, 4-Phase state machine, cross-platform icon pipeline, concurrency / cancellation
+- [Compression pipeline](./docs/compression-pipeline.md) — 4-Phase hit conditions, emit signals, WeChat-safe sub-pipeline
+- [Sniffer cascade](./docs/sniffer-cascade.md) — full cascade diagram + per-tier engineering notes
 - [Sniffer rules](./docs/sniffer-rules.md)
 - [yt-dlp embed resolver](./docs/embed-resolver.md)
 - [IPC contract](./docs/ipc-contract.md)
 - [Troubleshooting](./docs/troubleshooting.md)
-- [SQLite persistence & native ABI](./docs/R-80-SQLITE-NOTES.md)
+- [SQLite persistence and native ABI](./docs/R-80-SQLITE-NOTES.md)
 
-Engineering discipline (rules / scenarios / checklists): see the [harness/](./harness/) directory.
-Contribution norms: [AGENTS.md](./AGENTS.md).
+Engineering discipline (rules / scenarios / checklists): see [harness/](./harness/).
+Submission rules for new features and bug fixes: see [AGENTS.md](./AGENTS.md).
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
-Issues / PRs are welcome. Before submitting, please read:
+Issues and PRs welcome. Before submitting please read:
 
-1. [AGENTS.md](./AGENTS.md) — project-wide hard rules.
-2. [harness/checklists/pr-checklist.md](./harness/checklists/pr-checklist.md) — pre-submit checklist.
-3. [harness/scenarios/](./harness/scenarios/) — accumulated regression scenarios.
+1. [AGENTS.md](./AGENTS.md) — project-level hard rules
+2. [harness/checklists/pr-checklist.md](./harness/checklists/pr-checklist.md) — pre-submit self-check
+3. [harness/scenarios/](./harness/scenarios/) — already-captured regression scenarios
 
-Every new feature or bug fix must ship with corresponding tests.
+Every new feature / bug fix must ship with tests.
 
 ---
 
 ## Acknowledgements
 
-- [ezgif.com](https://ezgif.com/) — original feature / interaction reference
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) — de-facto standard for direct-link resolution
-- [ffmpeg](https://ffmpeg.org/) / [gifsicle](https://www.lcdf.org/gifsicle/) / [sharp](https://sharp.pixelplumbing.com/) — the video & GIF processing trio
+- [ezgif.com](https://ezgif.com/) — original feature & UX reference
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp) — de-facto standard for direct-link extraction
+- [ffmpeg](https://ffmpeg.org/) / [gifsicle](https://www.lcdf.org/gifsicle/) / [sharp](https://sharp.pixelplumbing.com/) — the three pillars of video & GIF processing
 
 ---
 

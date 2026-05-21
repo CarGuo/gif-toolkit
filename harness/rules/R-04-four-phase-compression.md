@@ -20,8 +20,8 @@
 - 在 [src/main/processor.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor.ts) `compressLoop` 顶层保持 4 段清晰边界,不要把它揉成一团
 
 ## 反例
-- ❌ "我把 Phase B 和 Phase C 合并成一个统一搜索,这样更快" ← 失去分级,违反 R-05
-- ❌ "Phase B 直接二分到 lossy=200" ← 自适应起点是 ROI 的核心
+- No "我把 Phase B 和 Phase C 合并成一个统一搜索,这样更快" ← 失去分级,违反 R-05
+- No "Phase B 直接二分到 lossy=200" ← 自适应起点是 ROI 的核心
 
 ## 关联场景
 - [SC-02](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-02-aspect-ratio-early-fail.md)

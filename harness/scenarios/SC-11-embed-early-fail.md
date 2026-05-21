@@ -16,5 +16,5 @@
 - [R-09 iframe-embed-detect-only](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-09-iframe-embed-detect-only.md)
 
 ## 反例
-- ❌ sanitizeMedia 把 `embedHost`/`requiresExternalDownload` 抹掉 — processor 拿不到外部下载标记,会试图把 vimeo 的 player.html 当 video 文件喂给 ffmpeg。
-- ❌ 跨字段不校验 host 字符 — 攻击者可在 host 注入特殊字符,让后续日志 / 文件名出问题。
+- No sanitizeMedia 把 `embedHost`/`requiresExternalDownload` 抹掉 — processor 拿不到外部下载标记,会试图把 vimeo 的 player.html 当 video 文件喂给 ffmpeg。
+- No 跨字段不校验 host 字符 — 攻击者可在 host 注入特殊字符,让后续日志 / 文件名出问题。

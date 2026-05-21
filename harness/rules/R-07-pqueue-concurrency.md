@@ -15,8 +15,8 @@
 - 改并发后**重建** PQueue 或者 `queue.concurrency = n`
 
 ## 反例
-- ❌ `new PQueue({ concurrency: 1 })` 硬编码
-- ❌ 接受任意整数(导致用户填 999 把机器烤掉)
+- No `new PQueue({ concurrency: 1 })` 硬编码
+- No 接受任意整数(导致用户填 999 把机器烤掉)
 
 ## 关联场景
 - [SC-06](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-06-concurrency-default-3.md)

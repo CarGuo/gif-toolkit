@@ -34,17 +34,17 @@ YouTube / googlevideo 单 GET 直链下载,组合命中:
 
 ## 反向断言
 
-- ❌ **不允许**downloader 默默把短读文件 rename 到 target(必须自检 + 抛错)。
-- ❌ **不允许**缓存文件名既无 ext 又无 mime hint(ffprobe 容错差,无 ext 就要补)。
-- ❌ **不允许**Thumb error 仍用整张红色 `.thumb-error` 大蒙版(误导用户以为整张卡片失败)。
-- ❌ **不允许**downloader 不带 `Accept-Encoding: identity`(googlevideo CDN 在协商压缩时 SABR 概率显著上升)。
+- No **不允许**downloader 默默把短读文件 rename 到 target(必须自检 + 抛错)。
+- No **不允许**缓存文件名既无 ext 又无 mime hint(ffprobe 容错差,无 ext 就要补)。
+- No **不允许**Thumb error 仍用整张红色 `.thumb-error` 大蒙版(误导用户以为整张卡片失败)。
+- No **不允许**downloader 不带 `Accept-Encoding: identity`(googlevideo CDN 在协商压缩时 SABR 概率显著上升)。
 
 ---
 
 ## 复演步骤
 
 1. 嗅探 `https://android-developers.googleblog.com/2026/05/the-android-show-developers-cut-2026.html`(含 YouTube embed `KvTRMSa1w4E`)。
-2. 自动批量解析 → 卡片显示 `✓ 已解析 · 360p`(右上)。若缩略图失败,卡片右下显示**小角标** `!`(不再整张红);hover 显示 "缩略图生成失败 ... 不影响后续解析与转换尝试"。
+2. 自动批量解析 → 卡片显示 `Yes 已解析 · 360p`(右上)。若缩略图失败,卡片右下显示**小角标** `!`(不再整张红);hover 显示 "缩略图生成失败 ... 不影响后续解析与转换尝试"。
 3. 选中 → 开始批处理 → 下载阶段:
    - **正常情况**:Accept-Encoding=identity 让 SABR 不触发,文件完整下载 + 缓存文件名 = `KvTRMSa1w4E.mp4`(自动补 ext)→ ffprobe 正常 → 转换成功。
    - **SABR 触发**:短读自检捕获 `received < 95% × content-length`,task 直接 `failed`,error message 含 "incomplete download: ... (short-read; remote may be SABR-throttled or signed URL expired)";用户看到清晰诊断,不会再看到不知所谓的 "Invalid data found"。

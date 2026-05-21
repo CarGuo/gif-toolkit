@@ -16,8 +16,8 @@
 - 跑 `npm run typecheck` 会捕获第 3 步缺失;前两步缺失靠 [docs/ipc-contract.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/ipc-contract.md) 表格巡检
 
 ## 反例
-- ❌ "我先在 main 加 handler,renderer 那边后面再说" ← 你会忘的
-- ❌ "TS 类型 just any 一把" ← 失去类型保护
+- No "我先在 main 加 handler,renderer 那边后面再说" ← 你会忘的
+- No "TS 类型 just any 一把" ← 失去类型保护
 
 ## 关联场景
 - 没有专属 SC,但提交前的 [pr-checklist.md](file:///Users/guoshuyu/workspace/gif-toolkit/harness/checklists/pr-checklist.md) 必查这一条。

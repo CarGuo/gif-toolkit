@@ -33,10 +33,10 @@ UI 表单上:
 
 ## 反向断言
 
-- ❌ **不允许**让用户手动输入 soft > hard
-- ❌ **不允许**Phase C/D 把成功的产物 mark 成 best(只有 soft 命中才能叫 best)
-- ❌ **不允许**因为已经达到 fallback 就跳过 Phase C/D 中的 longSideFloor 守护(参考 SC-02)
-- ❌ **不允许**输出体积 > maxBytes 还把文件落到磁盘(必须 skipped)
+- No **不允许**让用户手动输入 soft > hard
+- No **不允许**Phase C/D 把成功的产物 mark 成 best(只有 soft 命中才能叫 best)
+- No **不允许**因为已经达到 fallback 就跳过 Phase C/D 中的 longSideFloor 守护(参考 SC-02)
+- No **不允许**输出体积 > maxBytes 还把文件落到磁盘(必须 skipped)
 
 ---
 

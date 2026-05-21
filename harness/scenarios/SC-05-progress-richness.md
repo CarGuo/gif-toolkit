@@ -41,10 +41,10 @@ UI [TaskTable](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/compone
 
 ## 反向断言
 
-- ❌ **不允许**只发一次 `percent: 50`,然后 5 秒后突然跳到 `percent: 100`
-- ❌ **不允许**在长任务(>3s)里整段静默不 emit
-- ❌ **不允许**emit 时漏 `elapsedMs`(用户判断"是否卡死"的核心信号)
-- ❌ **不允许**substep 写成英文堆栈(要可读、可展示给用户)
+- No **不允许**只发一次 `percent: 50`,然后 5 秒后突然跳到 `percent: 100`
+- No **不允许**在长任务(>3s)里整段静默不 emit
+- No **不允许**emit 时漏 `elapsedMs`(用户判断"是否卡死"的核心信号)
+- No **不允许**substep 写成英文堆栈(要可读、可展示给用户)
 
 ---
 

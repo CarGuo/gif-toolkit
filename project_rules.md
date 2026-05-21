@@ -119,12 +119,12 @@
 
 ### 7.4 决策启发式（写给未来的自己）
 
-- ✅ 看到 thin wrapper（`function f(...args) { return fExt(...args); }`）→ 直接 inline，删 wrapper
-- ✅ 看到 `import { x as xExt } from '...'` + `const x = xExt`（套娃 const）→ 直接 `import { x }`
-- ✅ 看到 `void X` 死引用 + 注释说"X 还在被引用" → grep 全文，如果真的没引用就连注释一起删
-- ❌ 看到文件超过 1000 行的第一反应**不应该是**「我把它拆成 5 个文件」
-- ❌ 看到一个内部 error class 的第一反应**不应该是**「我抽 errors.ts」
-- ❌ 看到一组 module-level 可变 singleton 的第一反应**不应该是**「我抽 state.ts」
+- Yes 看到 thin wrapper（`function f(...args) { return fExt(...args); }`）→ 直接 inline，删 wrapper
+- Yes 看到 `import { x as xExt } from '...'` + `const x = xExt`（套娃 const）→ 直接 `import { x }`
+- Yes 看到 `void X` 死引用 + 注释说"X 还在被引用" → grep 全文，如果真的没引用就连注释一起删
+- No 看到文件超过 1000 行的第一反应**不应该是**「我把它拆成 5 个文件」
+- No 看到一个内部 error class 的第一反应**不应该是**「我抽 errors.ts」
+- No 看到一组 module-level 可变 singleton 的第一反应**不应该是**「我抽 state.ts」
 
 > **底线**：每次想动 [processor.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor.ts) 的结构（不是行为），必须先在 PR 描述里**逐项对照 §7.1 五条**，证明"这次拆不会复刻 §7.2 的反例"。否则评审打回。
 

@@ -15,8 +15,8 @@
 - Renderer 只通过 `window.giftk.sniff(url)` 发请求
 
 ## 反例
-- ❌ 在 React 组件里 `fetch('https://...')` 然后解析 HTML
-- ❌ 在 Renderer 里用 `<webview>` 加载外站,然后把 DOM 抠出来
+- No 在 React 组件里 `fetch('https://...')` 然后解析 HTML
+- No 在 Renderer 里用 `<webview>` 加载外站,然后把 DOM 抠出来
 
 ## 关联场景
 - [SC-01](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-01-dedup-key-generic.md)

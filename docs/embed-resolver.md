@@ -21,11 +21,11 @@
 
 | 方案 | 站点覆盖 | 维护活跃度 | 是否需要付费 / 注册 | 选择 |
 |---|---|---|---|---|
-| **yt-dlp** (binary, ~30 MB) | **1800+** | 极活跃（每周更新） | ❌ Unlicense，无需注册 | ✅ |
-| youtube-dl | ~600 | 已停滞 | ❌ | ❌ 弃用 |
-| @distube/ytdl-core / play-dl (纯 JS) | 仅 YouTube | cipher 经常失效 | ❌ | ❌ 不稳定 |
-| RapidAPI / Twitter API | 有限 | 商业 | ✅ 需要 API Key + 付费 | ❌ |
-| 自实现各家 internal API 嗅探 | 极有限 | 不稳定 | ❌ | ❌ 维护成本高 |
+| **yt-dlp** (binary, ~30 MB) | **1800+** | 极活跃（每周更新） | No Unlicense，无需注册 | Yes |
+| youtube-dl | ~600 | 已停滞 | No | No 弃用 |
+| @distube/ytdl-core / play-dl (纯 JS) | 仅 YouTube | cipher 经常失效 | No | No 不稳定 |
+| RapidAPI / Twitter API | 有限 | 商业 | Yes 需要 API Key + 付费 | No |
+| 自实现各家 internal API 嗅探 | 极有限 | 不稳定 | No | No 维护成本高 |
 
 `ytdlp-nodejs@^3.4.4` 提供：
 - `helpers.downloadYtDlp(dir)` — 按平台下载 yt-dlp 二进制到指定目录，返回最终路径（仅作为 air-gapped 兜底）
@@ -39,57 +39,57 @@
 
 ```
 ┌─ 打包阶段（electron-builder） ────────────────────────┐
-│ asarUnpack: node_modules/ytdlp-nodejs/bin/**          │
-│   → app.asar.unpacked/.../bin/yt-dlp_<platform>       │
-│ build.files 不再排除 yt-dlp bin                       │
+│ asarUnpack: node_modules/ytdlp-nodejs/bin/** │
+│ → app.asar.unpacked/.../bin/yt-dlp_<platform> │
+│ build.files 不再排除 yt-dlp bin │
 └───────────────────────────────────────────────────────┘
                         │
                         ▼
 ┌─ Renderer ────────────────────────────────────────────┐
-│ App.tsx                                               │
-│   useEffect([result])                                 │
-│     pending = items.filter(requiresExternal           │
-│       && !resolved && !resolving && !errored)         │
-│     for (m of pending) onResolveEmbedById(m.id)       │
-│     —— 嗅探完成 → 自动批量解析（无 confirm/install）  │
-│   onResolveEmbedById(id)                              │
-│     1. resolveEmbed(media)（直接调，无 install 步骤） │
-│     2. 成功 → resolvedMap[id] = ResolvedMedia        │
-│     3. 失败 → resolveErrorMap[id] = redacted msg     │
-│ MediaGrid                                             │
-│   resolved → ✓ 已解析 chip（绿色）                    │
-│   resolving → ⏳ 解析中… tag（蓝色）                  │
-│   errored  → ↻ 重试解析 小按钮（琥珀色，仅失败显示） │
-│   processable filter: !requiresExternal || resolved   │
+│ App.tsx │
+│ useEffect([result]) │
+│ pending = items.filter(requiresExternal │
+│ && !resolved && !resolving && !errored) │
+│ for (m of pending) onResolveEmbedById(m.id) │
+│ —— 嗅探完成 → 自动批量解析（无 confirm/install） │
+│ onResolveEmbedById(id) │
+│ 1. resolveEmbed(media)（直接调，无 install 步骤） │
+│ 2. 成功 → resolvedMap[id] = ResolvedMedia │
+│ 3. 失败 → resolveErrorMap[id] = redacted msg │
+│ MediaGrid │
+│ resolved → Yes 已解析 chip（绿色） │
+│ resolving → wait 解析中… tag（蓝色） │
+│ errored → ↻ 重试解析 小按钮（琥珀色，仅失败显示） │
+│ processable filter: !requiresExternal || resolved │
 └───────────────────────┬───────────────────────────────┘
                         │ IPC (contextBridge)
                         │ resolve:checkYtdlp / resolve:embed
                         ▼
 ┌─ Main (Node) ─────────────────────────────────────────┐
-│ resolve:embed                                         │
-│   sanitizeMedia → isResolvable(host allow-list)       │
-│   resolveEmbed(media)                                 │
-│     ensureYtdlp() ← 四级 fallback 找 binary          │
-│       1. app.asar.unpacked/.../bin/<name>（生产）    │
-│       2. node_modules/ytdlp-nodejs/bin/<name>（dev）  │
-│       3. helpers.BIN_DIR（npm 包内置）                │
-│       4. userData/bin/<name>（老版本遗留）            │
-│       5. helpers.downloadYtDlp(userData/bin)（兜底）  │
-│     ← media.url（iframe src，不是 pageUrl）          │
-│     pickBestFormat: 排除 m3u8/dash/mhtml             │
-│     sanitizeHeaders: 白名单                          │
-│     ensurePublicHttp + isPrivateHost                  │
+│ resolve:embed │
+│ sanitizeMedia → isResolvable(host allow-list) │
+│ resolveEmbed(media) │
+│ ensureYtdlp() ← 四级 fallback 找 binary │
+│ 1. app.asar.unpacked/.../bin/<name>（生产） │
+│ 2. node_modules/ytdlp-nodejs/bin/<name>（dev） │
+│ 3. helpers.BIN_DIR（npm 包内置） │
+│ 4. userData/bin/<name>（老版本遗留） │
+│ 5. helpers.downloadYtDlp(userData/bin)（兜底） │
+│ ← media.url（iframe src，不是 pageUrl） │
+│ pickBestFormat: 排除 m3u8/dash/mhtml │
+│ sanitizeHeaders: 白名单 │
+│ ensurePublicHttp + isPrivateHost │
 │ ResolvedMedia { url, headers, mime, qualityLabel,... }│
 └───────────────────────┬───────────────────────────────┘
                         │ ResolvedMedia 回流到 Sniff
                         ▼
 ┌─ 既有处理链路（无修改） ─────────────────────────────┐
-│ processor.ts                                          │
-│   const fetchUrl = media.resolved?.url || media.url   │
-│   const fetchHeaders = media.resolved?.headers        │
-│   downloadToFile(fetchUrl, dest, signal, fetchHeaders)│
+│ processor.ts │
+│ const fetchUrl = media.resolved?.url || media.url │
+│ const fetchHeaders = media.resolved?.headers │
+│ downloadToFile(fetchUrl, dest, signal, fetchHeaders)│
 │ ffmpeg.ts videoToGifPalette → palettegen → paletteuse │
-│ gifsicle 二分搜索压缩到 softMaxBytes/maxBytes         │
+│ gifsicle 二分搜索压缩到 softMaxBytes/maxBytes │
 └───────────────────────────────────────────────────────┘
 ```
 
@@ -102,12 +102,12 @@
 | 阶段 | 行为 | resolver 触发 |
 |---|---|---|
 | 打包 | `electron-builder.asarUnpack` 包含 `node_modules/ytdlp-nodejs/bin/**`，binary 进 dmg/installer | — |
-| 启动 | `checkYtdlp()` 仅作诊断 IPC 暴露，UI 默认不消费 | ❌ 不会 |
-| 嗅探 | sniffer 仅打 `requiresExternalDownload: true` 标记 | ❌ 不会 |
-| 嗅探完成 | `App.tsx` `useEffect([result])` 自动批量调起 `resolveEmbed` | ✅ 自动 |
-| 用户重试 | 失败卡片显示 `↻ 重试解析` 按钮 | ✅ 用户单击单个重试 |
+| 启动 | `checkYtdlp()` 仅作诊断 IPC 暴露，UI 默认不消费 | No 不会 |
+| 嗅探 | sniffer 仅打 `requiresExternalDownload: true` 标记 | No 不会 |
+| 嗅探完成 | `App.tsx` `useEffect([result])` 自动批量调起 `resolveEmbed` | Yes 自动 |
+| 用户重试 | 失败卡片显示 `↻ 重试解析` 按钮 | Yes 用户单击单个重试 |
 
-**已删除概念**：`installYtdlp` / `uninstallYtdlp` IPC、`onResolveInstallProgress` 事件、`ytdlp-chip` 状态徽章、确认下载二进制的 `confirm()` 弹窗、橙色 `🔗 解析直链` 按钮。
+**已删除概念**：`installYtdlp` / `uninstallYtdlp` IPC、`onResolveInstallProgress` 事件、`ytdlp-chip` 状态徽章、确认下载二进制的 `confirm()` 弹窗、橙色 ` 解析直链` 按钮。
 
 ### 4.2 安全防御纵深
 
@@ -157,9 +157,9 @@
 ### 6.1 三件套（每次提交前）
 
 ```bash
-npm run lint       # eslint --max-warnings 0
-npm run typecheck  # tsc --noEmit (main + renderer)
-npm run build      # vite build + tsc -p tsconfig.main.json
+npm run lint # eslint --max-warnings 0
+npm run typecheck # tsc --noEmit (main + renderer)
+npm run build # vite build + tsc -p tsconfig.main.json
 ```
 
 ### 6.2 真实 e2e（resolver 层级）
@@ -167,9 +167,9 @@ npm run build      # vite build + tsc -p tsconfig.main.json
 可直接在 main 进程层用 `new YtDlp({ binaryPath: ensureYtdlp() }).getInfoAsync(url)` 探测 YouTube + Bilibili 两个 must-pass case：
 
 ```
-[case*] YouTube    https://www.youtube.com/watch?v=jNQXAC9IVRw ... OK 206 240p 320x240 mp4
-[case*] Bilibili   https://www.bilibili.com/video/BV1GJ411x7h7 ... OK 206  852x480 mp4
-[case ] Twitter/X  https://x.com/NASAPersevere/status/... ... INFO-ERROR No video could be found
+[case*] YouTube https://www.youtube.com/watch?v=jNQXAC9IVRw ... OK 206 240p 320x240 mp4
+[case*] Bilibili https://www.bilibili.com/video/BV1GJ411x7h7 ... OK 206 852x480 mp4
+[case ] Twitter/X https://x.com/NASAPersevere/status/... ... INFO-ERROR No video could be found
 ```
 
 含两类用例：
@@ -182,7 +182,7 @@ e2e 不真正下载完整文件，只发 `Range: bytes=0-1023` 探测前 1 KB：
 
 | 状态 | 意义 |
 |---|---|
-| 200 / 206 | CDN 接受请求 → 真直链 ✓ |
+| 200 / 206 | CDN 接受请求 → 真直链 Yes |
 | 403 | header 不正确（如 B 站缺 Referer） |
 | 404 | URL 已过期 |
 | 0 / timeout | 网络抖动 |

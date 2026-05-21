@@ -12,9 +12,9 @@
 ```bash
 VIDEO_URL=/tmp/giftk-test.mp4 ./node_modules/.bin/electron /tmp/giftk-video-pipeline-e2e.js
 # 预期:
-#   VIDEO_DONE <2000ms output=... size>1024
-#   CANCEL_PROBE name=CancelledError msg=cancelled
-#   CANCEL_DONE <500ms cancelled=true
+# VIDEO_DONE <2000ms output=... size>1024
+# CANCEL_PROBE name=CancelledError msg=cancelled
+# CANCEL_DONE <500ms cancelled=true
 ```
 
 ## 关联代码
@@ -22,5 +22,5 @@ VIDEO_URL=/tmp/giftk-test.mp4 ./node_modules/.bin/electron /tmp/giftk-video-pipe
 - [processor.ts L824 调用](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor.ts) — 必须传 4 个参数,signal 是第 4 个。
 
 ## 反例
-- ❌ 调用 `videoToGifPalette(p, onLog)` 不传 signal — 取消批处理时这一步会跑完。
-- ❌ baseFilter 末尾带逗号又拼 `[x]` — ffmpeg 抛 "No such filter: ''" SIGSEGV(已修)。
+- No 调用 `videoToGifPalette(p, onLog)` 不传 signal — 取消批处理时这一步会跑完。
+- No baseFilter 末尾带逗号又拼 `[x]` — ffmpeg 抛 "No such filter: ''" SIGSEGV(已修)。

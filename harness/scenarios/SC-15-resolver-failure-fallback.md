@@ -40,12 +40,12 @@ resolver 链路任意一环失败：
 
 ## 反向断言
 
-- ❌ **不允许**resolver 失败时把 media 从 `sniffResult.items` 删除
-- ❌ **不允许**resolver 抛错后 useEffect 在每次 state 变化时重复触发（必须用 resolveErrorMap 守卫）
-- ❌ **不允许**渲染端弹任何 confirm 弹窗（即使 air-gapped 也不弹）
-- ❌ **不允许**yt-dlp 错误 message 原样进 logger.buffer（含 signed URL / token），必须经 `redactUrls()`
-- ❌ **不允许**用户在批处理过程中重试解析（`resolvingSet` + `processingOne` 应正交，不互相阻塞，但 logger 要明确语义）
-- ❌ **不允许**重试按钮在 `resolving=true` 时仍可点（必须 disabled 或被 `⏳ 解析中…` 替换）
+- No **不允许**resolver 失败时把 media 从 `sniffResult.items` 删除
+- No **不允许**resolver 抛错后 useEffect 在每次 state 变化时重复触发（必须用 resolveErrorMap 守卫）
+- No **不允许**渲染端弹任何 confirm 弹窗（即使 air-gapped 也不弹）
+- No **不允许**yt-dlp 错误 message 原样进 logger.buffer（含 signed URL / token），必须经 `redactUrls()`
+- No **不允许**用户在批处理过程中重试解析（`resolvingSet` + `processingOne` 应正交，不互相阻塞，但 logger 要明确语义）
+- No **不允许**重试按钮在 `resolving=true` 时仍可点（必须 disabled 或被 `wait 解析中…` 替换）
 
 ---
 
@@ -56,7 +56,7 @@ resolver 链路任意一环失败：
 2. 如果 packaged binary 已正确镜像到 `app.asar.unpacked/...`，**resolver 应直接成功**（这是 R-14 的核心承诺）
 3. 仅当人为破坏 unpacked 镜像（比如手动删除 `app.asar.unpacked/.../bin/yt-dlp_macos`）+ 断网时才能复现
 4. 嗅探含 YouTube 视频的页面 → 自动批量解析触发 → 卡片立即变 `↻ 重试解析`
-5. 联网后单击 `↻ 重试解析` → `helpers.downloadYtDlp(userData/bin)` 一次性兜底成功 → 卡片变 `✓ 已解析`
+5. 联网后单击 `↻ 重试解析` → `helpers.downloadYtDlp(userData/bin)` 一次性兜底成功 → 卡片变 `Yes 已解析`
 
 ### 场景 B — yt-dlp 上游拒绝（X 推文）
 1. 嗅探含 X 视频的页面

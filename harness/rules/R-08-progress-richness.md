@@ -17,9 +17,9 @@
 - substep 写中文 + 关键数字,**不要写英文堆栈**
 
 ## 反例
-- ❌ `emit({ percent: 50 })` 单字段
-- ❌ Phase B 跑 30 秒不发 emit
-- ❌ `substep: 'lossy_pass_3_of_inner_iter_42'` ← 用户看不懂
+- No `emit({ percent: 50 })` 单字段
+- No Phase B 跑 30 秒不发 emit
+- No `substep: 'lossy_pass_3_of_inner_iter_42'` ← 用户看不懂
 
 ## 关联场景
 - [SC-05](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-05-progress-richness.md)

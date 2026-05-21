@@ -20,5 +20,5 @@
 - [single-flight mutex (activeChain)](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/headlessFetch.ts)
 
 ## 反例
-- ❌ 只在入口 `assertSafeUrl(pageUrl)`,redirect/子资源不挡 — 经典 SSRF 泄露。
-- ❌ 用 `persist:sniffer` partition — 每次嗅探累计 cookie / cache,会被指纹 / 被 CF turnstile 记忆。本项目改用 `giftk-sniffer-<rand>` 非 persist + finally 清 storage。
+- No 只在入口 `assertSafeUrl(pageUrl)`,redirect/子资源不挡 — 经典 SSRF 泄露。
+- No 用 `persist:sniffer` partition — 每次嗅探累计 cookie / cache,会被指纹 / 被 CF turnstile 记忆。本项目改用 `giftk-sniffer-<rand>` 非 persist + finally 清 storage。

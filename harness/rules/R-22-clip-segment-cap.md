@@ -21,10 +21,10 @@
 
 ## 反向断言
 
-- ❌ **不允许** processor.ts 内联计算 `segCount = Math.ceil(range / segLen)` 等分段逻辑——必须走 [enumerateSegments](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor-utils.ts#L163-L180) + [filterSelectedSegments](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor-utils.ts#L191-L202) 纯函数,以便单测覆盖。
-- ❌ **不允许** main 层对 `selectedSegments` 不做 sanitize(必须在 [src/main/index.ts sanitizeOptions](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/index.ts#L210-L220) 里去重 + 排序 + 整数过滤,renderer 来源不可信)。
-- ❌ **不允许** 长视频在没有日志提示的情况下被自动截断(用户必须知道默认行为,否则会困惑"为什么只输出了 1 个 GIF")。
-- ❌ **不允许** 当 PreviewPanel 内分段全部取消勾选时把 `selectedSegments=[]` 传给 main(必须留至少 1 段或回退 undefined,否则用户会困惑"为什么没有任何输出")。
+- No **不允许** processor.ts 内联计算 `segCount = Math.ceil(range / segLen)` 等分段逻辑——必须走 [enumerateSegments](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor-utils.ts#L163-L180) + [filterSelectedSegments](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor-utils.ts#L191-L202) 纯函数,以便单测覆盖。
+- No **不允许** main 层对 `selectedSegments` 不做 sanitize(必须在 [src/main/index.ts sanitizeOptions](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/index.ts#L210-L220) 里去重 + 排序 + 整数过滤,renderer 来源不可信)。
+- No **不允许** 长视频在没有日志提示的情况下被自动截断(用户必须知道默认行为,否则会困惑"为什么只输出了 1 个 GIF")。
+- No **不允许** 当 PreviewPanel 内分段全部取消勾选时把 `selectedSegments=[]` 传给 main(必须留至少 1 段或回退 undefined,否则用户会困惑"为什么没有任何输出")。
 
 ---
 

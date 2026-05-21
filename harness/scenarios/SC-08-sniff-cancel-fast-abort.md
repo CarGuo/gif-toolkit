@@ -22,5 +22,5 @@
 - [fetchHtmlStreamed signal bridge](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/sniffer.ts)
 
 ## 反例
-- ❌ `signal?` 只在入口 check,不传给 axios — 流仍然在 5MB 上限内继续累加。
-- ❌ AbortController 不绑定到外部 signal — 调用方 abort 不传播。
+- No `signal?` 只在入口 check,不传给 axios — 流仍然在 5MB 上限内继续累加。
+- No AbortController 不绑定到外部 signal — 调用方 abort 不传播。

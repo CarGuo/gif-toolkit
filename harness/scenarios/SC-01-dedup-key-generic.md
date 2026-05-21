@@ -44,10 +44,10 @@ https://cdn.example.com/v2/quality:80/asset.gif
 
 ## 反向断言
 
-- ❌ **不允许**出现"对 blogger.googleusercontent.com 写死的 if 分支"
-- ❌ **不允许**出现"对某个文章站或 CDN host 写死的 if 分支"
-- ❌ **不允许**为通过这个场景而把所有 query 一刀切剔掉(那会把不同视频误归一条)
-- ❌ **不允许**因为 dedup 而把"页面里两个不同视频"合并
+- No **不允许**出现"对 blogger.googleusercontent.com 写死的 if 分支"
+- No **不允许**出现"对某个文章站或 CDN host 写死的 if 分支"
+- No **不允许**为通过这个场景而把所有 query 一刀切剔掉(那会把不同视频误归一条)
+- No **不允许**因为 dedup 而把"页面里两个不同视频"合并
 
 ---
 
@@ -59,7 +59,7 @@ https://cdn.example.com/v2/quality:80/asset.gif
    <img src="https://blogger.googleusercontent.com/img/A=s320">
    <img src="https://blogger.googleusercontent.com/img/A=s640">
    <a href="https://blogger.googleusercontent.com/img/A=s1280">link</a>
-   <img src="https://blogger.googleusercontent.com/img/B=s320">  <!-- 不同资源 -->
+   <img src="https://blogger.googleusercontent.com/img/B=s320"> <!-- 不同资源 -->
    ```
 
 2. 通过 `axios + cheerio` 直接喂给 [sniffPage](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/sniffer.ts) 函数

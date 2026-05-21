@@ -12,8 +12,8 @@
 - 凡是涉及"resize"的代码路径都先取 `longestSide = max(w, h)`,以它为基准缩
 
 ## 反例
-- ❌ `if (width > maxSide) resize(maxSide, height * maxSide / width)` ← 没看 height
-- ❌ 只在视频路径加,GIF 路径漏(Phase A 必须覆盖两条路径)
+- No `if (width > maxSide) resize(maxSide, height * maxSide / width)` ← 没看 height
+- No 只在视频路径加,GIF 路径漏(Phase A 必须覆盖两条路径)
 
 ## 关联场景
 - [SC-02](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-02-aspect-ratio-early-fail.md)

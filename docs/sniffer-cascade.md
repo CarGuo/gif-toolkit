@@ -12,10 +12,10 @@ ezgif.com 的策略是"我替你后端把站点抓了再吐 URL",但要做到桌
 
 | 阻碍 | 单纯 axios+cheerio 行不行 | 嵌入式 webview 行不行 | 真 Chrome 行不行 | yt-dlp 行不行 |
 |---|---|---|---|---|
-| 普通静态页 / 直链 | ✅ 最快 | ⛔ 启动慢 | ⛔ 启动慢 | ⛔ 不识别非视频站 |
-| 需要登录 / OAuth / 交互 | ⛔ 跳 401 | ✅ 真用户操作 | ✅ 真用户操作 | ⛔ |
-| Cloudflare Turnstile / JA3/JA4 严校验 | ⛔ TLS 直接拒 | ⛔ Electron 自带 Chromium 指纹被识破 | ✅ 真浏览器指纹 | ⛔ 同上 |
-| YouTube / X / B站 / TikTok 视频 | ⛔ 抓 HTML 没 src | ⏳ 慢 + 偶尔失败 | ⏳ 慢 | ✅ 1900+ extractor |
+| 普通静态页 / 直链 | Yes 最快 | No 启动慢 | No 启动慢 | No 不识别非视频站 |
+| 需要登录 / OAuth / 交互 | No 跳 401 | Yes 真用户操作 | Yes 真用户操作 | No |
+| Cloudflare Turnstile / JA3/JA4 严校验 | No TLS 直接拒 | No Electron 自带 Chromium 指纹被识破 | Yes 真浏览器指纹 | No 同上 |
+| YouTube / X / B站 / TikTok 视频 | No 抓 HTML 没 src | wait 慢 + 偶尔失败 | wait 慢 | Yes 1900+ extractor |
 
 所以工具栏的「网页嗅探」是一个 **split-button**:左主按钮跑用户上次选择的模式,右 ▾ 切换。纯 URL 嗅探作为最快路径默认始终通过输入框旁的「开始嗅探」按钮触发。
 
@@ -28,14 +28,14 @@ ezgif.com 的策略是"我替你后端把站点抓了再吐 URL",但要做到桌
 ```mermaid
 flowchart TD
   Start(["输入 URL"]) --> Guard["ensurePublicHttp(url)<br/>拒 file:// / javascript: / 私有网段"]
-  Guard -- "❌ 拒绝" --> Reject(["throw, UI 红色 toast"])
-  Guard -- "✅ 通过" --> Pick{"split-button<br/>用户上次选择 / 手动切换"}
+  Guard -- "No 拒绝" --> Reject(["throw, UI 红色 toast"])
+  Guard -- "Yes 通过" --> Pick{"split-button<br/>用户上次选择 / 手动切换"}
 
-  Pick -- "①" --> URL["纯 URL 嗅探<br/>axios + cheerio 主进程"]
-  Pick -- "②" --> WV["嵌入式 WebView<br/>WebContentsView + onBeforeRequest"]
-  Pick -- "③" --> SC["真 Chrome 嗅探<br/>spawn + chrome-remote-interface CDP"]
-  Pick -- "④" --> YT["yt-dlp 直接抓<br/>--dump-single-json"]
-  Pick -- "📂" --> OFF["离线导入<br/>.mhtml / .html+_files / 单文件"]
+  Pick -- "(1)" --> URL["纯 URL 嗅探<br/>axios + cheerio 主进程"]
+  Pick -- "(2)" --> WV["嵌入式 WebView<br/>WebContentsView + onBeforeRequest"]
+  Pick -- "(3)" --> SC["真 Chrome 嗅探<br/>spawn + chrome-remote-interface CDP"]
+  Pick -- "(4)" --> YT["yt-dlp 直接抓<br/>--dump-single-json"]
+  Pick -- "(5)" --> OFF["离线导入<br/>.mhtml / .html+_files / 单文件"]
 
   URL --> Out["SniffedMedia[]"]
   WV --> Out
@@ -61,7 +61,7 @@ flowchart TD
 
 ---
 
-## 通路 ①  纯 URL 嗅探(默认)
+## 通路 (1) 纯 URL 嗅探(默认)
 
 - IPC: `sniff:url`
 - 实现:[src/main/sniffer.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/sniffer.ts) 主进程 axios + cheerio
@@ -71,11 +71,11 @@ flowchart TD
 
 ---
 
-## 通路 ②  嵌入式 webview 嗅探(R-44 / R-47 / R-49 / R-50)
+## 通路 (2) 嵌入式 webview 嗅探(R-44 / R-47 / R-49 / R-50)
 
 - IPC: `sniff:webview`
 - 实现:[src/main/webviewSniff.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/webviewSniff.ts)
-- 触发:split-button 左(若为该档) / 菜单 ①
+- 触发:split-button 左(若为该档) / 菜单 (1)
 - 适合:需要登录 / Cookie / OAuth / 交互但 TLS 不严的站
 - 不适合:Cloudflare 严校验的站(JA3/JA4 检测会拦下 Electron Chromium)
 
@@ -91,11 +91,11 @@ R-53 加固:
 
 ---
 
-## 通路 ③  真 Chrome 嗅探(R-51)
+## 通路 (3) 真 Chrome 嗅探(R-51)
 
 - IPC: `sniff:system-chrome`
 - 实现:[src/main/systemChromeSniff.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/systemChromeSniff.ts)
-- 触发:split-button 左(若为该档) / 菜单 ②
+- 触发:split-button 左(若为该档) / 菜单 (2)
 - 适合:OpenAI / Medium / Patreon 等 Cloudflare TLS-JA3/JA4 + Turnstile 严防站
 - 不适合:小机器(Chrome 启动开销大)/ 用户没装 Chrome / Edge / Brave
 
@@ -115,16 +115,16 @@ R-55 Fix #2 加固(2026-05-17):
 - 加 `SniffOpts.finalizeSignal: AbortSignal`,renderer 调 `giftk.finalizeSystemChromeSniff()` 触发它,让等 `child.exit` 的 Promise 第三种 resolve 路径(`finalizedByUser=true` 走完整 DOM scan,语义=success 不是 abort)
 - 解决「本机已开 Chrome,新 spawn 实例瞬间合并 → 关 tab 不触发 child.exit → 卡 60%」
 - main 多并列一根 `currentSystemChromeFinalizeCtrl: AbortController`(独立于 `currentSniffCtrl`)
-- 60% message 在 renderer 升级为橙色脉冲 banner(`@keyframes sniff-pulse`),并在右侧渲染绿色「✓ 完成嗅探」按钮(只在 `activeSniffMode === 'system-chrome'` 时显示)
+- 60% message 在 renderer 升级为橙色脉冲 banner(`@keyframes sniff-pulse`),并在右侧渲染绿色「Yes 完成嗅探」按钮(只在 `activeSniffMode === 'system-chrome'` 时显示)
 
 
 ---
 
-## 通路 ④  yt-dlp 直接抓(R-52)
+## 通路 (4) yt-dlp 直接抓(R-52)
 
 - IPC: `sniff:ytdlp-direct`
 - 实现:[src/main/ytdlpDirectSniff.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/ytdlpDirectSniff.ts)
-- 触发:split-button 左(若为该档) / 菜单 ③
+- 触发:split-button 左(若为该档) / 菜单 (3)
 - 适合:YouTube / X / Bilibili / TikTok / Reddit / 推特 / 1900+ 已识别视频站
 - 不适合:任意网页都试一遍(`Unsupported URL` 会立刻给中文 fallback 提示)
 
@@ -146,11 +146,11 @@ R-53 加固:
 
 ---
 
-## 通路 ⑤  离线导入(R-55 Fix #3)
+## 通路 (5) 离线导入(R-55 Fix #3)
 
 - IPC: `sniff:offlineImport`
 - 实现:[src/main/offlineImport.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/offlineImport.ts)
-- 触发:URL 栏右侧「📂 离线导入」按钮 / 任意位置拖拽文件入窗
+- 触发:URL 栏右侧「 离线导入」按钮 / 任意位置拖拽文件入窗
 - 适合:Cloudflare 死锁 / 登录墙 / GFW 不通,但你已经手动把页面 / 文件存到了本地的兜底
 - 三种输入形态:
   1. `.mhtml / .mht`(Chrome / Edge「网页,单一文件」)— 解析 RFC 2557 multipart/related,把每个 part 落到 `os.tmpdir()/giftk-mhtml-*`,然后把主 html 里的引用按 `Content-Location` 重写成 `file://`

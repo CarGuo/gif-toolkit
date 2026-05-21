@@ -17,9 +17,9 @@
 - [MediaGrid.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/MediaGrid.tsx) 卡片显示徽章而不是处理按钮
 
 ## 反例
-- ❌ 真去 GET `https://player.vimeo.com/video/xxx` 然后用 ffmpeg 转(它返回 player HTML)
-- ❌ 静默丢弃 iframe(用户不知道有视频)
-- ❌ 只对 vimeo 做,不管 YouTube(不全)
+- No 真去 GET `https://player.vimeo.com/video/xxx` 然后用 ffmpeg 转(它返回 player HTML)
+- No 静默丢弃 iframe(用户不知道有视频)
+- No 只对 vimeo 做,不管 YouTube(不全)
 
 ## 关联场景
 - [SC-04](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-04-iframe-embed-vimeo.md)

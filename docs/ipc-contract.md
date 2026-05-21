@@ -85,19 +85,19 @@
 interface TaskProgress {
   taskId: string;
   state: 'queued' | 'running' | 'done' | 'error' | 'skipped';
-  percent?: number;             // 总进度
-  message?: string;             // 简短状态
-  substep?: string;             // ★ 例如 "Phase B / lossy=80"
-  detail?: string;              // ★ 例如 "1.78MB / target 2MB"
-  stepIndex?: number;           // ★ 当前是第几步
-  totalSteps?: number;          // ★ 总共几步(估算)
-  elapsedMs?: number;           // ★ 该任务已耗时
-  error?: string;               // 错误时的人类可读信息
-  outputPath?: string;          // 完成时的本地文件路径
+  percent?: number; // 总进度
+  message?: string; // 简短状态
+  substep?: string; // * 例如 "Phase B / lossy=80"
+  detail?: string; // * 例如 "1.78MB / target 2MB"
+  stepIndex?: number; // * 当前是第几步
+  totalSteps?: number; // * 总共几步(估算)
+  elapsedMs?: number; // * 该任务已耗时
+  error?: string; // 错误时的人类可读信息
+  outputPath?: string; // 完成时的本地文件路径
 }
 ```
 
-加 ★ 的字段是 R-08 强制要求,不能为了省事省略。
+加 * 的字段是 R-08 强制要求,不能为了省事省略。
 
 ---
 

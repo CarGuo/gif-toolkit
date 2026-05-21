@@ -29,10 +29,10 @@
 
 ## 反向断言
 
-- ❌ **不允许** 在 onStart 内联展开 segment picker UI,UI 必须只在 SegmentPicker / BatchSegmentModal 两个组件里。
-- ❌ **不允许** 把 `selection: {}` 当作"用户没选"来 fallback —— 用户也许就是想清空所有视频但 hit 了 confirm,这种情况 [setOne](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/BatchSegmentModal.tsx) 必须把空数组归一为 `[0]`,确保至少 1 段。
-- ❌ **不允许** modal 显示短视频 entry —— 上游必须 `filter(durationSec > maxSegmentSec)`,否则用户会看到"1 段你也让我选"很 confused。
-- ❌ **不允许** 直接复用 R-22 的 PreviewPanel chip 代码而不抽组件 —— 复制粘贴会导致 R-23 修了 R-22 不修。
+- No **不允许** 在 onStart 内联展开 segment picker UI,UI 必须只在 SegmentPicker / BatchSegmentModal 两个组件里。
+- No **不允许** 把 `selection: {}` 当作"用户没选"来 fallback —— 用户也许就是想清空所有视频但 hit 了 confirm,这种情况 [setOne](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/BatchSegmentModal.tsx) 必须把空数组归一为 `[0]`,确保至少 1 段。
+- No **不允许** modal 显示短视频 entry —— 上游必须 `filter(durationSec > maxSegmentSec)`,否则用户会看到"1 段你也让我选"很 confused。
+- No **不允许** 直接复用 R-22 的 PreviewPanel chip 代码而不抽组件 —— 复制粘贴会导致 R-23 修了 R-22 不修。
 
 ---
 

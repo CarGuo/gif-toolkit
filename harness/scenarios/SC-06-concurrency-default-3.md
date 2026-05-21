@@ -26,11 +26,11 @@
 
 ## 反向断言
 
-- ❌ **不允许** PQueue 硬编码 `new PQueue({ concurrency: 1 })`
-- ❌ **不允许**接受 `concurrency: 100`(直接打爆机器)
-- ❌ **不允许**接受 `concurrency: 0` 或负数(让任务永远不开始)
-- ❌ **不允许**修改并发后老的 PQueue 还是旧值(要么重建 PQueue,要么调用 `queue.concurrency = n`)
-- ❌ **不允许**为了"看起来快"把 concurrency 默认值开到 8(单机性能差/手机模式发烫)
+- No **不允许** PQueue 硬编码 `new PQueue({ concurrency: 1 })`
+- No **不允许**接受 `concurrency: 100`(直接打爆机器)
+- No **不允许**接受 `concurrency: 0` 或负数(让任务永远不开始)
+- No **不允许**修改并发后老的 PQueue 还是旧值(要么重建 PQueue,要么调用 `queue.concurrency = n`)
+- No **不允许**为了"看起来快"把 concurrency 默认值开到 8(单机性能差/手机模式发烫)
 
 ---
 

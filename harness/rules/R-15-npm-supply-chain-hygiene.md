@@ -59,14 +59,14 @@
 
 ## 反例
 
-- ❌ `.npmrc` 里写 `min-release-age=10080`(混淆 npm/pnpm 单位,等于 27 年,实际禁所有安装)
-- ❌ 在 CI 里跑 `npm install` 而不是 `npm ci`(lockfile 会被默默修改,放大攻击窗口)
-- ❌ 新加包写成 `"foo": "^1.2.3"`(应该是 `"foo": "1.2.3"`)
-- ❌ `package.json.scripts.postinstall = "npm rebuild"`(无 allowlist,等于把 ignore-scripts 防护打回零;必须显式 5 个包名)
-- ❌ 在 `package.json.scripts.postinstall` 加新 native dep 但没在 PR 里说明该包做了什么(等于盲签信任)
-- ❌ 用 `--min-release-age=0` 绕过但 PR 描述没写 CVE 编号 / 受影响版本(失去事后审计能力)
-- ❌ 关掉 `audit-signatures` 来规避一个出问题的包(应当反过来:把那个包钉到上一个签名良好的版本)
-- ❌ lockfile 里 resolved 指向非官方镜像(`registry.npmmirror.com` / `registry.cnpmjs.org` 等)— `lockfile-lint --allowed-hosts npm` 会失败,这是**预期**;切换镜像是镜像层的事,不要写进 lockfile
+- No `.npmrc` 里写 `min-release-age=10080`(混淆 npm/pnpm 单位,等于 27 年,实际禁所有安装)
+- No 在 CI 里跑 `npm install` 而不是 `npm ci`(lockfile 会被默默修改,放大攻击窗口)
+- No 新加包写成 `"foo": "^1.2.3"`(应该是 `"foo": "1.2.3"`)
+- No `package.json.scripts.postinstall = "npm rebuild"`(无 allowlist,等于把 ignore-scripts 防护打回零;必须显式 5 个包名)
+- No 在 `package.json.scripts.postinstall` 加新 native dep 但没在 PR 里说明该包做了什么(等于盲签信任)
+- No 用 `--min-release-age=0` 绕过但 PR 描述没写 CVE 编号 / 受影响版本(失去事后审计能力)
+- No 关掉 `audit-signatures` 来规避一个出问题的包(应当反过来:把那个包钉到上一个签名良好的版本)
+- No lockfile 里 resolved 指向非官方镜像(`registry.npmmirror.com` / `registry.cnpmjs.org` 等)— `lockfile-lint --allowed-hosts npm` 会失败,这是**预期**;切换镜像是镜像层的事,不要写进 lockfile
 
 ## 关联场景
 

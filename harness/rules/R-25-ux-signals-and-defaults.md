@@ -21,12 +21,12 @@
 
 ## 反向断言
 
-- ❌ **不允许** loading overlay 用 `setTimeout` 延迟显示("等 0.5s 再展示"看似优雅,但用户感知就是"消失一段时间")。必须 modal 一打开就立即显示。
-- ❌ **不允许** 缩略图 hook 在 `videoUrl` 变化时不清空旧 thumbs(否则切换视频会短暂显示前一个视频的缩略图)。
-- ❌ **不允许** 缩略图失败一次就放弃整个视频(每段独立 `null`,不互相阻塞)。
-- ❌ **不允许** 重复嗅探 confirm 把"清空当前结果重新拉取"翻译成英文或省略。用户必须明确知道"会丢失当前选择"。
-- ❌ **不允许** 用 `prompt()` 替代 `confirm()`(`prompt` 会要求文本输入,误操作率更高)。
-- ❌ **不允许** `HARD_MIN_SIZE` 被联动改成 450(那是 [processor.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor.ts#L139) 的最低安全下限,用户给的是**默认值**,不是**绝对下限**)。
+- No **不允许** loading overlay 用 `setTimeout` 延迟显示("等 0.5s 再展示"看似优雅,但用户感知就是"消失一段时间")。必须 modal 一打开就立即显示。
+- No **不允许** 缩略图 hook 在 `videoUrl` 变化时不清空旧 thumbs(否则切换视频会短暂显示前一个视频的缩略图)。
+- No **不允许** 缩略图失败一次就放弃整个视频(每段独立 `null`,不互相阻塞)。
+- No **不允许** 重复嗅探 confirm 把"清空当前结果重新拉取"翻译成英文或省略。用户必须明确知道"会丢失当前选择"。
+- No **不允许** 用 `prompt()` 替代 `confirm()`(`prompt` 会要求文本输入,误操作率更高)。
+- No **不允许** `HARD_MIN_SIZE` 被联动改成 450(那是 [processor.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor.ts#L139) 的最低安全下限,用户给的是**默认值**,不是**绝对下限**)。
 
 ---
 

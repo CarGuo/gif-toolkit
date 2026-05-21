@@ -51,9 +51,9 @@ E. **Sec-CH-UA 改写** — headless 请求必须改 `Sec-CH-UA` / `Sec-CH-UA-Mo
 
 ## 反向断言
 
-- ❌ **不允许**给 OpenAI(或任何具体 host)写专属分支。新增的规则 8 是「按 provider 结构识别 JSON-escaped URL」,适用于所有 SPA 页面。
-- ❌ **不允许**在交付前不跑 e2e 就声称"已修复"。本场景的存在本身就是上一次违反纪律的留痕。
-- ❌ **不允许**因为 cheerio 找不到 `<iframe>` 就立刻调用 BrowserWindow 渲染 — 静态正则 8 应当先尝试,只有正则也找不到才落到 headless。
+- No **不允许**给 OpenAI(或任何具体 host)写专属分支。新增的规则 8 是「按 provider 结构识别 JSON-escaped URL」,适用于所有 SPA 页面。
+- No **不允许**在交付前不跑 e2e 就声称"已修复"。本场景的存在本身就是上一次违反纪律的留痕。
+- No **不允许**因为 cheerio 找不到 `<iframe>` 就立刻调用 BrowserWindow 渲染 — 静态正则 8 应当先尝试,只有正则也找不到才落到 headless。
 
 ---
 

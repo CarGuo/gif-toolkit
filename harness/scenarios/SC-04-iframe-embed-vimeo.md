@@ -42,10 +42,10 @@
 
 ## 反向断言
 
-- ❌ **不允许**真的去下载这个 iframe URL(它返回 player HTML,不是视频流)
-- ❌ **不允许**为某个 host 加裸字符串分支(如 `if (host === 'vimeo.com')`)。所有 player 域名走 [matchEmbedProvider](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/sniffer.ts#L51-L78) 的结构化白名单
-- ❌ **不允许**把 disqus/stripe-checkout 这种非视频 iframe 也错认为 player(用 host + needsPath 双重判定)
-- ❌ **不允许**让"批处理"绕过 `requiresExternalDownload`,把 iframe-embed 也跑一遍
+- No **不允许**真的去下载这个 iframe URL(它返回 player HTML,不是视频流)
+- No **不允许**为某个 host 加裸字符串分支(如 `if (host === 'vimeo.com')`)。所有 player 域名走 [matchEmbedProvider](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/sniffer.ts#L51-L78) 的结构化白名单
+- No **不允许**把 disqus/stripe-checkout 这种非视频 iframe 也错认为 player(用 host + needsPath 双重判定)
+- No **不允许**让"批处理"绕过 `requiresExternalDownload`,把 iframe-embed 也跑一遍
 
 ---
 

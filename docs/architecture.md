@@ -216,3 +216,84 @@ stateDiagram-v2
     (单测 tests/main/processor-utils.test.ts)
   end note
 ```
+
+---
+
+## 8. 跨平台 App Icon 资产链路
+
+dock / taskbar / launcher 上 App 图标看起来比别人大,根因在于其它 App 都遵循 Apple HIG 的 **824 / 1024 安全区**:1024 画布里只有中心 824×824 正方形是有像素的,四周 100px 透明 padding;系统会按 padding 把图标在 dock 等位置缩放对齐。直接用 1024 全铺的 PNG 当 icon,等同于"别人 824 我 1024",视觉上自然偏大。
+
+[scripts/normalize-app-icon.mjs](file:///Users/guoshuyu/workspace/gif-toolkit/scripts/normalize-app-icon.mjs) 是这条修正的唯一入口:
+
+![跨平台 logo 资产链路](./images/architecture-5-icons.png)
+
+```mermaid
+flowchart LR
+  Src["src/renderer/public/icon-source.png<br/>(原画 PNG, 任意尺寸)"] --> N["normalize-app-icon.mjs"]
+
+  N --> S1["resize → 824 × 824 (sharp lanczos)"]
+  S1 --> S2["squircle 圆角 SVG mask<br/>radius = 185 (Apple HIG)"]
+  S2 --> S3["1024 透明画布 + offset 100 居中<br/>4 角 alpha=0 / 中心 alpha=255"]
+  S3 --> Master["build/icon.png (1024×1024 master)"]
+
+  Master --> M1["sharp 多档位 → build/icons/<br/>{16,32,48,64,128,256,512,1024}.png<br/>(Linux + electron-builder Linux icon dir)"]
+  Master --> M2["build/icon.iconset/* (10 档含 @2x)<br/>iconutil → build/icon.icns<br/>(macOS dmg/zip)"]
+  Master --> M3["手工 ICO 头部组装<br/>{16,24,32,48,64,128,256} PNG → build/icon.ico<br/>(Windows nsis)"]
+  Master --> M4["复制 → src/renderer/public/icon.png<br/>(in-app DOM 渲染)"]
+
+  M1 --> EB["electron-builder<br/>linux.icon = 'build/icons'"]
+  M2 --> EB2["electron-builder<br/>mac.icon = 'build/icon.icns'"]
+  M3 --> EB3["electron-builder<br/>win.icon = 'build/icon.ico'"]
+
+  classDef src fill:#fff3e0,stroke:#e65100;
+  classDef pkg fill:#e8f5e9,stroke:#2e7d32;
+  class Src src;
+  class EB,EB2,EB3 pkg;
+```
+
+零新增 npm 依赖:复用已经在 dependencies 里的 sharp、macOS 自带的 iconutil、纯 Node fs 手工拼 ICO 头(ICONDIR 6 字节 + ICONDIRENTRY 16 字节 × n + PNG 数据)。
+
+---
+
+## 9. 并发与取消传播
+
+[processor.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor.ts) 用 [p-queue](https://github.com/sindresorhus/p-queue) 做并发,默认 concurrency=3(R-07 上限 8)。每个 task 在调度时分到一对 `(taskId, AbortController)`,存进 `taskAborts: Map<string, AbortController>`,signal 沿三层往下贯穿:
+
+![并发与取消传播](./images/architecture-6-cancel.png)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as User
+  participant R as Renderer
+  participant M as Main IPC
+  participant Q as PQueue (concurrency=3)
+  participant W as Worker (processOne)
+  participant FFM as ffmpeg / gifsicle child_process
+
+  U->>R: startBatch(tasks)
+  R->>M: invoke('start:batch')
+  M->>Q: queue.add × N (each carries AbortController)
+  par 3 tasks running concurrently
+    Q->>W: processOne(taskA, signalA)
+    Q->>W: processOne(taskB, signalB)
+    Q->>W: processOne(taskC, signalC)
+  end
+  W->>FFM: spawn ffmpeg, pass { signal }
+  Note over W,FFM: child_process 收到 signal,abort 时自动 SIGTERM
+
+  U->>R: cancelTask(taskB)
+  R->>M: invoke('cancel:task', taskB)
+  M->>M: taskAborts.get(taskB)?.abort()
+  M-->>W: signalB fired
+  W->>FFM: SIGTERM 已发出
+  W-->>M: throw CancelledError
+  M-->>R: emit progress(taskB, status=cancelled)
+  Note over Q,W: A / C 仍在跑,不受 B 取消影响
+```
+
+关键不变量:
+- 一个 task 的 abort 只杀**它自己的** ffmpeg/gifsicle 子进程,**不影响**同 batch 其它并发 task(R-43.2)
+- queue 跑空后 `taskAborts` 清空,防止内存泄漏
+- 渲染端收到 `status=cancelled` 直接打 chip,不再期望后续 progress(R-26)
+

@@ -13,12 +13,12 @@
 - 如果你确实需要识别某类 player(如 Vimeo),用 [matchEmbedProvider](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/sniffer.ts#L51-L78) 那张**结构化白名单**(hostSuffix + needsPath),不要单独写 if
 
 ## 反例
-- ❌ `if (host === 'blogger.googleusercontent.com') applyDedup()`
-- ❌ `if (url.includes('twimg.com')) skipQueryStripping()`
+- No `if (host === 'blogger.googleusercontent.com') applyDedup()`
+- No `if (url.includes('twimg.com')) skipQueryStripping()`
 
 ## 反向例(可接受的"结构化"白名单)
-- ✅ `RULES = [{ hostSuffix: 'player.vimeo.com', needsPath: '/video/', provider: 'vimeo.com' }, ...]`
-- ✅ 通用化后的 dedupKey 把"展示型 query 参数"按特征剥离
+- Yes `RULES = [{ hostSuffix: 'player.vimeo.com', needsPath: '/video/', provider: 'vimeo.com' }, ...]`
+- Yes 通用化后的 dedupKey 把"展示型 query 参数"按特征剥离
 
 ## 关联场景
 - [SC-01](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-01-dedup-key-generic.md)

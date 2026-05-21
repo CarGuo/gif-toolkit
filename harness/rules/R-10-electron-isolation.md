@@ -16,9 +16,9 @@
 - Renderer 永远 `import { ... } from 'react'`,**禁止** `require('electron')`
 
 ## 反例
-- ❌ `nodeIntegration: true`
-- ❌ `contextIsolation: false`
-- ❌ preload 里 `window.fs = require('fs')`
+- No `nodeIntegration: true`
+- No `contextIsolation: false`
+- No preload 里 `window.fs = require('fs')`
 
 ## 关联场景
 - 没有专属 SC,但是所有 SC 都默认依赖这条不破。

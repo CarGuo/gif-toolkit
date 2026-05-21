@@ -35,11 +35,11 @@
 
 ## 反向断言
 
-- ❌ **不允许**把 PNG palette 文件(`output.palette.png`)持久化到磁盘 —— 中间产物只能在 filter_complex 内部传递。
-- ❌ **不允许** SEG_CONCURRENCY 为 1(关并行 = 倒退到 N×单段时间)或 > 4(和 OS / 渲染层抢资源,得不偿失,实测 CPU 占用 100%+ 时反而变慢)。
-- ❌ **不允许** 在 yt-dlp section 下载时使用 ytdlp-nodejs 包装层 —— 该包装层不透传 `--download-sections`,必须直接 spawn binary。
-- ❌ **不允许** 跳过 `ensurePublicHttp` 校验直接把 `pageUrl` 喂给 yt-dlp([R-09](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-09-iframe-embed-detect-only.md) 要求 main 层是安全边界)。
-- ❌ **不允许** partial-fetch 失败时把异常抛给 renderer —— 用户会看到一个 "yt-dlp 错误"弹窗,但这是优化路径,fallback 必须静默。
+- No **不允许**把 PNG palette 文件(`output.palette.png`)持久化到磁盘 —— 中间产物只能在 filter_complex 内部传递。
+- No **不允许** SEG_CONCURRENCY 为 1(关并行 = 倒退到 N×单段时间)或 > 4(和 OS / 渲染层抢资源,得不偿失,实测 CPU 占用 100%+ 时反而变慢)。
+- No **不允许** 在 yt-dlp section 下载时使用 ytdlp-nodejs 包装层 —— 该包装层不透传 `--download-sections`,必须直接 spawn binary。
+- No **不允许** 跳过 `ensurePublicHttp` 校验直接把 `pageUrl` 喂给 yt-dlp([R-09](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-09-iframe-embed-detect-only.md) 要求 main 层是安全边界)。
+- No **不允许** partial-fetch 失败时把异常抛给 renderer —— 用户会看到一个 "yt-dlp 错误"弹窗,但这是优化路径,fallback 必须静默。
 
 ---
 
