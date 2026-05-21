@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   TaskProgress,
   PreviewResult,
-  SniffProgress,
   SniffedMedia,
   ResolvedMedia,
   UploadConfigs
@@ -21,6 +20,7 @@ import { useWebviewMenu } from './components/useWebviewMenu';
 import { useBottomResize } from './components/useBottomResize';
 import { useEmbedResolve } from './components/useEmbedResolve';
 import { useSniffSession } from './components/useSniffSession';
+import { useSniffPanelController } from './components/useSniffPanelController';
 import { useIpcEvents } from './components/useIpcEvents';
 import { useUploadDispatch } from './components/useUploadDispatch';
 import { useUploadOrchestrator } from './components/useUploadOrchestrator';
@@ -67,7 +67,13 @@ const App: React.FC = () => {
   }
   const url = ws.activeWs.url;
   const setUrl = makeWsSetter('url');
-  const [urlError, setUrlError] = useState<string | null>(null);
+  // R-WS-90 P5 — SniffPanel-自治 state 现在由 useSniffPanelController
+  // 持有(see [useSniffPanelController.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/useSniffPanelController.ts)).
+  // 这 4 个 state 与 active workspace 没有耦合,搬到独立 hook 后
+  // App.tsx 不再持有任何"嗅探侧" state,符合 spec §2.1。
+  const sniffPanel = useSniffPanelController();
+  const urlError = sniffPanel.urlError;
+  const setUrlError = sniffPanel.setUrlError;
   // R-62 — Toaster for cross-platform capability issues + ad-hoc
   // notifications. The hook returns a stable `pushCapability`
   // imperative we wire into the bottom-right Toaster instance.
@@ -80,25 +86,21 @@ const App: React.FC = () => {
   // [useBootstrapEffects.ts] for the full R-80 / R-62 contract.
   const sniffing = ws.activeWs.sniffing;
   const setSniffing = makeWsSetter('sniffing');
-  const [sniffProgress, setSniffProgress] = useState<SniffProgress | null>(null);
+  // R-WS-90 P5 — sniffProgress / activeSniffMode / useRealChromeProfile
+  // 由 useSniffPanelController 持有(见上文 sniffPanel)。下面三组
+  // 解构是为了让原 ~52 处引用 setX 的代码完全不变,继续按原 setter 名字
+  // 调用即可。
   // R-55 Fix #2 — current sniff backend; non-null only while sniffing.
   // Drives whether the「✓ 完成嗅探」button shows up at the 60% stage
   // (only meaningful for system-chrome which waits for child exit).
-  const [activeSniffMode, setActiveSniffMode] = useState<'embed' | 'system-chrome' | 'ytdlp-direct' | 'offline' | null>(null);
-  // R-59 — User preference: when真 Chrome 嗅探 is invoked, should we
-  // launch Chrome against the user's REAL default profile (full
-  // cookies / history / extensions, no Turnstile loop) or against
-  // our isolated per-host profile (safer, but CF flags as bot).
-  // Persisted across restarts because the trade-off is per-user
-  // (some users will always want isolation; others always want
-  // their real cookies). Renderer surfaces this as a checkbox under
-  // the 真 Chrome 入口 in the sniff menu.
-  const [useRealChromeProfile, setUseRealChromeProfile] = useState<boolean>(() => {
-    try { return localStorage.getItem('giftk.useRealChromeProfile') === '1'; } catch { return false; }
-  });
-  useEffect(() => {
-    try { localStorage.setItem('giftk.useRealChromeProfile', useRealChromeProfile ? '1' : '0'); } catch { /* ignore */ }
-  }, [useRealChromeProfile]);
+  // R-59 — useRealChromeProfile persisted in localStorage by the
+  // controller's useEffect; surfaced here as a renamed alias.
+  const sniffProgress = sniffPanel.sniffProgress;
+  const setSniffProgress = sniffPanel.setSniffProgress;
+  const activeSniffMode = sniffPanel.activeSniffMode;
+  const setActiveSniffMode = sniffPanel.setActiveSniffMode;
+  const useRealChromeProfile = sniffPanel.useRealChromeProfile;
+  const setUseRealChromeProfile = sniffPanel.setUseRealChromeProfile;
   const result = ws.activeWs.result;
   const setResult = makeWsSetter('result');
   const selected = ws.activeWs.selected;
@@ -484,7 +486,7 @@ const App: React.FC = () => {
       setTimeout(() => { void onSniff(); }, 0);
     });
     return () => { try { off(); } catch { /* best-effort */ } };
-  }, [onSniff, setUrl]);
+  }, [onSniff, setUrl, setUrlError]);
 
   // R-86 — Tray toast / navigate / re-upload bridges. Toasts are
   // forwarded to the existing main-log buffer (visible in the log
