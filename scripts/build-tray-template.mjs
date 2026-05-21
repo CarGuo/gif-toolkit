@@ -1,50 +1,53 @@
 #!/usr/bin/env node
 /**
- * Generate macOS tray-icon template images from build/icon.png.
+ * Render macOS tray-icon template images from a hand-tuned SVG glyph.
  *
- * macOS menu-bar tray icons should be "template images": a single
- * colour mask (black RGB + original alpha). AppKit then re-tints
- * them per the menu bar's appearance (light/dark) so the icon
- * remains readable in both modes. Shipping a full-colour brand
- * logo as the tray image looks unprofessional on macOS — the
- * platform expects a glyph, not a coloured tile.
+ * Why a dedicated SVG instead of recolouring build/icon.png?
+ *   The brand logo is a full-colour app icon: a white rounded-square
+ *   tile holding a colourful image-stack + arrows + play-triangle.
+ *   When you reduce that to an alpha mask at 18×18 (the macOS menu
+ *   bar tray size), every non-transparent pixel gets re-painted with
+ *   one tone, and the dominant non-transparent region IS the white
+ *   squircle base — so the result is a completely unidentifiable
+ *   solid blob. Setting setTemplateImage(true) on it gives a white
+ *   square in the menu bar.
  *
- * Algorithm:
- *   1. Resize source PNG (build/icon.png) to N×N preserving alpha.
- *   2. For every pixel with alpha > 0, force RGB to (0, 0, 0).
- *      Alpha stays untouched — the silhouette remains exact.
- *   3. Write out the result as PNG.
+ *   macOS HIG menu-bar extras want a *glyph*, not a re-coloured app
+ *   icon. We hand-authored build/icons/trayTemplate.svg distilling
+ *   the brand into two recognisable strokes (loop arrows + play
+ *   triangle) that stay legible at 18px. Sharp rasterises that SVG
+ *   to PNG. The output already has black RGB + transparent
+ *   background, so no per-pixel re-tinting step is needed — we just
+ *   round-trip through sharp to lock dimensions and strip metadata.
  *
- * Outputs (committed to the repo so dev/CI builds don't need to
- * regenerate them):
- *   build/icons/trayTemplate.png      18×18 (1× macOS menu bar)
- *   build/icons/trayTemplate@2x.png   36×36 (2× retina)
+ * Outputs:
+ *   build/icons/trayTemplate.png       18×18 (1× menu bar)
+ *   build/icons/trayTemplate@2x.png    36×36 (2× retina)
  *
  * Run with:  node scripts/build-tray-template.mjs
  */
 import sharp from 'sharp';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
-async function makeTemplate(srcPath, outPath, size) {
-  const { data, info } = await sharp(srcPath)
-    .resize(size, size, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
-    .ensureAlpha()
-    .raw()
-    .toBuffer({ resolveWithObject: true });
-  for (let i = 0; i < data.length; i += 4) {
-    if (data[i + 3] > 0) {
-      data[i] = 0;
-      data[i + 1] = 0;
-      data[i + 2] = 0;
-    }
-  }
-  await sharp(data, { raw: { width: info.width, height: info.height, channels: 4 } })
-    .png()
+async function renderGlyph(svgPath, outPath, size) {
+  const svg = readFileSync(svgPath);
+  // density=size*4 oversamples the SVG before downscale so anti-
+  // aliased edges stay clean at the small target. We then resize
+  // with `fit: contain` and a fully transparent background so the
+  // template image's alpha channel matches the glyph's ink, not a
+  // bounding box.
+  await sharp(svg, { density: size * 8 })
+    .resize(size, size, {
+      fit: 'contain',
+      background: { r: 0, g: 0, b: 0, alpha: 0 },
+    })
+    .png({ compressionLevel: 9 })
     .toFile(outPath);
   console.log(`[build-tray-template] wrote ${outPath} (${size}x${size})`);
 }
 
 const root = process.cwd();
-const src = path.join(root, 'build', 'icon.png');
-await makeTemplate(src, path.join(root, 'build', 'icons', 'trayTemplate.png'), 18);
-await makeTemplate(src, path.join(root, 'build', 'icons', 'trayTemplate@2x.png'), 36);
+const src = path.join(root, 'build', 'icons', 'trayTemplate.svg');
+await renderGlyph(src, path.join(root, 'build', 'icons', 'trayTemplate.png'), 18);
+await renderGlyph(src, path.join(root, 'build', 'icons', 'trayTemplate@2x.png'), 36);

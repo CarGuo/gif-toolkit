@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  macOS menu-bar tray glyph for Gif Toolkit.
+
+  Design rationale:
+    A full-colour brand logo (white squircle + multi-colour stack inside)
+    cannot be reduced to a meaningful template image at 18x18 — taking
+    its alpha mask collapses to an opaque rounded square, which is what
+    the user (correctly) rejected as "ugly white blob".
+
+    Instead we designed a dedicated glyph that distils the brand into
+    a recognisable mark at 18px:
+      - Two semicircular arrows forming a circular loop  (= Gif / loop)
+      - A solid play triangle in the centre               (= playback)
+    This is the standard "media-loop" idiom and stays legible at 1x.
+
+  Rendering contract:
+    - Stroke / fill colour is black; stroke-width tuned for 18x18.
+    - Background is transparent. After rasterisation by sharp the
+      build/icons/trayTemplate.png consumer in src/main/tray.ts calls
+      setTemplateImage(true) so AppKit re-tints based on light/dark
+      menu bar appearance.
+
+  Authoring grid:
+    - viewBox 0 0 24 24 with a 2px outer breathing room (drawing area
+      is 2,2 -> 22,22 = 20x20). Sharp downsamples to 18 / 36.
+    - Arrow stroke 2.4 keeps a confident weight after downsample.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none">
+  <!--
+    Top-right semicircular arrow:
+    starts at the left side of the loop (x=4,y=12), arcs over the top
+    to the right side (x=20,y=12), tipped with an arrow head pointing
+    down/right. Drawn as a stroked path because at 18px a stroked arc
+    reads more cleanly than two stacked filled shapes.
+  -->
+  <path
+    d="M 4 12 A 8 8 0 0 1 19.5 10"
+    stroke="#000"
+    stroke-width="2.4"
+    stroke-linecap="round"
+    fill="none"
+  />
+  <!-- Top-right arrow head (filled triangle) -->
+  <path d="M 17.5 6.2 L 21.6 8.6 L 17.4 11.4 Z" fill="#000" />
+
+  <!--
+    Bottom-left semicircular arrow: mirror of the top arrow.
+  -->
+  <path
+    d="M 20 12 A 8 8 0 0 1 4.5 14"
+    stroke="#000"
+    stroke-width="2.4"
+    stroke-linecap="round"
+    fill="none"
+  />
+  <!-- Bottom-left arrow head (filled triangle) -->
+  <path d="M 6.5 17.8 L 2.4 15.4 L 6.6 12.6 Z" fill="#000" />
+
+  <!--
+    Centre play triangle. Sized to sit cleanly inside the loop without
+    touching the arc strokes at 18x18.
+  -->
+  <path d="M 10 8.5 L 15 12 L 10 15.5 Z" fill="#000" />
+</svg>
