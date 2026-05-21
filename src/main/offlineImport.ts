@@ -575,17 +575,35 @@ function importMhtmlFile(absPath: string, opts: OfflineImportOptions): SniffResu
   // Stage every part into a temp dir keyed by its Content-Location so
   // relative-href resolution (collectFromDom) sees real files on disk.
   const stagedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'giftk-mhtml-'));
-  // R-83 — On any throw between here and the successful `return`, remove
-  // the staged dir so a failed mhtml import does not leak the partial
-  // tree under `os.tmpdir()`. On success, register the dir with the
-  // session registry so the daily sweeper (sweepTmpDir) won't reap it
-  // while the renderer is still reading staged files via `giftk-local://`.
+  // R-87 — Register the staged dir with sessionTmpRegistry IMMEDIATELY,
+  // so the daily sweeper (sweepTmpDir) can never reap it while we're
+  // still writing into it; on any throw between here and the successful
+  // `return`, forget + remove. On `before-quit`, sessionTmpRegistry
+  // synchronously cleans whatever is still registered.
+  sessionTmpRegistry.registerSession(stagedDir);
   try {
     const result = importMhtmlFileBody(absPath, opts, raw, partOffsets, delim, closing, stagedDir);
-    sessionTmpRegistry.registerSession(stagedDir);
+    // Success path INTENTIONALLY keeps stagedDir registered as a live
+    // session for the rest of the process lifetime: the renderer is
+    // about to fetch its files via `giftk-local://`, and we don't want
+    // sweepTmpDir reaping it 24h later. before-quit's
+    // sessionTmpRegistry.cleanupSessionSync() will release both the
+    // Set entry and the disk on quit. The Set grows by +1 per
+    // successful import, bounded by the user's session length —
+    // tradeoff is acceptable; do NOT call forgetSession here.
     return result;
   } catch (err) {
-    try { fs.rmSync(stagedDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+    sessionTmpRegistry.forgetSession(stagedDir);
+    try {
+      fs.rmSync(stagedDir, { recursive: true, force: true });
+    } catch (rmErr) {
+      const code = (rmErr as NodeJS.ErrnoException)?.code;
+      // ENOENT is fine (already gone); any other failure is loud, not
+      // silent — R-87 guardrail forbids swallowing these without trace.
+      if (code !== 'ENOENT') {
+        log(`offline import: stagedDir cleanup failed (${stagedDir}): ${(rmErr as Error).message}`);
+      }
+    }
     throw err;
   }
 }

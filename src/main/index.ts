@@ -1798,6 +1798,21 @@ if (!gotLock) {
         showOrCreateMainWindow: trayDeps.showOrCreateMainWindow,
         sniffClipboard: () => sniffClipboardURL(trayDeps),
         log,
+        notifyConflict: ({ accelerator, reason }) => {
+          // R-86 红线 #1 — surface to renderer so the user knows their
+          // global shortcut isn't bound. We piggy-back on `tray:toast`
+          // (the same channel SC-21 / R-86 promised) so renderer code
+          // path is identical to other tray feedback.
+          const w = mainWindow;
+          if (w && !w.isDestroyed()) {
+            try {
+              w.webContents.send('tray:toast', {
+                level: 'warn',
+                message: `全局快捷键 ${accelerator} 注册失败:${reason}。可改用托盘菜单或换一组快捷键。`,
+              });
+            } catch { /* best-effort */ }
+          }
+        },
       });
       log(`globalShortcut: show=${report.show.accelerator}/${report.show.ok} sniff=${report.sniffClipboard.accelerator}/${report.sniffClipboard.ok}`);
     } catch (e) {

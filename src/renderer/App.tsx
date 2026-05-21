@@ -463,6 +463,43 @@ const App: React.FC = () => {
     [sniffSession]
   );
 
+  // R-86 — Tray bridge: when the user picks "从剪贴板嗅探 URL" from the
+  // system tray (or hits the global shortcut), the main process pushes
+  // a `tray:sniff-url` event with the validated URL. We re-use the EXACT
+  // same code path as a manual "paste + Enter" — setUrl + onSniff —
+  // so the request goes through useSniffSession's dedupe / history / ws
+  // wiring AND the main-side `sniff:url` handler with its sanitize
+  // chain, satisfying R-86 红线 #2.
+  //
+  // setUrl is a useState setter, so depsRef inside useSniffSession
+  // only sees the new value after the next render. setTimeout(0)
+  // defers onSniff() until React has flushed state + refreshed
+  // depsRef, avoiding the "trim() against stale url" race.
+  useEffect(() => {
+    if (!giftk?.onTraySniffUrl) return;
+    const off = giftk.onTraySniffUrl(({ url }) => {
+      if (typeof url !== 'string' || !url) return;
+      setUrlError(null);
+      setUrl(url);
+      setTimeout(() => { void onSniff(); }, 0);
+    });
+    return () => { try { off(); } catch { /* best-effort */ } };
+  }, [onSniff, setUrl]);
+
+  // R-86 — Tray toast / navigate / re-upload bridges. Toasts are
+  // forwarded to the existing main-log buffer (visible in the log
+  // panel) so the user has at least ONE visible surface for tray
+  // feedback even before a dedicated toast UI lands.
+  useEffect(() => {
+    if (!giftk?.onTrayToast) return;
+    const off = giftk.onTrayToast(({ level, message }) => {
+      if (typeof message !== 'string' || !message) return;
+      const prefix = level === 'error' ? '[tray:error]' : level === 'warn' ? '[tray:warn]' : '[tray]';
+      setLogs((prev) => [...prev, `${prefix} ${message}`].slice(-300));
+    });
+    return () => { try { off(); } catch { /* best-effort */ } };
+  }, [setLogs]);
+
   // R-44 — webview-assisted sniff. Opens a real Chromium window in the
   // main process so the user can sign in to gated sites. Resolves with a
   // SniffResult, which we feed into the same downstream wiring as

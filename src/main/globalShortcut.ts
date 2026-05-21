@@ -4,6 +4,13 @@ export interface ShortcutDeps {
   showOrCreateMainWindow: () => Promise<void> | void;
   sniffClipboard: () => Promise<void> | void;
   log: (msg: string) => void;
+  /**
+   * R-86 红线 #1 — when an accelerator fails to register (conflict or
+   * throw), surface a tray:toast warn so the user can discover *why*
+   * Cmd/Ctrl+Shift+G isn't working and pick another shortcut. Optional
+   * because tests / headless callers may not want UI side-effects.
+   */
+  notifyConflict?: (info: { accelerator: string; reason: string }) => void;
 }
 
 export interface ShortcutBindings {
@@ -29,11 +36,18 @@ export function registerShortcuts(deps: ShortcutDeps, bindings: ShortcutBindings
   const tryRegister = (acc: string, fn: () => void): boolean => {
     try {
       const ok = globalShortcut.register(acc, fn);
-      if (ok) registered.push(acc);
-      else deps.log(`globalShortcut: ${acc} registration declined (likely conflict)`);
+      if (ok) {
+        registered.push(acc);
+      } else {
+        const reason = 'registration declined (likely conflict)';
+        deps.log(`globalShortcut: ${acc} ${reason}`);
+        try { deps.notifyConflict?.({ accelerator: acc, reason }); } catch { /* best-effort */ }
+      }
       return ok;
     } catch (e) {
-      deps.log(`globalShortcut: ${acc} threw: ${(e as Error).message}`);
+      const reason = `threw: ${(e as Error).message}`;
+      deps.log(`globalShortcut: ${acc} ${reason}`);
+      try { deps.notifyConflict?.({ accelerator: acc, reason }); } catch { /* best-effort */ }
       return false;
     }
   };
