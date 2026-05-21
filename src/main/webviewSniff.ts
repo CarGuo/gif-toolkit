@@ -39,6 +39,7 @@ import {
   acceptWebviewMedia,
   mediaId
 } from './webviewSniffUtils';
+import { mediaVariantScore } from './mediaDedup';
 import { log } from './logger';
 
 const PARTITION = 'persist:webview-sniff';
@@ -90,8 +91,10 @@ function attachNetworkRecorder(out: Map<string, CapturedResource>, partition: st
     const accepted = acceptWebviewMedia(byMime || byExt, ct, url);
     if (!accepted) return;
     const key = webviewDedupKey(url);
-    if (out.has(key)) return;
-    out.set(key, { url, kind: accepted, mime: ct });
+    const next = { url, kind: accepted, mime: ct };
+    const existing = out.get(key);
+    if (existing && mediaVariantScore(next) <= mediaVariantScore(existing)) return;
+    out.set(key, next);
   };
   ses.webRequest.onCompleted({ urls: ['http://*/*', 'https://*/*'] }, handler);
   return () => {

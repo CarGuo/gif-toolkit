@@ -49,6 +49,7 @@ const OPTIMIZE_METHOD_OPTIONS: ReadonlyArray<{
   { value: 'drop-every-nth', label: 'Drop every Nth frame', hint: '隔帧抽样 (例如每 2 帧丢 1)' },
   { value: 'drop-duplicates', label: 'Drop duplicate frames', hint: '去重帧,只保留差异帧' },
   { value: 'optimize-transparency', label: 'Optimize transparency', hint: '透明优化 (web-safe colormap)' },
+  { value: 'wechat-safe', label: 'WeChat-safe (公众号适配)', hint: '全帧重铸 + 自动降帧 ≤300 + 剥水印,绕开公众号「来源信息无法识别」' },
   { value: 'budget', label: 'Size budget (4-Phase)', hint: '指定目标体积,自动迭代压缩到 ≤ KB' }
 ];
 
@@ -426,6 +427,11 @@ function ParamForm({ kind, params, setParams, mediaInfo, onTargetFormatTouch }: 
       if (m === 'drop-every-nth') {
         next.dropEveryN = prev.dropEveryN ?? 2;
       }
+      if (m === 'wechat-safe') {
+        // wechat-safe reuses the lossy slider so the user has a knob
+        // for "smaller vs cleaner". Default to 80 like the CLI script.
+        next.lossy = prev.lossy ?? 80;
+      }
       if (m === 'budget') {
         next.maxBytes = prev.maxBytes ?? 2 * 1024 * 1024;
       }
@@ -644,6 +650,16 @@ function ParamForm({ kind, params, setParams, mediaInfo, onTargetFormatTouch }: 
       />
       {method === 'lossy' ? (
         <NumField label="Lossy 强度 (0-200)" value={params.lossy} onChange={(v) => patch('lossy', v)} min={0} max={200} hint="80 是常用甜点" />
+      ) : null}
+      {method === 'wechat-safe' ? (
+        <>
+          <div className="tb-info-row">
+            ① ffmpeg 全帧重铸(无 local CT / 无 application extension / 关闭 transdiff)
+            <br />② gifsicle -O0 剥 extension/comment + lossy 重打包(不重引入 diff-frame)
+            <br />③ 帧数 &gt; 300 时自动抽帧(95% 安全 margin)
+          </div>
+          <NumField label="Lossy 强度 (0-200)" value={params.lossy} onChange={(v) => patch('lossy', v)} min={0} max={200} hint="0=禁用 / 80=常用甜点;越高体积越小但伪影越明显" />
+        </>
       ) : null}
       {method === 'color-reduction' || method === 'color-dither' ? (
         <NumField label="颜色数 (2-256)" value={params.colors} onChange={(v) => patch('colors', v)} min={2} max={256} hint="越低体积越小" />

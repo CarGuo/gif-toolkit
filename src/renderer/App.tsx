@@ -1,142 +1,85 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
-  SniffResult,
-  ProcessOptions,
   TaskProgress,
-  ProcessTask,
   PreviewResult,
   SniffProgress,
   SniffedMedia,
   ResolvedMedia,
-  UploadConfigs,
-  UploadHistoryItem,
-  UploadProgress,
-  UploadStartPayload
+  UploadConfigs
 } from '../shared/types';
-import { DEFAULT_OPTIONS } from '../shared/types';
-import type { GifOptimizeLevel, GifDither } from '../shared/types/process';
-import { MediaGrid } from './components/MediaGrid';
-import { OptionsForm } from './components/OptionsForm';
-import { PreviewModal } from './components/PreviewModal';
-import { ProgressDock } from './components/ProgressDock';
-import { BatchSegmentModal, type BatchSegmentEntry } from './components/BatchSegmentModal';
-import { HistoryPanel } from './components/HistoryPanel';
-import { HistoryDetailModal } from './components/HistoryDetailModal';
-import { ToolboxPanel } from './components/ToolboxPanel';
+import { type BatchSegmentEntry } from './components/BatchSegmentModal';
 import {
   useHistory,
   makeHistoryRecord,
-  mergeProgressIntoRecord,
-  mergeUploadIntoRecord,
-  type HistoryRecord,
-  type UploadRefForHistory
+  type HistoryRecord
 } from './components/useHistory';
 import { useSniffHistory } from './components/useSniffHistory';
-import { SniffHistoryPicker } from './components/SniffHistoryPicker';
-import { ManualOptimizeModal, type ManualOptimizeRequest } from './components/ManualOptimizeModal';
-import { useUploadHistory, isUploadConfigured } from './components/useUploadHistory';
-import { UploadSettingsModal } from './components/UploadSettingsModal';
-import { UploadHistoryPanel } from './components/UploadHistoryPanel';
-import { UploadResultModal } from './components/UploadResultModal';
-import { Toaster, useToaster } from './components/Toast';
-import { evaluateSizeGuard } from '../shared/sizeGuard';
-import { bootstrapImportFromLocalStorage } from './components/storageSchema';
-import { setDbErrorListener, type DbErrorEvent } from './components/dbErrorBus';
+import { type ManualOptimizeRequest } from './components/ManualOptimizeModal';
+import { useUploadHistory } from './components/useUploadHistory';
+import { useToaster } from './components/Toast';
+import { useWebviewMenu } from './components/useWebviewMenu';
+import { useBottomResize } from './components/useBottomResize';
+import { useEmbedResolve } from './components/useEmbedResolve';
+import { useSniffSession } from './components/useSniffSession';
+import { useIpcEvents } from './components/useIpcEvents';
+import { useUploadDispatch } from './components/useUploadDispatch';
+import { useUploadOrchestrator } from './components/useUploadOrchestrator';
+import { useProcessDispatch } from './components/useProcessDispatch';
+import { useWorkspaces, type Workspace } from './components/useWorkspaces';
+import { useBootstrapEffects } from './components/useBootstrapEffects';
+import { useGlobalDropZone } from './components/useGlobalDropZone';
+import { usePreviewState } from './components/usePreviewState';
+import { WorkspaceTabs } from './components/WorkspaceTabs';
+import { ModalsHost } from './views/ModalsHost';
+import { TopBar } from './views/TopBar';
+import { SecondaryViews } from './views/SecondaryViews';
+import { SniffSection } from './views/SniffSection';
+import { MediaGridPane } from './views/MediaGridPane';
+import { OptionsSection } from './views/OptionsSection';
+import { StartBatchFab } from './views/StartBatchFab';
 
 const giftk = (typeof window !== 'undefined' ? window.giftk : undefined);
 
 const SNIFF_TIMEOUT_MS = 60_000;
 
 const App: React.FC = () => {
-  const [url, setUrl] = useState('');
+  // R-Workspaces — multi-tab session container. Each tab owns its own
+  // (url, result, selected, options, progress, processingOne, logs,
+  // sniffing, …) so flipping between two pending sniffs no longer
+  // overwrites each other's state. The shim setters below preserve the
+  // original `setX` call shape so the ~hundred existing call sites do
+  // not need touching — they all forward to `ws.patchActive`, which
+  // targets whichever tab the user is currently on.
+  const ws = useWorkspaces();
+  // Helper that builds a `setX`-shaped shim from a Workspace key. The
+  // updater value can be either a raw value or a (prev) => next callback,
+  // matching React's useState dispatcher contract. We deliberately do
+  // NOT memoise these — the consumer hooks (useIpcEvents,
+  // useUploadDispatch) mirror their deps in a ref so unstable
+  // setter references do not trigger re-subscriptions.
+  function makeWsSetter<K extends keyof Workspace>(key: K): React.Dispatch<React.SetStateAction<Workspace[K]>> {
+    return (v) =>
+      ws.patchActive((prev) => ({
+        [key]: typeof v === 'function'
+          ? (v as (p: Workspace[K]) => Workspace[K])(prev[key])
+          : v
+      } as Partial<Workspace>));
+  }
+  const url = ws.activeWs.url;
+  const setUrl = makeWsSetter('url');
   const [urlError, setUrlError] = useState<string | null>(null);
   // R-62 — Toaster for cross-platform capability issues + ad-hoc
   // notifications. The hook returns a stable `pushCapability`
   // imperative we wire into the bottom-right Toaster instance.
   const toaster = useToaster();
-  // R-80 — On first mount, run the legacy localStorage → SQLite
-  // import. The helper is idempotent (a `bootstrap.done` marker plus
-  // INSERT OR IGNORE on every row) so re-running on every launch is
-  // safe; we only kick it off here to ensure it happens once per
-  // process lifetime. Hooks below register their own readAll effects
-  // independently and will pick up imported rows on subsequent
-  // mounts; for the very first launch after upgrade we issue a
-  // reload() on each hook once the import promise settles so the
-  // user sees their pre-R-80 history immediately without restarting.
-  //
-  // R-80 hardening — every visible top-level hook now exposes a
-  // `reload()` so we can refresh all four families post-bootstrap
-  // without forcing the user to switch tabs. ToolboxPanel mounts its
-  // own `useToolbox` only when the toolbox tab is visited, so its
-  // initial `useEffect` read happens *after* bootstrap already wrote
-  // the rows — no explicit reload is needed for that hook.
-  useEffect(() => {
-    let cancelled = false;
-    bootstrapImportFromLocalStorage()
-      .then((result) => {
-        if (cancelled || !result) return;
-        const total = result.history + result.uploadHistory + result.sniffHistory + result.toolboxHistory;
-        if (total > 0) {
-          // Refresh every hook that's already mounted at this point
-          // so freshly-imported rows surface without a restart.
-          try { reloadHistory(); } catch { /* best-effort. */ }
-          try { reloadSniffHistory(); } catch { /* best-effort. */ }
-          try { reloadUploadHistory(); } catch { /* best-effort. */ }
-        }
-      })
-      .catch((e) => {
-        // eslint-disable-next-line no-console
-        console.warn('[bootstrap] legacy import failed (will retry next launch):', e);
-      });
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  // R-80 hardening — wire a one-shot toast to the dbErrorBus so the
-  // first `window.giftk.db.*` IPC failure surfaces as user-visible
-  // feedback instead of being silently swallowed by the hooks'
-  // optimistic-update `.catch()` blocks. The bus itself enforces the
-  // "fire once per session" semantics.
-  useEffect(() => {
-    setDbErrorListener((evt: DbErrorEvent) => {
-      const familyLabel: Record<DbErrorEvent['family'], string> = {
-        history: '历史记录',
-        uploadHistory: '上传历史',
-        sniffHistory: '嗅探历史',
-        toolboxHistory: '工具箱历史',
-        bootstrap: '历史数据迁移'
-      };
-      toaster.push({
-        id: `db-error-${evt.family}-${evt.op}`,
-        severity: 'warn',
-        title: `${familyLabel[evt.family]}暂存失败`,
-        detail: '内存中的记录仍可见,但本次未能写入本地数据库,重启后可能丢失最近变更。'
-      });
-    });
-    return () => setDbErrorListener(null);
-  }, [toaster]);
-  // R-62 — On first mount, ask main for the platform capability
-  // report and surface one toast per issue (skipping ones the user
-  // has previously dismissed via "不再提醒"). Run once — capabilities
-  // are cached on the main side and don't change at runtime.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const cap = await window.giftk?.getCapabilities?.();
-        if (cancelled || !cap) return;
-        for (const issue of cap.issues) {
-          toaster.pushCapability(issue);
-        }
-      } catch (e) {
-        // Don't toast about the toaster failing — just log.
-        // eslint-disable-next-line no-console
-        console.warn('[capabilities] probe failed:', e);
-      }
-    })();
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  const [sniffing, setSniffing] = useState(false);
+  // Step 11A — bootstrap-time side effects (legacy localStorage →
+  // SQLite import + reload, dbErrorBus toast bridge, capability
+  // probe, pre-quit flush ack) are now consolidated into
+  // `useBootstrapEffects` and invoked once below (after the
+  // family hooks supply `reload*` / `flushPending`). See
+  // [useBootstrapEffects.ts] for the full R-80 / R-62 contract.
+  const sniffing = ws.activeWs.sniffing;
+  const setSniffing = makeWsSetter('sniffing');
   const [sniffProgress, setSniffProgress] = useState<SniffProgress | null>(null);
   // R-55 Fix #2 — current sniff backend; non-null only while sniffing.
   // Drives whether the「✓ 完成嗅探」button shows up at the 60% stage
@@ -156,15 +99,31 @@ const App: React.FC = () => {
   useEffect(() => {
     try { localStorage.setItem('giftk.useRealChromeProfile', useRealChromeProfile ? '1' : '0'); } catch { /* ignore */ }
   }, [useRealChromeProfile]);
-  const [result, setResult] = useState<SniffResult | null>(null);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const result = ws.activeWs.result;
+  const setResult = makeWsSetter('result');
+  const selected = ws.activeWs.selected;
+  const setSelected = makeWsSetter('selected');
   const [activeId, setActiveId] = useState<string | null>(null);
-  const [options, setOptions] = useState<ProcessOptions>({ ...DEFAULT_OPTIONS });
+  const options = ws.activeWs.options;
+  const setOptions = makeWsSetter('options');
+  // Step 11C — preview modal state triplet (`preview` / `previewing`
+  // / `previewOverride`). The override lives outside the global
+  // `options` state so opening the preview modal can never leak its
+  // auto-defaults into the next batch run; PreviewModal resets it on
+  // every media switch and `closeModal` resets it on dismiss. See
+  // [usePreviewState.ts] for the full reset contract.
+  const {
+    preview, setPreview,
+    previewing, setPreviewing,
+    previewOverride, setPreviewOverride
+  } = usePreviewState();
   const [outputDir, setOutputDir] = useState<string>('');
   const [baseOutputDir, setBaseOutputDir] = useState<string>('');
   const [lastBatchDir, setLastBatchDir] = useState<string>('');
-  const [progress, setProgress] = useState<Record<string, TaskProgress>>({});
-  const [logs, setLogs] = useState<string[]>([]);
+  const progress = ws.activeWs.progress;
+  const setProgress = makeWsSetter('progress');
+  const logs = ws.activeWs.logs;
+  const setLogs = makeWsSetter('logs');
   // R-43.1 — 日志面板默认折叠。原先 `.bottom` grid 用 1fr/240px 双栏强行
   // 把 LogBox 钉在底部右侧,挤占 TaskTable 视觉空间,且大多数情况下用户
   // 不需要看日志输出。改为按钮 toggle:点 "📋 日志 (N)" 才显示。
@@ -181,12 +140,8 @@ const App: React.FC = () => {
       return next;
     });
   }, []);
-  const [preview, setPreview] = useState<PreviewResult | null>(null);
-  const [previewing, setPreviewing] = useState(false);
-  const [processingOne, setProcessingOne] = useState<Set<string>>(new Set());
-  const [resolvedMap, setResolvedMap] = useState<Record<string, ResolvedMedia>>({});
-  const [resolvingSet, setResolvingSet] = useState<Set<string>>(new Set());
-  const [resolveErrorMap, setResolveErrorMap] = useState<Record<string, string>>({});
+  const processingOne = ws.activeWs.processingOne;
+  const setProcessingOne = makeWsSetter('processingOne');
   // R-43.2 — batch modal carries a `mode` + a snapshot of the media
   // list that the modal's confirm should dispatch. This generalises
   // the original "fresh start" path to also cover "append while
@@ -236,103 +191,13 @@ const App: React.FC = () => {
   //   ② system-chrome : spawn user's real Chrome+CDP (clears CF Turnstile)
   //   ③ ytdlp-direct  : no webview at all, hand URL to yt-dlp's 1900+
   //                     extractors (YouTube / X / Bilibili / TikTok / …)
-  const [webviewMenuOpen, setWebviewMenuOpen] = useState(false);
-  const [preferredWebviewMode, setPreferredWebviewMode] = useState<'embed' | 'system-chrome' | 'ytdlp-direct'>(() => {
-    try {
-      const v = typeof localStorage !== 'undefined' ? localStorage.getItem('giftk:preferredWebviewMode') : null;
-      if (v === 'system-chrome' || v === 'ytdlp-direct') return v;
-      return 'embed';
-    } catch { return 'embed'; }
-  });
-  const persistPreferredMode = useCallback((m: 'embed' | 'system-chrome' | 'ytdlp-direct') => {
-    setPreferredWebviewMode(m);
-    try { localStorage.setItem('giftk:preferredWebviewMode', m); } catch { /* ignore */ }
-  }, []);
-  // R-53 — a11y wiring for the split-button menu:
-  //   * `webviewMenuRef` lets us detect mousedown outside the popup
-  //     so we can close on click-outside (mouseleave alone is unsafe
-  //     because focus may return without the cursor crossing it).
-  //   * `webviewMenuItemRefs` lets us forward ArrowUp/ArrowDown to
-  //     the radio item buttons inside the menu, mirroring native
-  //     menu role semantics.
-  const webviewMenuRef = useRef<HTMLDivElement | null>(null);
-  const webviewCaretRef = useRef<HTMLButtonElement | null>(null);
-  const webviewMenuItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  // R-55 Fix #1 — split-button menu used to set `minWidth: 280` and
-  // `right: 0` unconditionally. When the URL bar lives in a narrow
-  // column (≤ 320 px in the user's screenshot) the popup punched
-  // outside the viewport on the right and got clipped on the left,
-  // hiding all the radio descriptions. We now measure the caret's
-  // bounding rect and decide left vs. right anchoring AFTER the menu
-  // is mounted, falling back to right when both edges fit.
-  // `webviewMenuAnchor` is `'right'` (default) or `'left'` (flipped).
-  const [webviewMenuAnchor, setWebviewMenuAnchor] = useState<'left' | 'right'>('right');
-  useLayoutEffect(() => {
-    if (!webviewMenuOpen) return;
-    const recompute = (): void => {
-      const caret = webviewCaretRef.current;
-      const menu = webviewMenuRef.current;
-      if (!caret || !menu) return;
-      const caretRect = caret.getBoundingClientRect();
-      const menuW = menu.offsetWidth;
-      const vw = typeof window !== 'undefined' ? window.innerWidth : 0;
-      // Anchor right (top-right corner of menu == top-right corner
-      // of caret) when there's enough room to the LEFT of the caret;
-      // otherwise anchor left so the menu opens toward the wider
-      // side of the screen.
-      const fitsRightAnchor = caretRect.right - menuW >= 8;
-      setWebviewMenuAnchor(fitsRightAnchor ? 'right' : caretRect.left + menuW + 8 <= vw ? 'left' : 'right');
-    };
-    recompute();
-    window.addEventListener('resize', recompute);
-    return () => window.removeEventListener('resize', recompute);
-  }, [webviewMenuOpen]);
-  useEffect(() => {
-    if (!webviewMenuOpen) return;
-    // Move focus into the menu on open, defaulting to the currently
-    // selected mode for a "where am I?" anchor.
-    const idx = preferredWebviewMode === 'embed' ? 0
-      : preferredWebviewMode === 'system-chrome' ? 1 : 2;
-    queueMicrotask(() => { webviewMenuItemRefs.current[idx]?.focus(); });
-    const onDocMouseDown = (ev: MouseEvent): void => {
-      const t = ev.target as Node | null;
-      if (!t) return;
-      if (webviewMenuRef.current?.contains(t)) return;
-      if (webviewCaretRef.current?.contains(t)) return;
-      setWebviewMenuOpen(false);
-    };
-    const onDocKeyDown = (ev: KeyboardEvent): void => {
-      if (ev.key === 'Escape') {
-        ev.preventDefault();
-        setWebviewMenuOpen(false);
-        webviewCaretRef.current?.focus();
-      }
-    };
-    document.addEventListener('mousedown', onDocMouseDown);
-    document.addEventListener('keydown', onDocKeyDown);
-    return () => {
-      document.removeEventListener('mousedown', onDocMouseDown);
-      document.removeEventListener('keydown', onDocKeyDown);
-    };
-  }, [webviewMenuOpen, preferredWebviewMode]);
-  const onWebviewMenuItemKeyDown = useCallback((ev: React.KeyboardEvent<HTMLButtonElement>, i: number) => {
-    if (ev.key === 'ArrowDown') {
-      ev.preventDefault();
-      const next = (i + 1) % webviewMenuItemRefs.current.length;
-      webviewMenuItemRefs.current[next]?.focus();
-    } else if (ev.key === 'ArrowUp') {
-      ev.preventDefault();
-      const len = webviewMenuItemRefs.current.length;
-      const prev = (i - 1 + len) % len;
-      webviewMenuItemRefs.current[prev]?.focus();
-    } else if (ev.key === 'Home') {
-      ev.preventDefault();
-      webviewMenuItemRefs.current[0]?.focus();
-    } else if (ev.key === 'End') {
-      ev.preventDefault();
-      webviewMenuItemRefs.current[webviewMenuItemRefs.current.length - 1]?.focus();
-    }
-  }, []);
+  // R-53 — split-button "网页嗅探" menu: open/close, persisted preferred
+  // mode (localStorage key 'giftk:preferredWebviewMode'), viewport-edge
+  // anchoring, focus-on-open, click-outside dismissal, Escape to close,
+  // ArrowUp/ArrowDown/Home/End on the radio items. The full a11y bundle
+  // lives in `useWebviewMenu` so this file can stay focused on data flow.
+  const webviewMenu = useWebviewMenu();
+  const preferredWebviewMode = webviewMenu.preferredMode;
   // R-33A — manual two-stage optimize modal state. Stores the row the user
   // clicked "手动优化" on so we can pass its current size + warning + the
   // first output path into ManualOptimizeModal. Cleared back to null on
@@ -343,6 +208,100 @@ const App: React.FC = () => {
     gifPath: string;
   } | null>(null);
   const activeHistoryIdRef = useRef<string | null>(null);
+  // R-Workspaces — keep `activeHistoryIdRef` in sync with the active
+  // workspace so legacy code paths that read the ref still see the
+  // correct record id after the user switches tabs. Writes still go
+  // through both the ref AND `ws.patchActive({ historyId })` (double
+  // write) so cross-tab routing via `patchByHistoryId` keeps working.
+  useEffect(() => {
+    activeHistoryIdRef.current = ws.activeWs.historyId;
+  }, [ws.activeWs.historyId]);
+  // Embed direct-link resolution (Vimeo / YouTube / Bilibili / …) lives
+  // in `useEmbedResolve`. The hook owns three state buckets — resolvedMap
+  // / resolvingSet / resolveErrorMap — and the auto-trigger effect that
+  // fires whenever `result` changes. App.tsx wires only the workspace-
+  // shaped callbacks (log buffer, selection set, history+result double
+  // write for P1 #5) and consumes the read-only state for rendering.
+  const embedAppendLog = useCallback(
+    (line: string) => setLogs((prev) => [...prev, line].slice(-300)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  );
+  const embedAddSelected = useCallback(
+    (id: string) =>
+      setSelected((prev) => {
+        const n = new Set(prev);
+        n.add(id);
+        return n;
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  );
+  // P1 (#5) FIX — single-source double write. The hook fires this
+  // exactly once on a successful resolve; we split it into the
+  // history-record patch (so "重跑" / "下载" survives an app restart)
+  // and the live `result.items` patch (so the home-page TaskTable
+  // sees the resolved media within the same session) in one render.
+  const patchItemResolved = useCallback(
+    (id: string, r: ResolvedMedia) => {
+      const recId = activeHistoryIdRef.current;
+      const patchItems = (list: SniffedMedia[]): SniffedMedia[] =>
+        list.map((it) => (it.id === id ? { ...it, resolved: r } : it));
+      if (recId) {
+        patchHistory(recId, (rec) => ({ ...rec, items: patchItems(rec.items) }));
+      }
+      setResult((prev) => (prev ? { ...prev, items: patchItems(prev.items) } : prev));
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [patchHistory]
+  );
+  const {
+    resolvedMap,
+    resolveErrorMap,
+    isResolving,
+    onResolveEmbedById,
+    reset: resetEmbedResolve
+  } = useEmbedResolve({
+    items: result?.items ?? [],
+    result,
+    resolveEmbed: giftk?.resolveEmbed,
+    appendLog: embedAppendLog,
+    addSelected: embedAddSelected,
+    patchItemResolved
+  });
+  // Step 6 — sniff lifecycle (`giftk.sniff` / `sniffWith*` /
+  // `importOfflinePage`) lives in `useSniffSession`. The hook owns the
+  // ~200 lines of duplicated lifecycle skeleton (urlError → claimForSniff
+  // → setSniffing → … → finally clear flags) shared by all three entry
+  // points; App.tsx only wires the active-workspace setter shims, the
+  // history mutators, and the reqId-bumping watchdog constant. The
+  // returned `sniffReqId` ref is the same one `onCancel` could bump to
+  // pre-empt an in-flight sniff (currently the cancel path delegates to
+  // `giftk.cancelSniff()` instead, but we keep the ref accessible via
+  // `sniffSession.sniffReqId` in case a future cancel needs it).
+  const sniffSession = useSniffSession({
+    giftk,
+    ws,
+    url,
+    result,
+    useRealChromeProfile,
+    options,
+    setUrlError,
+    setSniffing,
+    setSniffProgress,
+    setResult,
+    setSelected,
+    setActiveId,
+    setPreview,
+    setLogs,
+    setActiveSniffMode,
+    resetEmbedResolve,
+    activeHistoryIdRef,
+    makeHistoryRecord,
+    pushOrReplace,
+    addSniffHistory,
+    SNIFF_TIMEOUT_MS
+  });
   // R-27 (post-review #4.1): per-task → record mapping. The renderer
   // historically pointed `activeHistoryIdRef` at the "current" record
   // and folded every progress event into it; this broke the moment a
@@ -370,26 +329,18 @@ const App: React.FC = () => {
   // localStorage persistence; we only forward main-process progress
   // emits into it via uploadRecordRef (jobId → recordId mapping).
   const { history: uploadHistory, isLoading: isUploadHistoryLoading, start: startUploadRecord, applyProgress: applyUploadProgress, remove: removeUploadHistory, clear: clearUploadHistory, reload: reloadUploadHistory, flushPending: flushUploadHistoryPending } = useUploadHistory();
-  // R-80 hardening (H5) — keep the latest flushPending callbacks in
-  // refs so a single one-time `db:flushBeforeQuit` listener can call
-  // them without re-subscribing on every re-render.
-  const flushHistoryPendingRef = useRef(flushHistoryPending);
-  const flushUploadHistoryPendingRef = useRef(flushUploadHistoryPending);
-  useEffect(() => { flushHistoryPendingRef.current = flushHistoryPending; }, [flushHistoryPending]);
-  useEffect(() => { flushUploadHistoryPendingRef.current = flushUploadHistoryPending; }, [flushUploadHistoryPending]);
-  useEffect(() => {
-    // Subscribe to main's pre-quit flush request. We await both
-    // debounced upsert queues, then ack so main can proceed with
-    // closing the DB. Main has a 1-second hard timeout, so a
-    // hung renderer can't block the quit.
-    const off = window.giftk?.db?.onFlushBeforeQuit?.((acked) => {
-      Promise.allSettled([
-        flushHistoryPendingRef.current(),
-        flushUploadHistoryPendingRef.current()
-      ]).finally(() => acked());
-    });
-    return () => { try { off?.(); } catch { /* ignore */ } };
-  }, []);
+  // Step 11A — wire the four mount-once side effects (legacy import +
+  // reload, dbErrorBus toast bridge, capability probe, pre-quit flush
+  // ack). Deferred to here so all `reload*` / `flushPending` deps are
+  // already in scope. The hook itself owns the ref mirroring trick
+  // that keeps the pre-quit listener subscribed exactly once.
+  useBootstrapEffects(toaster, {
+    reloadHistory,
+    reloadSniffHistory,
+    reloadUploadHistory,
+    flushHistoryPending,
+    flushUploadHistoryPending
+  });
   const [uploadConfigs, setUploadConfigs] = useState<UploadConfigs | null>(null);
   const [uploadSettingsOpen, setUploadSettingsOpen] = useState(false);
   const [uploadResult, setUploadResult] = useState<string | null>(null); // recordId
@@ -421,17 +372,10 @@ const App: React.FC = () => {
 
   // Bottom panel (TaskTable + LogBox) resizable height.
   // Persisted in localStorage so the user's preference survives reloads.
-  const BOTTOM_H_KEY = 'giftk.bottomPanelHeight';
-  const BOTTOM_H_MIN = 80;
-  const BOTTOM_H_DEFAULT = 180;
-  const [bottomH, setBottomH] = useState<number>(() => {
-    if (typeof window === 'undefined') return BOTTOM_H_DEFAULT;
-    const raw = window.localStorage.getItem(BOTTOM_H_KEY);
-    const n = raw ? Number(raw) : NaN;
-    return Number.isFinite(n) && n >= BOTTOM_H_MIN ? n : BOTTOM_H_DEFAULT;
-  });
+  // Drag gesture + persistence + double-click-to-reset all live in
+  // `useBottomResize` so this file stays focused on data flow.
+  const { bottomH, onBottomResizeStart, resetBottomH } = useBottomResize();
 
-  const sniffReqId = useRef(0);
   const previewReqId = useRef(0);
 
   useEffect(() => {
@@ -440,99 +384,31 @@ const App: React.FC = () => {
       setOutputDir(d);
       setBaseOutputDir(d);
     }).catch(() => { /* ignore */ });
-    // R-45 — load persisted upload settings (with secrets masked).
-    if (typeof giftk.uploadGetSettings === 'function') {
-      giftk.uploadGetSettings().then(setUploadConfigs).catch(() => { /* ignore */ });
-    }
-    const off1 = giftk.onProgress((p) => {
-      setProgress((prev) => ({ ...prev, [p.taskId]: p }));
-      // R-27 — fold the same emit into the OWNING history record so a
-      // user who opens the history panel mid-batch sees outputs / status
-      // accumulate live. We resolve the record id by taskId first
-      // (dispatch-time mapping); fall back to activeHistoryIdRef only
-      // when the task wasn't dispatched through one of our typed
-      // entry points (defensive — should never happen in practice).
-      const TERMINAL = ['done', 'failed', 'cancelled', 'skipped'];
-      const recId =
-        taskRecordMapRef.current.get(p.taskId) || activeHistoryIdRef.current;
-      if (recId) {
-        patchHistory(recId, (r) => mergeProgressIntoRecord(r, p));
-      }
-      if (TERMINAL.includes(p.status)) {
-        taskRecordMapRef.current.delete(p.taskId);
-      }
-    });
-    const off2 = giftk.onLog((line) => {
-      setLogs((prev) => {
-        const next = [...prev, line];
-        return next.length > 300 ? next.slice(-300) : next;
-      });
-    });
-    const off3 = giftk.onSniffProgress((p) => {
-      setSniffProgress(p);
-    });
-    // R-45 — fold upload progress into the upload-history record that
-    // owns each jobId. Terminal events decrement an in-flight counter
-    // per record; when the counter reaches 0 we surface the central
-    // result modal (per spec: "完成时弹中央面板").
-    const off4 = typeof giftk.onUploadProgress === 'function'
-      ? giftk.onUploadProgress((p: UploadProgress) => {
-          const recId = uploadJobToRecordRef.current.get(p.jobId);
-          if (!recId) return;
-          applyUploadProgress(recId, p);
-          // R-54 — fold the upload result into the *processing*
-          // HistoryRecord so 嗅探历史 详情面板 can show 「☁ 已上传 /
-          // 复制 url / 复制 markdown」 next to each output. We only
-          // patch on terminal events to keep localStorage write
-          // pressure low — transient `uploading` percent changes
-          // are persisted only in the upload-history record.
-          const TERMINAL_FOR_SNIFF: Array<UploadProgress['status']> = ['done', 'failed', 'cancelled'];
-          if (TERMINAL_FOR_SNIFF.includes(p.status)) {
-            // Prefer the recordId echoed back from main (carried by
-            // UploadJob.recordId → UploadProgress.recordId). Fall
-            // back to the renderer's own jobId → target map for
-            // pre-R-54 backends or odd reconnect cases.
-            const target = uploadJobToTargetRef.current.get(p.jobId);
-            const sniffRecId = p.recordId || target?.sniffRecId;
-            const filePath = target?.filePath;
-            if (sniffRecId && filePath && p.backend) {
-              const ref: UploadRefForHistory = {
-                url: p.url || '',
-                markdown: p.markdown,
-                status: p.status,
-                uploadedAt: Date.now(),
-                backend: p.backend,
-                fileHash: p.fileHash,
-                reused: p.reused
-              };
-              patchHistory(sniffRecId, (rec) => mergeUploadIntoRecord(rec, filePath, ref));
-            }
-          }
-          const TERMINAL: Array<UploadProgress['status']> = ['done', 'failed', 'cancelled'];
-          if (TERMINAL.includes(p.status)) {
-            uploadJobToRecordRef.current.delete(p.jobId);
-            uploadJobToTargetRef.current.delete(p.jobId);
-            const remaining = (uploadInflightRef.current.get(recId) ?? 0) - 1;
-            if (remaining <= 0) {
-              uploadInflightRef.current.delete(recId);
-              setUploadResult(recId);
-            } else {
-              uploadInflightRef.current.set(recId, remaining);
-            }
-          }
-        })
-      : () => { /* noop */ };
-    return () => {
-      off1();
-      off2();
-      off3();
-      off4();
-    };
     // patchHistory is stable (memoised in useHistory with empty deps);
     // we want this effect to run exactly once on mount, so the missing
     // dep is intentional.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // IPC subscription wiring (R-27/R-45/R-54): now extracted to
+  // useIpcEvents. The hook reads the latest setters/refs via an
+  // internal depsRef so its mount-once subscription contract is
+  // preserved verbatim — same TERMINAL gates, same recId fallback,
+  // same in-flight counter semantics.
+  useIpcEvents({
+    giftk,
+    patchHistory,
+    taskRecordMapRef,
+    activeHistoryIdRef,
+    applyUploadProgress,
+    uploadJobToRecordRef,
+    uploadJobToTargetRef,
+    uploadInflightRef,
+    setProgress,
+    setLogs,
+    setSniffProgress,
+    setUploadResult
+  });
 
   // R-27 — on mount, walk the persisted history and tell the main
   // process to re-allow each batch sub-dir so "打开目录" continues to
@@ -577,113 +453,15 @@ const App: React.FC = () => {
   // any state for it; the unified sniffFilters layer in the main
   // process applies the filter unconditionally for every backend.
 
-  const onSniff = useCallback(async () => {
-    if (!giftk) return;
-    const trimmed = url.trim();
-    if (!trimmed) {
-      setUrlError('请先输入文章 URL');
-      return;
-    }
-    // R-25 (#3): if the user just sniffed this same URL and the result is
-    // still on screen, re-sniffing is almost always an accidental click.
-    // Sniffing again throws away the current selection / resolved chips
-    // and triggers another full network round-trip, so confirm first.
-    if (result?.pageUrl === trimmed && (result.items.length > 0 || (result.warnings?.length ?? 0) > 0)) {
-      const ok = typeof window !== 'undefined'
-        ? window.confirm(`已嗅探过该 URL,是否再次嗅探?\n\n${trimmed}\n\n确认会清空当前结果重新拉取。`)
-        : true;
-      if (!ok) return;
-    }
-    setUrlError(null);
-    const myId = ++sniffReqId.current;
-    setSniffing(true);
-    setSniffProgress({ stage: 'fetching', percent: 0 });
-    setResult(null);
-    setSelected(new Set());
-    setActiveId(null);
-    setPreview(null);
-    setResolvedMap({});
-    setResolvingSet(new Set());
-    setResolveErrorMap({});
-    // R-27 (post-review #1.1): a new sniff round invalidates the
-    // previous "active" record. We clear it BEFORE the await so any
-    // in-flight progress events from a still-running batch land on
-    // their own record (looked up via the taskRecordMap below) rather
-    // than getting silently dropped or — worse — splicing into the
-    // record we're about to create.
-    activeHistoryIdRef.current = null;
-
-    let finished = false;
-    const timeout = setTimeout(() => {
-      if (finished) return;
-      if (myId !== sniffReqId.current) return;
-      finished = true;
-      sniffReqId.current++;
-      setSniffing(false);
-      setSniffProgress(null);
-      setResult({ pageUrl: trimmed, items: [], warnings: [`嗅探超时(>${SNIFF_TIMEOUT_MS / 1000}s),请稍后重试或换一个 URL`] });
-    }, SNIFF_TIMEOUT_MS);
-
-    try {
-      // R-57 / R-58 — Static-image filter is always-on (no UI toggle).
-      const r = await giftk.sniff(trimmed);
-      if (myId !== sniffReqId.current || finished) return;
-      finished = true;
-      clearTimeout(timeout);
-      setResult(r);
-      const auto = new Set(
-        r.items
-          .filter((i) => (i.kind === 'video' || i.kind === 'gif') && !i.requiresExternalDownload)
-          .map((i) => i.id)
-      );
-      setSelected(auto);
-      // R-27 — every successful sniff opens a fresh history record. We
-      // create it here (with no outputDir yet) so even sniffs that
-      // never get batched are surfaced — the user might just be
-      // browsing what's on a page. The batch dispatcher mutates this
-      // same record in place when process:start returns an outputDir.
-      if (r.items.length > 0 || (r.warnings?.length ?? 0) === 0) {
-        const rec = makeHistoryRecord({
-          pageUrl: r.pageUrl,
-          title: r.title,
-          items: r.items,
-          options: { ...options }
-        });
-        pushOrReplace(rec);
-        activeHistoryIdRef.current = rec.id;
-      } else {
-        // A sniff with only warnings (timeout / parse error) is not
-        // worth a history slot — it has no media to re-process.
-        activeHistoryIdRef.current = null;
-      }
-      // R-32 — record the URL in the lightweight sniff-URL LRU.
-      // We do this *regardless* of whether the sniff yielded any
-      // items, because:
-      //   - even a 0-item sniff is a valid history entry the user
-      //     may want to revisit (e.g. to retry once a CDN's headers
-      //     stop returning embed-only responses);
-      //   - the entry's itemCount records the latest count so the
-      //     picker can show "5 项" / "0 项" to hint at staleness.
-      // We deliberately do NOT add on the timeout / catch branches
-      // — those didn't produce a SniffResult so we have nothing
-      // truthful to record.
-      addSniffHistory({
-        url: r.pageUrl,
-        title: r.title,
-        itemCount: r.items.length
-      });
-    } catch (e) {
-      if (myId !== sniffReqId.current || finished) return;
-      finished = true;
-      clearTimeout(timeout);
-      setResult({ pageUrl: trimmed, items: [], warnings: [(e as Error).message] });
-    } finally {
-      if (myId === sniffReqId.current) {
-        setSniffing(false);
-        setSniffProgress(null);
-      }
-    }
-  }, [url, result, options, pushOrReplace, addSniffHistory]);
+  // Step 6 — thin wrappers around `useSniffSession`. Keep the same
+  // exported names (`onSniff`, `runWebviewSniff`, `runOfflineImport`)
+  // so the JSX `onClick` props don't need any churn; the actual
+  // lifecycle (urlError → claimForSniff → setSniffing → … → finally
+  // clear flags) lives in the hook.
+  const onSniff = useCallback(
+    () => sniffSession.runEmbed(),
+    [sniffSession]
+  );
 
   // R-44 — webview-assisted sniff. Opens a real Chromium window in the
   // main process so the user can sign in to gated sites. Resolves with a
@@ -700,85 +478,17 @@ const App: React.FC = () => {
   // URL straight to yt-dlp's 1900+ extractors. Best for known video
   // platforms (YouTube / X / Bilibili / TikTok / Reddit / …) where the
   // user just wants the file and doesn't care about page exploration.
-  const runWebviewSniff = useCallback(async (mode: 'embed' | 'system-chrome' | 'ytdlp-direct') => {
-    const api =
-      mode === 'system-chrome'
-        ? giftk?.sniffWithSystemChrome
-        : mode === 'ytdlp-direct'
-          ? giftk?.sniffWithYtdlpDirect
-          : giftk?.sniffWithWebview;
-    if (!api) return;
-    const trimmed = url.trim();
-    if (!trimmed) {
-      setUrlError('请先输入文章 URL');
-      return;
-    }
-    setUrlError(null);
-    const myId = ++sniffReqId.current;
-    setSniffing(true);
-    // R-55 Fix #2 — remember which sniff backend is active so we can
-    // show the「✓ 完成嗅探」button only for system-chrome runs.
-    setActiveSniffMode(mode);
-    setSniffProgress({ stage: 'fetching', percent: 0 });
-    setResult(null);
-    setSelected(new Set());
-    setActiveId(null);
-    setPreview(null);
-    setResolvedMap({});
-    setResolvingSet(new Set());
-    setResolveErrorMap({});
-    activeHistoryIdRef.current = null;
-    const hint =
-      mode === 'system-chrome'
-        ? `[system-chrome] 启动系统 Chrome 打开 ${trimmed} — 登录/通过验证后,关闭 Chrome 窗口完成嗅探`
-        : mode === 'ytdlp-direct'
-          ? `[ytdlp-direct] 调用 yt-dlp 直接解析 ${trimmed}(无需 webview)`
-          : `[webview] 打开 ${trimmed} — 浏览到目标页面后,点击顶部「✅ 完成嗅探」`;
-    setLogs((prev) => [...prev, hint].slice(-300));
-    try {
-      // R-57 / R-58 — Static-image filter is always-on (no UI toggle).
-      // R-59 — system-chrome accepts a third arg (chrome opts) to
-      // request the real-profile branch. Other backends ignore extras.
-      const r = mode === 'system-chrome'
-        ? await (api as NonNullable<typeof giftk>['sniffWithSystemChrome'])(trimmed, undefined, { useRealProfile: useRealChromeProfile })
-        : await api(trimmed);
-      if (myId !== sniffReqId.current) return;
-      setResult(r);
-      const auto = new Set(
-        r.items
-          .filter((i) => (i.kind === 'video' || i.kind === 'gif') && !i.requiresExternalDownload)
-          .map((i) => i.id)
-      );
-      setSelected(auto);
-      if (r.items.length > 0 || (r.warnings?.length ?? 0) === 0) {
-        const rec = makeHistoryRecord({
-          pageUrl: r.pageUrl,
-          title: r.title,
-          items: r.items,
-          options: { ...options }
-        });
-        pushOrReplace(rec);
-        activeHistoryIdRef.current = rec.id;
-      }
-      addSniffHistory({
-        url: r.pageUrl,
-        title: r.title,
-        itemCount: r.items.length
-      });
-    } catch (e) {
-      if (myId !== sniffReqId.current) return;
-      setResult({ pageUrl: trimmed, items: [], warnings: [(e as Error).message] });
-    } finally {
-      if (myId === sniffReqId.current) {
-        setSniffing(false);
-        setSniffProgress(null);
-        setActiveSniffMode(null);
-      }
-    }
-  }, [url, options, pushOrReplace, addSniffHistory, useRealChromeProfile]);
-  const onWebviewSniff = useCallback(() => runWebviewSniff('embed'), [runWebviewSniff]);
-  const onSystemChromeSniff = useCallback(() => runWebviewSniff('system-chrome'), [runWebviewSniff]);
-  const onYtdlpDirectSniff = useCallback(() => runWebviewSniff('ytdlp-direct'), [runWebviewSniff]);
+  const runWebviewSniff = useCallback(
+    (mode: 'embed' | 'system-chrome' | 'ytdlp-direct') => sniffSession.runWebview(mode),
+    [sniffSession]
+  );
+  // R-X — The previous per-mode wrappers (onWebviewSniff /
+  // onSystemChromeSniff / onYtdlpDirectSniff) auto-fired a sniff the
+  // moment the user picked a row from the dropdown, which was both
+  // surprising and made the choice irreversible (the network call had
+  // already started). The dropdown now ONLY persists the preference;
+  // the actual sniff is launched via the toolbar button below, which
+  // calls onPreferredWebviewSniff using the persisted mode.
   // R-51 — main-button click goes to whichever mode the user last picked
   // (or `embed` on first run); the small caret-arrow next to it opens
   // the dropdown so they can switch.
@@ -820,7 +530,7 @@ const App: React.FC = () => {
     } finally {
       if (myId === previewReqId.current) setPreviewing(false);
     }
-  }, [activeMedia, options, outputDir]);
+  }, [activeMedia, options, outputDir, setPreview, setPreviewing]);
 
   const processable = useMemo(
      () => items.filter((m) => selected.has(m.id) && (m.kind === 'video' || m.kind === 'gif') && (!m.requiresExternalDownload || !!m.resolved)),
@@ -857,205 +567,39 @@ const App: React.FC = () => {
   }, [processable, progress]);
 
   /**
-   * Internal "actually submit" worker. Extracted from `dispatchBatch`
-   * so the prepare-tasks step (apply per-id selections, R-22 long-video
-   * truncation) is decoupled from the IPC plumbing. Earlier revisions
-   * (R-72 modal, R-74 pre-flight banner) needed a way to resume dispatch
-   * with a user-supplied force-allow / skip set; R-75 dropped both
-   * surfaces in favour of the bottom-toolbar bulk button, so this
-   * worker is now a straight pass-through.
+   * Step 7 — process-dispatch hook. The four startBatch-wrapping
+   * callbacks (runDispatch / dispatchBatch / onProcessOne /
+   * onReprocessFromHistory / onBatchFromRecord) used to live inline
+   * here. They share a dense ritual (R-29 P1-I pin / P1-E rollback /
+   * dirfix subDir reuse, R-27 effective-options patch, R-22 segment
+   * fallback, R-75 size-guard preflight) that is now centralised in
+   * the hook. App.tsx just passes the deps bag through and destructures
+   * the resulting handlers — see useProcessDispatch.ts for the full
+   * rationale.
    */
-  const runDispatch = useCallback(async (
-    tasks: ProcessTask[]
-  ) => {
-    if (!giftk) return;
-    const dir = baseOutputDir || outputDir;
-    if (tasks.length === 0) {
-      setLogs((prev) => [...prev, `[batch] 全部任务被跳过,无可派发项`].slice(-300));
-      return;
-    }
-    // R-29 (P1-I): bind taskId → record id BEFORE awaiting startBatch
-    // so the very first `process:progress` event from main is routed
-    // to the right record. dispatchBatch used to set this AFTER the
-    // await — fast machines / small queues could race and route the
-    // first emit to the (stale) activeHistoryIdRef.
-    const recId = activeHistoryIdRef.current;
-    if (recId) {
-      for (const t of tasks) taskRecordMapRef.current.set(t.id, recId);
-    }
-    // R-29 (P1-E + P1-F): seed `pending` rows MERGE-style and snapshot
-    // any prior progress entry per task so a busy-rejection can put
-    // the original done/failed row back instead of `delete`-ing it.
-    // Replacing the whole map (the previous implementation) wiped
-    // existing terminal rows and dropped progress events that arrived
-    // between the seed and startBatch's resolve.
-    const prevSnapshots: Record<string, TaskProgress | undefined> = {};
-    for (const t of tasks) {
-      prevSnapshots[t.id] = progress[t.id];
-    }
-    setProgress((prev) => {
-      const next = { ...prev };
-      for (const t of tasks) {
-        next[t.id] = {
-          taskId: t.id,
-          status: 'pending',
-          percent: 0,
-          message: '已加入队列'
-        };
-      }
-      return next;
-    });
-    const truncated = tasks.filter((t) =>
-      t.options.selectedSegments && t.options.selectedSegments.length === 1 && t.options.selectedSegments[0] === 0 &&
-      ((t.media.resolved?.durationSec ?? t.media.durationSec ?? 0) > options.maxSegmentSec)
-    );
-    if (truncated.length > 0) {
-      setLogs((prev) => [
-        ...prev,
-        `[batch] ${truncated.length} 个长视频已默认只处理第 1 段(0..${options.maxSegmentSec}s);如需更多段,请在预览中勾选`
-      ].slice(-300));
-    }
-    try {
-      // R-29 (dirfix): if this record already has a sub-dir from a
-      // prior dispatch (single-process / earlier batch), reuse it so
-      // all sibling tasks land in the same folder.
-      const existingDir = recId ? recordOutputDirRef.current.get(recId) : undefined;
-      const r = await giftk.startBatch(tasks, result?.title, existingDir);
-      setProcessingOne((prev) => {
-        const n = new Set(prev);
-        for (const t of tasks) n.add(t.id);
-        return n;
-      });
-      if (r?.outputDir) {
-        setLastBatchDir(r.outputDir);
-        setLogs((prev) => [...prev, `[batch] outputs -> ${r.outputDir}`].slice(-300));
-        // R-27 — pin the batch's sub-directory onto the active record
-        // so the history panel can later "打开目录" without re-asking
-        // the main process. R-27 (post-review #2.1/#3.1): snapshot the
-        // *effective* per-task options actually dispatched (incl.
-        // modal-injected selectedSegments / R-22 [0] fallback) instead
-        // of the raw form `options`. We pick task[0]'s opt as the
-        // representative — within one batch all tasks share the
-        // same global parameters; only selectedSegments differ
-        // per-task and that's already persisted on the items.
-        if (recId) {
-          recordOutputDirRef.current.set(recId, r.outputDir);
-          const repOpt = tasks[0]?.options ?? { ...options, outDir: dir };
-          patchHistory(recId, (rec) => ({
-            ...rec,
-            outputDir: r.outputDir,
-            options: { ...repOpt }
-          }));
-        }
-      }
-    } catch (e) {
-      const msg = (e as Error).message || '';
-      if (msg === 'busy' || /\bbusy\b/i.test(msg)) {
-        setLogs((prev) => [...prev, `[busy] 已有任务在跑,请先取消或等待`].slice(-300));
-      } else {
-        setLogs((prev) => [...prev, `[error] startBatch: ${msg}`].slice(-300));
-      }
-      // R-29 (P1-E): restore prior snapshots so a busy rejection no
-      // longer wipes existing done/failed rows. Only revert entries
-      // that are still our seeded `pending` (i.e. main hasn't begun
-      // emitting real events for them yet).
-      setProgress((prev) => {
-        const next = { ...prev };
-        for (const t of tasks) {
-          if (next[t.id]?.status !== 'pending') continue;
-          const snap = prevSnapshots[t.id];
-          if (snap) {
-            next[t.id] = snap;
-          } else {
-            delete next[t.id];
-          }
-        }
-        return next;
-      });
-      // Unbind tasks we pinned up front — main rejected the batch so
-      // no real events will ever come.
-      for (const t of tasks) {
-        taskRecordMapRef.current.delete(t.id);
-      }
-    }
-  }, [options, baseOutputDir, outputDir, result, patchHistory, progress]);
-
-  const dispatchBatch = useCallback(async (
-    perIdSelection: Record<string, number[]> | null,
-    // R-43 — override the default `processable` list. When the user
-    // clicks "▶ 追加排队" while a batch is already running, we pass
-    // the `appendable` subset so previously-queued rows aren't
-    // double-submitted. When omitted (the original entry from
-    // onStart / dispatchOnceConfirmed) we still process the full
-    // selection.
-    mediaListOverride?: SniffedMedia[]
-  ) => {
-    if (!giftk) return;
-    const dir = baseOutputDir || outputDir;
-    const sourceList = mediaListOverride ?? processable;
-    const tasks: ProcessTask[] = sourceList.map((m) => {
-      const opt: ProcessOptions = { ...options, outDir: dir };
-      const dur = m.resolved?.durationSec ?? m.durationSec ?? 0;
-      const tooLong = m.kind === 'video' && dur > options.maxSegmentSec;
-      const userExplicit =
-        opt.startSec !== undefined ||
-        opt.endSec !== undefined ||
-        (opt.selectedSegments && opt.selectedSegments.length > 0);
-      // Priority order:
-      // 1. Modal-confirmed selection wins (explicit user choice this batch).
-      // 2. Per-task options.selectedSegments / startSec / endSec already set
-      //    in the OptionsForm or PreviewPanel are honoured untouched.
-      // 3. Long video without any explicit pick → R-22 fallback to [0].
-      if (perIdSelection && perIdSelection[m.id] && perIdSelection[m.id].length > 0) {
-        opt.selectedSegments = perIdSelection[m.id];
-      } else if (tooLong && !userExplicit) {
-        opt.selectedSegments = [0];
-      }
-      return { id: m.id, media: m, options: opt };
-    });
-    if (tasks.length === 0) return;
-    // R-75 — Lightweight, in-process size pre-flight.
-    //
-    // Every task's known dimensions (sniffed width/height OR
-    // resolved.width/height) are run through `evaluateSizeGuard`.
-    // This is a pure geometric calculation — short-side projection
-    // after the longest-side cap — so it costs microseconds even for
-    // a hundred tasks. We do NOT call ffprobe here: the goal is just
-    // to LOG how many tasks are likely to trip the size guard so the
-    // user knows roughly what to expect when they look at the
-    // processing list. Dispatch fires immediately regardless.
-    //
-    // The actual recovery flow lives downstream:
-    //   - Each task probes for real dims inside the processor and
-    //     fails fast with `ASPECT_RATIO_OUT_OF_RANGE` if it really
-    //     can't satisfy the guard.
-    //   - Rows in that state surface a per-row 「强制允许」 button.
-    //   - The bottom-toolbar 「⚡ 强制全部失败项 (K)」 button bulks
-    //     those into a single click — disabled when K === 0.
-    if (!options.forceAllowSmallSide) {
-      let willFailCount = 0;
-      let unknownCount = 0;
-      for (const t of tasks) {
-        // `||` (not `??`) is intentional: some sniffers emit `0` as a
-        // sentinel for "I tried but failed to read the dimension", so
-        // we want to treat 0 the same as missing and fall through to
-        // the next source. `??` would short-circuit on `0` and mask
-        // the still-valid sniffed fields.
-        const w = (t.media.resolved?.width || t.media.width || 0);
-        const h = (t.media.resolved?.height || t.media.height || 0);
-        const v = evaluateSizeGuard({ width: w, height: h }, t.options);
-        if (v.state === 'will-fail') willFailCount++;
-        else if (v.state === 'unknown') unknownCount++;
-      }
-      if (willFailCount > 0 || unknownCount > 0) {
-        setLogs((prev) => [
-          ...prev,
-          `[batch-preflight] ${tasks.length} 项预检:可能不达标 ${willFailCount} 项 / 尺寸未知 ${unknownCount} 项(将由处理器实际探测后判定);失败项可在底部「⚡ 强制全部失败项」一键放行`
-        ].slice(-300));
-      }
-    }
-    await runDispatch(tasks);
-  }, [processable, options, baseOutputDir, outputDir, runDispatch]);
+  const {
+    dispatchBatch,
+    onProcessOne,
+    onReprocessFromHistory,
+    onBatchFromRecord
+  } = useProcessDispatch({
+    giftk,
+    options,
+    baseOutputDir,
+    outputDir,
+    result,
+    history,
+    processable,
+    progress,
+    patchHistory,
+    setLogs,
+    setProgress,
+    setProcessingOne,
+    setLastBatchDir,
+    activeHistoryIdRef,
+    taskRecordMapRef,
+    recordOutputDirRef
+  });
 
   const onStart = useCallback(async () => {
     if (!giftk) return;
@@ -1084,6 +628,7 @@ const App: React.FC = () => {
       return;
     }
     await dispatchBatch(null);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [processable, options, dispatchBatch]);
 
   // R-43 — "▶ 追加排队" while a batch is running. Sends only the rows
@@ -1115,6 +660,7 @@ const App: React.FC = () => {
     }
     setLogs((prev) => [...prev, `[batch] 追加 ${appendable.length} 个任务到当前队列`].slice(-300));
     await dispatchBatch(null, appendable);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appendable, options, dispatchBatch]);
 
   // R-55 Fix #2 — Cooperative finalize for the real-Chrome sniff. The
@@ -1129,6 +675,7 @@ const App: React.FC = () => {
       await giftk.finalizeSystemChromeSniff();
       setLogs((prev) => [...prev, '[system-chrome] 用户点击「完成嗅探」,正在收尾…'].slice(-300));
     } catch { /* ignore — likely not in flight anymore */ }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // R-55 Fix #3 — Offline import. Wraps `giftk.importOfflinePage` in
@@ -1148,64 +695,11 @@ const App: React.FC = () => {
   // saw as "卡 60%" — main now emits real per-stage progress over
   // the existing `sniff:progress` channel and the global
   // `onSniffProgress` subscriber picks it up automatically.
-  const runOfflineImport = useCallback(async (
-    absPath?: string,
-    runOpts?: { includeStaticImages?: boolean }
-  ) => {
-    if (!giftk?.importOfflinePage) return;
-    const myId = ++sniffReqId.current;
-    setSniffing(true);
-    setActiveSniffMode('offline');
-    // R-56 — kick off with stage:fetching/percent:0; main emits real
-    // milestones (5/15/25/55/70/85/100) which override this via the
-    // global onSniffProgress handler. Without overriding, the user
-    // sees an honest "starting…" indicator instead of the previous
-    // hard-pinned 50% that looked like a stalled job.
-    setSniffProgress({ stage: 'fetching', percent: 0, message: '准备解析离线内容…' });
-    setResult(null);
-    setSelected(new Set());
-    setActiveId(null);
-    setPreview(null);
-    setResolvedMap({});
-    setResolvingSet(new Set());
-    setResolveErrorMap({});
-    activeHistoryIdRef.current = null;
-    setLogs((prev) => [...prev, `[offline-import] ${absPath ? absPath : '(等用户在弹窗里选择文件/目录)'}${runOpts?.includeStaticImages ? ' (包含静态图像)' : ''}`].slice(-300));
-    try {
-      const r = await giftk.importOfflinePage(absPath, { includeStaticImages: !!runOpts?.includeStaticImages });
-      if (myId !== sniffReqId.current) return;
-      if (!r) {
-        // Picker cancelled — silently bail.
-        return;
-      }
-      setResult(r);
-      const auto = new Set(
-        r.items
-          .filter((i) => (i.kind === 'video' || i.kind === 'gif') && !i.requiresExternalDownload)
-          .map((i) => i.id)
-      );
-      setSelected(auto);
-      if (r.items.length > 0 || (r.warnings?.length ?? 0) === 0) {
-        const rec = makeHistoryRecord({
-          pageUrl: r.pageUrl,
-          title: r.title,
-          items: r.items,
-          options: { ...options }
-        });
-        pushOrReplace(rec);
-        activeHistoryIdRef.current = rec.id;
-      }
-    } catch (e) {
-      if (myId !== sniffReqId.current) return;
-      setResult({ pageUrl: absPath ?? '(offline)', items: [], warnings: [(e as Error).message] });
-    } finally {
-      if (myId === sniffReqId.current) {
-        setSniffing(false);
-        setSniffProgress(null);
-        setActiveSniffMode(null);
-      }
-    }
-  }, [options, pushOrReplace]);
+  const runOfflineImport = useCallback(
+    (absPath?: string, runOpts?: { includeStaticImages?: boolean }) =>
+      sniffSession.runOffline(absPath, runOpts),
+    [sniffSession]
+  );
 
   // R-58 — Static-image filter is now always-on at the unified
   // sniffFilters layer. Renderer no longer carries an
@@ -1237,45 +731,7 @@ const App: React.FC = () => {
   //   2. Honour `e.defaultPrevented` so any nested React onDrop
   //      handler that called `e.preventDefault()` already handled
   //      the drop and we shouldn't double-process it.
-  useEffect(() => {
-    if (view !== 'home') {
-      // Toolbox / history / uploads do their own drop handling
-      // (ToolboxPanel.handleDrop, etc.). Skipping the global listener
-      // entirely on those tabs prevents the cross-tab pollution where
-      // a toolbox-added file would appear in the home "已选媒体" grid.
-      return;
-    }
-    const onDragOver = (e: DragEvent) => {
-      if (!e.dataTransfer) return;
-      // Only react if the drag actually carries files.
-      if (Array.from(e.dataTransfer.types).indexOf('Files') < 0) return;
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'copy';
-    };
-    const onDrop = (e: DragEvent) => {
-      if (!e.dataTransfer) return;
-      if (!e.dataTransfer.files || e.dataTransfer.files.length === 0) return;
-      // R-68 — If a child React onDrop already called preventDefault,
-      // it means an inner drop zone (e.g. a future home-side toolbox
-      // embed) consumed the drop and our window-level fallback would
-      // duplicate the work. Native `defaultPrevented` is reliable
-      // across the React-synthetic / native boundary because React
-      // dispatches preventDefault straight to the native event.
-      if (e.defaultPrevented) return;
-      e.preventDefault();
-      const f = e.dataTransfer.files[0];
-      // Electron exposes a non-standard `path` on File when the file
-      // came from the OS (vs. a renderer-fetched blob).
-      const p = (f as File & { path?: string }).path;
-      if (p) void runOfflineImport(p, { includeStaticImages: false });
-    };
-    window.addEventListener('dragover', onDragOver);
-    window.addEventListener('drop', onDrop);
-    return () => {
-      window.removeEventListener('dragover', onDragOver);
-      window.removeEventListener('drop', onDrop);
-    };
-  }, [runOfflineImport, view]);
+  useGlobalDropZone(view, runOfflineImport);
 
   const onCancel = useCallback(() => {
     if (!giftk) return;
@@ -1316,6 +772,7 @@ const App: React.FC = () => {
       // dispatch; cheap enough to leave alone.
       void taskId;
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sniffing]);
 
   // R-43.2 — single-row cancel from TaskTable. Calls main-side
@@ -1351,181 +808,8 @@ const App: React.FC = () => {
     } catch (e) {
       setLogs((prev) => [...prev, `[error] cancelTask: ${(e as Error).message}`].slice(-300));
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  const onProcessOne = useCallback(async (media: SniffedMedia, override?: {
-    forceAllowSmallSide?: boolean;
-    /** R-33A — opt-in to manual re-optimize. Fed straight to processor. */
-    reoptimizeFromGifPath?: string;
-    /** R-33A — when re-optimizing, override these three knobs only. */
-    maxBytes?: number;
-    fps?: number;
-    maxWidth?: number;
-    /** R-79 — additional ProcessOptions overrides exposed by the
-     *  expanded ManualOptimizeModal. Each is applied independently
-     *  (typeof === 'number' check below) so the modal can omit any
-     *  field it doesn't want to touch. None of these write back to
-     *  the global `options` state — they are per-dispatch only. */
-    softMaxBytes?: number;
-    minSize?: number;
-    speed?: number;
-    /** R-81 — gifsicle knobs from ManualOptimizeModal / preset chips.
-     *  Each is independently optional; same per-dispatch contract. */
-    lossyCeiling?: number;
-    colorsFloor?: number;
-    optimizeLevel?: GifOptimizeLevel;
-    dither?: GifDither;
-  }) => {
-    if (!giftk) return;
-    if (media.kind === 'image') {
-      setLogs((prev) => [...prev, `[single] 已跳过(image 不支持处理): ${media.url}`].slice(-300));
-      return;
-    }
-    if (media.requiresExternalDownload && !media.resolved) {
-      setLogs((prev) => [...prev, `[single] 已跳过(${media.embedHost || '第三方'} 嵌入,未解析直链): ${media.url}`].slice(-300));
-      return;
-    }
-    const dir = baseOutputDir || outputDir;
-    // R-22 (single): mirror onStart's auto-truncation so retry/single-process
-    // long videos don't accidentally explode into N segment tasks. The user
-    // can still expand to all segments by ticking checkboxes in the modal.
-    const optBase: ProcessOptions = { ...options, outDir: dir };
-    // R-26 — when the caller asks for the spec-bypass override (clicked the
-    // failed task's "强制允许" button), inject the flag into THIS dispatch
-    // only. The component-level `options` state is untouched so the next
-    // batch re-uses the user's normal minSize.
-    if (override?.forceAllowSmallSide) {
-      optBase.forceAllowSmallSide = true;
-    }
-    // R-33A — manual re-optimize: redirect input to the previously saved gif
-    // file, override only the user-tunable knobs (maxBytes/fps/maxWidth),
-    // and force-disable skipCompress (we're re-running the compress loop on
-    // purpose). Every other field of the live options form survives.
-    if (override?.reoptimizeFromGifPath) {
-      optBase.reoptimizeFromGifPath = override.reoptimizeFromGifPath;
-      optBase.skipCompress = undefined;
-      if (typeof override.maxBytes === 'number') {
-        optBase.maxBytes = override.maxBytes;
-        // softMaxBytes must remain ≤ maxBytes — clamp to the smaller of
-        // the form's existing soft and 80% of the new hard target so the
-        // compress loop's "best target" tier still has room above it.
-        const softCap = Math.min(optBase.softMaxBytes, Math.round(override.maxBytes * 0.8));
-        optBase.softMaxBytes = Math.max(100 * 1024, softCap);
-      }
-      if (typeof override.fps === 'number') optBase.fps = override.fps;
-      if (typeof override.maxWidth === 'number') optBase.maxWidth = override.maxWidth;
-      // R-79 — additional per-dispatch overrides from the expanded
-      // ManualOptimizeModal. Each is applied independently so the modal
-      // can omit fields the user didn't touch. softMaxBytes is re-clamped
-      // here (in addition to the modal's own clamp) so it can never
-      // exceed the freshly-resolved maxBytes — invariant the compress
-      // loop relies on.
-      if (typeof override.softMaxBytes === 'number') {
-        const cap = Math.min(optBase.maxBytes, override.softMaxBytes);
-        optBase.softMaxBytes = Math.max(100 * 1024, cap);
-      }
-      if (typeof override.minSize === 'number') optBase.minSize = override.minSize;
-      if (typeof override.speed === 'number') optBase.speed = override.speed;
-      // R-81 — gifsicle knobs. Defensive clamp mirrors sanitizeOptions
-      // in main/index.ts so the per-dispatch override survives even
-      // if a future caller forgets to pre-clamp.
-      if (typeof override.lossyCeiling === 'number' && Number.isFinite(override.lossyCeiling)) {
-        optBase.lossyCeiling = Math.max(0, Math.min(200, Math.round(override.lossyCeiling)));
-      }
-      if (typeof override.colorsFloor === 'number' && Number.isFinite(override.colorsFloor)) {
-        optBase.colorsFloor = Math.max(2, Math.min(256, Math.round(override.colorsFloor)));
-      }
-      if (override.optimizeLevel === 1 || override.optimizeLevel === 2 || override.optimizeLevel === 3) {
-        optBase.optimizeLevel = override.optimizeLevel;
-      }
-      if (override.dither === 'none' || override.dither === 'floyd-steinberg' || override.dither === 'ordered') {
-        optBase.dither = override.dither;
-      }
-    }
-    const dur = media.resolved?.durationSec ?? media.durationSec ?? 0;
-    const tooLong = media.kind === 'video' && dur > options.maxSegmentSec;
-    const userPickedRange =
-      optBase.startSec !== undefined ||
-      optBase.endSec !== undefined ||
-      (optBase.selectedSegments && optBase.selectedSegments.length > 0);
-    if (tooLong && !userPickedRange) {
-      optBase.selectedSegments = [0];
-      setLogs((prev) => [
-        ...prev,
-        `[single] 长视频(${dur.toFixed(1)}s)默认只处理第 1 段(0..${options.maxSegmentSec}s);如需更多段,请在预览中勾选`
-      ].slice(-300));
-    }
-    const tasks: ProcessTask[] = [
-      { id: media.id, media, options: optBase }
-    ];
-    // R-29 (P1-I): pin the task → record mapping BEFORE awaiting
-    // startBatch so the very first `process:progress` event lands
-    // in the correct record. We snapshot any prior progress entry so
-    // a busy / error rejection can put it back instead of silently
-    // erasing a previous done/failed row (P1-E).
-    const recId = activeHistoryIdRef.current;
-    if (recId) {
-      taskRecordMapRef.current.set(media.id, recId);
-    }
-    const prevSnapshot = progress[media.id];
-    setProgress((prev) => ({
-      ...prev,
-      [media.id]: {
-        taskId: media.id,
-        status: 'pending',
-        percent: 0,
-        message: '已加入队列'
-      }
-    }));
-    try {
-      // R-29 (dirfix): reuse this record's existing batch sub-dir so
-      // a single-process / retry doesn't carve out its own folder.
-      const existingDir = recId ? recordOutputDirRef.current.get(recId) : undefined;
-      const r = await giftk.startBatch(tasks, result?.title, existingDir);
-      setProcessingOne((prev) => {
-        const n = new Set(prev);
-        n.add(media.id);
-        return n;
-      });
-      if (r?.outputDir) {
-        setLastBatchDir(r.outputDir);
-        setLogs((prev) => [...prev, `[single] outputs -> ${r.outputDir}`].slice(-300));
-        // R-27 — same as batch: pin the sub-dir onto the active record.
-        // R-27 (post-review #2.1/#3.1): persist the *effective* opt
-        // (including R-26 forceAllowSmallSide / R-22 [0] segment
-        // fallback) — historically this stored the raw form options
-        // and lost the override flag.
-        if (recId) {
-          recordOutputDirRef.current.set(recId, r.outputDir);
-          patchHistory(recId, (rec) => ({
-            ...rec,
-            outputDir: r.outputDir,
-            options: { ...optBase }
-          }));
-        }
-      }
-    } catch (e) {
-      const msg = (e as Error).message || '';
-      if (msg === 'busy' || /\bbusy\b/i.test(msg)) {
-        setLogs((prev) => [...prev, `[busy] 已有任务在跑,请先取消或等待`].slice(-300));
-      } else {
-        setLogs((prev) => [...prev, `[error] startBatch(single): ${msg}`].slice(-300));
-      }
-      // R-29 (P1-E): restore prior snapshot so the previous
-      // done/failed row survives a busy rejection.
-      setProgress((prev) => {
-        if (prev[media.id]?.status !== 'pending') return prev;
-        const next = { ...prev };
-        if (prevSnapshot) {
-          next[media.id] = prevSnapshot;
-        } else {
-          delete next[media.id];
-        }
-        return next;
-      });
-      taskRecordMapRef.current.delete(media.id);
-    }
-  }, [options, baseOutputDir, outputDir, result, patchHistory, progress]);
 
   // R-33A — open ManualOptimizeModal for a "未达标" row. We need at least
   // one output path on the progress record (TaskProgress.outputs[0]); without
@@ -1538,6 +822,7 @@ const App: React.FC = () => {
       return;
     }
     setManualOpt({ media, progress: p, gifPath });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const onManualOptimizeConfirm = useCallback(async (req: ManualOptimizeRequest) => {
@@ -1561,177 +846,52 @@ const App: React.FC = () => {
     });
   }, [manualOpt, onProcessOne]);
 
-  // R-45 — kick off uploads for an array of (media, output-paths). Used
-  // by the per-row "📤 上传" button (single output) and the global
-  // "⚡ 上传所有产物" button (every "done" task with at least one output).
-  // Creates ONE upload-history record for the whole batch so the
-  // central result modal surfaces consolidated markdown when all jobs
-  // settle.
-  //
-  // R-54 — Adds two safeguards on top of R-45:
-  //   1. Hard-fail if the active backend is not fully configured. The
-  //      previous check was `!uploadConfigs` only (would pass with
-  //      configs={active:'github', github:{}}); we now use the
-  //      `isUploadConfigured` predicate which knows each backend's
-  //      required fields. Failure opens 「📤 上传设置」 directly.
-  //   2. Pipe `sniffRecId` (the originating processing HistoryRecord
-  //      id) down through UploadJob.recordId so the upload-progress
-  //      handler can patch HistoryRecord.uploadsByOutputPath when
-  //      each upload settles. Defaults to activeHistoryIdRef when
-  //      the caller doesn't pass one explicitly.
-  const dispatchUpload = useCallback(async (
-    plan: Array<{ media: SniffedMedia; filePath: string }>,
-    opts?: { sniffRecId?: string | null }
-  ): Promise<void> => {
-    if (!giftk || typeof giftk.uploadStart !== 'function') return;
-    if (plan.length === 0) {
-      setLogs((prev) => [...prev, `[upload] 没有可上传的产物(需要 done 状态且至少有一个输出)`].slice(-300));
-      return;
-    }
-    if (!isUploadConfigured(uploadConfigs)) {
-      // R-54 — Conservative configured-check: "configs object exists"
-      // is no longer sufficient. We open the settings modal so the
-      // user can fill in the missing fields immediately.
-      setLogs((prev) => [
-        ...prev,
-        `[upload] 当前图床尚未配置完整,先去「📤 上传设置」里填好对应后端再来`
-      ].slice(-300));
-      setUploadSettingsOpen(true);
-      return;
-    }
-    const sniffRecId = opts?.sniffRecId ?? activeHistoryIdRef.current ?? undefined;
-    const backend = uploadConfigs!.active;
-    const items: UploadHistoryItem[] = plan.map((entry) => ({
-      jobId: '', // filled in after uploadStart resolves
-      backend,
-      fileName: entry.filePath.split(/[\\/]/).pop() || entry.filePath,
-      filePath: entry.filePath,
-      status: 'pending'
-    }));
-    // Reserve the record id NOW so onUploadProgress can route emits.
-    const recId = startUploadRecord({ backend, items });
-    try {
-      const payload: UploadStartPayload = {
-        jobs: plan.map((entry, i) => ({
-          id: `${recId}-${i}`,
-          filePath: entry.filePath,
-          remoteName: entry.filePath.split(/[\\/]/).pop() || undefined,
-          // R-54 — echoed back on every UploadProgress emit.
-          recordId: sniffRecId
-        }))
-      };
-      const r = await giftk.uploadStart(payload);
-      if (!r.ok) throw new Error('uploadStart failed');
-      // Bind jobIds → record + seed in-flight counter so the central
-      // modal opens when every job settles.
-      uploadInflightRef.current.set(recId, r.jobIds.length);
-      r.jobIds.forEach((jobId, i) => {
-        uploadJobToRecordRef.current.set(jobId, recId);
-        // R-54 — record the sniff target alongside the upload-history
-        // record id, so the upload-progress handler can patch the
-        // *processing* HistoryRecord (嗅探历史) on terminal events.
-        uploadJobToTargetRef.current.set(jobId, {
-          sniffRecId,
-          filePath: plan[i].filePath
-        });
-        // Patch the placeholder jobId-less item so the history row can
-        // be located by jobId on subsequent applyProgress calls.
-        applyUploadProgress(recId, {
-          jobId,
-          status: 'pending',
-          percent: 0
-        });
-        // Edge case: applyProgress can't locate a row by an empty
-        // jobId, so we re-seed via a manual patch. Easier path:
-        // re-set the record items via startUploadRecord-style mutation
-        // would force a render. Instead, we exploit applyProgress'
-        // findIndex(jobId === p.jobId): since rows have jobId='',
-        // findIndex returns -1 (no match) and the call no-ops. The
-        // first real progress emit from main lands on the placeholder
-        // anyway because we update items[i].jobId here:
-        items[i].jobId = jobId;
-      });
-      setLogs((prev) => [...prev, `[upload] 已派发 ${r.jobIds.length} 个上传任务`].slice(-300));
-      // R-73 — Open the upload progress modal IMMEDIATELY on dispatch,
-      // not after every job settles. The modal is the same component
-      // we used to pop on completion; UploadResultModal renders the
-      // per-row live status list driven by `record.items`, so it
-      // animates as `applyUploadProgress` folds streaming events. The
-      // terminal-modal-open path in the IPC listener still fires when
-      // the in-flight counter hits zero — it's now a no-op (the modal
-      // is already showing the same record id) but the call is kept
-      // for the edge case where the user manually closed the modal
-      // mid-upload and we want to surface the final summary.
-      setUploadResult(recId);
-    } catch (e) {
-      setLogs((prev) => [...prev, `[upload] 派发失败: ${(e as Error).message}`].slice(-300));
-      uploadInflightRef.current.delete(recId);
-    }
-  }, [uploadConfigs, startUploadRecord, applyUploadProgress]);
+  // R-45 / R-54 / P1 #4 — upload dispatch is now extracted to
+  // useUploadDispatch. The hook preserves all invariants verbatim:
+  //   • routing tables + in-flight counter pre-populated BEFORE
+  //     the IPC roundtrip (closes the hash-cache-hit race);
+  //   • items[] seeded with deterministic ${recId}-${i} jobIds;
+  //   • catch branch rolls the tables back; mismatch branch remaps;
+  //   • setUploadResult fires immediately on success branch (R-73).
+  const { dispatchUpload } = useUploadDispatch({
+    giftk,
+    uploadConfigs,
+    history,
+    startUploadRecord,
+    activeHistoryIdRef,
+    uploadJobToRecordRef,
+    uploadJobToTargetRef,
+    uploadInflightRef,
+    setLogs,
+    setUploadResult,
+    setUploadSettingsOpen
+  });
 
-  // R-45 — single-output upload for a TaskTable row. Picks the FIRST
-  // output (typically the .gif). Power users wanting to upload every
-  // output of a task should use 「⚡ 上传所有产物」 instead.
-  const onUploadOne = useCallback(async (media: SniffedMedia, p: TaskProgress): Promise<void> => {
-    const out = p.outputs?.[0];
-    if (!out) {
-      setLogs((prev) => [...prev, `[upload] 跳过:任务 ${media.id} 没有可用输出`].slice(-300));
-      return;
-    }
-    await dispatchUpload([{ media, filePath: out }]);
-  }, [dispatchUpload]);
-
-  // R-45 — global "⚡ 上传所有产物". Walks every "done" row in `progress`
-  // and uploads its first output. Skips rows without outputs.
-  const onUploadAll = useCallback(async (): Promise<void> => {
-    const plan: Array<{ media: SniffedMedia; filePath: string }> = [];
-    for (const m of items) {
-      const p = progress[m.id];
-      if (!p || p.status !== 'done') continue;
-      const out = p.outputs?.[0];
-      if (!out) continue;
-      plan.push({ media: m, filePath: out });
-    }
-    await dispatchUpload(plan);
-  }, [items, progress, dispatchUpload]);
-
-  // R-54 — Computed reasons for / against enabling 「⚡ 上传所有产物」.
-  //   - hasUploadable: at least one row has done && outputs[0]
-  //   - allDone: every processable row has reached `done` (the user
-  //     explicitly asked for "所有产物都搞定了才能点击") — we treat
-  //     pending / running / failed / cancelled as「未搞定」。
-  //   - configured: the active backend has all required fields.
-  // Derived this way so the title attribute can spell out *which*
-  // condition is failing instead of just disabling silently.
-  const uploadAllStats = (() => {
-    if (items.length === 0) {
-      return { allDone: false, hasUploadable: false, configured: isUploadConfigured(uploadConfigs), total: 0, doneCount: 0 };
-    }
-    let doneCount = 0;
-    let hasUploadable = false;
-    for (const m of items) {
-      const p = progress[m.id];
-      if (p && p.status === 'done') {
-        doneCount += 1;
-        if (p.outputs && p.outputs.length > 0) hasUploadable = true;
-      }
-    }
-    return {
-      allDone: doneCount === items.length,
-      hasUploadable,
-      configured: isUploadConfigured(uploadConfigs),
-      total: items.length,
-      doneCount
-    };
-  })();
-  const uploadAllReady = uploadAllStats.allDone && uploadAllStats.hasUploadable;
-  const uploadAllTitle = (() => {
-    if (items.length === 0) return '当前没有可上传的产物';
-    if (!uploadAllStats.configured) return '当前图床尚未配置完整,先去「📤 上传设置」里配置一个可用图床';
-    if (!uploadAllStats.allDone) return `还有任务未完成 (${uploadAllStats.doneCount}/${uploadAllStats.total}),所有产物都搞定了才能点击`;
-    if (!uploadAllStats.hasUploadable) return '所有任务都完成,但没有可上传的输出文件';
-    return '把所有已完成任务的产物上传到当前默认图床(可在「📤 上传设置」中切换)';
-  })();
+  // R-45 / R-54 — upload-domain orchestration is now extracted to
+  // useUploadOrchestrator. The hook owns:
+  //   • onUploadOne / onUploadAll callbacks
+  //   • uploadAllStats / uploadAllReady / uploadAllTitle derived UX
+  //   • onSaveUploadSettings (push + re-pull masked secrets)
+  //   • the mount-once uploadGetSettings hydration effect
+  // dispatchUpload (above) stays the IPC roundtrip primitive; this
+  // hook is the renderer-side glue that decides WHICH outputs go to
+  // it and surfaces the reason a button is disabled.
+  const {
+    onUploadOne,
+    onUploadAll,
+    onSaveUploadSettings,
+    uploadAllStats,
+    uploadAllReady,
+    uploadAllTitle
+  } = useUploadOrchestrator({
+    giftk,
+    dispatchUpload,
+    items,
+    progress,
+    uploadConfigs,
+    setUploadConfigs,
+    setLogs
+  });
 
   // R-75 — 「⚡ 强制全部失败项」 derived state.
   //
@@ -1784,20 +944,11 @@ const App: React.FC = () => {
     // limits already cap the actual ffprobe-encode pipeline width.
     const targets = [...forceAllowFailedMedia];
     await Promise.allSettled(targets.map((m) => forceAllowOne(m)));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [forceAllowFailedMedia, forceAllowOne]);
   const forceAllowAllTitle = forceAllowFailedCount === 0
     ? '当前没有因尺寸规格被拒的任务;一旦有任务以 ASPECT_RATIO_OUT_OF_RANGE 失败,这里就可以一键全部强制放行重跑'
     : `把 ${forceAllowFailedCount} 项因尺寸规格被拒的任务一次性全部强制重跑(等同逐项点击「强制允许」)`;
-
-  const onSaveUploadSettings = useCallback(async (next: UploadConfigs): Promise<void> => {
-    if (!giftk || typeof giftk.uploadSetSettings !== 'function') return;
-    await giftk.uploadSetSettings(next);
-    // Re-load to pick up the masked secrets that main now persists.
-    if (typeof giftk.uploadGetSettings === 'function') {
-      const fresh = await giftk.uploadGetSettings();
-      setUploadConfigs(fresh);
-    }
-  }, []);
 
   useEffect(() => {
     if (processingOne.size === 0) return;
@@ -1811,6 +962,7 @@ const App: React.FC = () => {
       }
     }
     if (changed) setProcessingOne(next);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [progress, processingOne]);
 
   const isProcessingOne = useCallback((id: string): boolean => {
@@ -1825,64 +977,6 @@ const App: React.FC = () => {
     if (!m) return;
     void onProcessOne(m);
   }, [items, onProcessOne]);
-
-  const onResolveEmbedById = useCallback(async (id: string) => {
-    if (!giftk?.resolveEmbed) return;
-    const m = items.find((i) => i.id === id);
-    if (!m) return;
-    if (!m.requiresExternalDownload) return;
-    if (resolvedMap[id]) return;
-    if (resolvingSet.has(id)) return;
-
-    setResolvingSet((prev) => {
-      const n = new Set(prev); n.add(id); return n;
-    });
-    setResolveErrorMap((prev) => {
-      if (!prev[id]) return prev;
-      const n = { ...prev }; delete n[id]; return n;
-    });
-    setLogs((prev) => [...prev, `[resolve] ${m.embedHost} ← ${m.pageUrl}`].slice(-300));
-    try {
-      const r = await giftk.resolveEmbed(m);
-      setResolvedMap((prev) => ({ ...prev, [id]: r }));
-      // Auto-select the now-resolved item so the user can immediately batch.
-      setSelected((prev) => {
-        const n = new Set(prev); n.add(id); return n;
-      });
-      setLogs((prev) => [...prev, `[resolve] ✓ ${r.qualityLabel || ''} ${r.width || '?'}x${r.height || '?'} (${r.extractor || 'ytdlp'})`].slice(-300));
-    } catch (e) {
-      const msg = (e as Error).message || '';
-      const display = msg === 'YT_DLP_UNAVAILABLE'
-        ? 'yt-dlp 不可用(可能离线且本地无缓存),稍后再试'
-        : msg;
-      setResolveErrorMap((prev) => ({ ...prev, [id]: display }));
-      setLogs((prev) => [...prev, `[resolve] 失败: ${display}`].slice(-300));
-    } finally {
-      setResolvingSet((prev) => {
-        const n = new Set(prev); n.delete(id); return n;
-      });
-    }
-  }, [items, resolvedMap, resolvingSet]);
-
-  // Auto-batch-resolve: whenever the sniff result changes, kick off resolve
-  // for every embed that still needs one. Concurrency is bounded inside the
-  // main process resolver (yt-dlp is already CPU-bound), so we just fire all
-  // pending IDs and let the resolver coalesce.
-  useEffect(() => {
-    if (!result || result.items.length === 0) return;
-    const pending = result.items.filter(
-      (m) => m.requiresExternalDownload && !resolvedMap[m.id] && !resolvingSet.has(m.id) && !resolveErrorMap[m.id]
-    );
-    for (const m of pending) {
-      void onResolveEmbedById(m.id);
-    }
-    // Intentionally don't depend on resolvedMap/resolvingSet to avoid an
-    // immediate re-fire on every state delta — onResolveEmbedById's own
-    // guards are enough.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [result]);
-
-  const isResolving = useCallback((id: string): boolean => resolvingSet.has(id), [resolvingSet]);
 
   const onOpenOutput = useCallback(() => {
     if (!giftk) return;
@@ -1920,81 +1014,6 @@ const App: React.FC = () => {
   // events from this re-run reach rec.id while subsequent home-view
   // dispatches keep targeting whatever record the user is currently
   // working with.
-  const onReprocessFromHistory = useCallback((rec: HistoryRecord, media: SniffedMedia) => {
-    if (!giftk) return;
-    if (media.kind === 'image') return;
-    if (media.requiresExternalDownload && !media.resolved) return;
-    const dir = rec.options.outDir || baseOutputDir || outputDir;
-    const optBase: ProcessOptions = { ...rec.options, outDir: dir };
-    const tasks: ProcessTask[] = [{ id: media.id, media, options: optBase }];
-    // F3 (post R-27): seed pending so the row appears in the TaskTable
-    // immediately after the user clicks 重跑 in history. Bind the
-    // task→record map up front too — otherwise a fast first
-    // `process:progress` could arrive before .then() runs and would
-    // be routed to the *active* (home) record.
-    taskRecordMapRef.current.set(media.id, rec.id);
-    // R-29 (P1-E): snapshot prior progress entry so a busy/error
-    // rejection restores it instead of nuking it.
-    const prevSnapshot = progress[media.id];
-    setProgress((prev) => ({
-      ...prev,
-      [media.id]: {
-        taskId: media.id,
-        status: 'pending',
-        percent: 0,
-        message: '已加入队列'
-      }
-    }));
-    setLogs((prev) => [
-      ...prev,
-      `[history] re-run "${shortDir(media.url)}" (record ${rec.id})`
-    ].slice(-300));
-    // R-29 (dirfix): reuse this record's batch sub-dir if known so
-    // re-run outputs land alongside the original ones.
-    const existingDir = recordOutputDirRef.current.get(rec.id) || rec.outputDir;
-    giftk.startBatch(tasks, rec.title, existingDir)
-      .then((r) => {
-        setProcessingOne((prev) => {
-          const n = new Set(prev); n.add(media.id); return n;
-        });
-        if (r?.outputDir) {
-          setLastBatchDir(r.outputDir);
-          recordOutputDirRef.current.set(rec.id, r.outputDir);
-          patchHistory(rec.id, (cur) => ({
-            ...cur,
-            outputDir: r.outputDir,
-            options: { ...optBase }
-          }));
-        }
-      })
-      .catch((e: Error) => {
-        const msg = e?.message || '';
-        if (/\bbusy\b/i.test(msg)) {
-          setLogs((prev) => [...prev, `[busy] 已有任务在跑,请先取消或等待`].slice(-300));
-        } else {
-          setLogs((prev) => [...prev, `[error] history re-run: ${msg}`].slice(-300));
-        }
-        // R-29 (P1-E): restore prior snapshot + unbind so a busy /
-        // error rejection doesn't leak into the record view.
-        setProgress((prev) => {
-          if (prev[media.id]?.status !== 'pending') return prev;
-          const next = { ...prev };
-          if (prevSnapshot) {
-            next[media.id] = prevSnapshot;
-          } else {
-            delete next[media.id];
-          }
-          return next;
-        });
-        taskRecordMapRef.current.delete(media.id);
-      });
-    // F2 (post R-27): we used to setView('home') here so the user
-    // could watch progress in the home TaskTable. With the new
-    // HistoryDetailModal the modal itself shows a record-scoped
-    // TaskTable, so jumping back to home would actually *hide* the
-    // user's view. Stay where we are.
-  }, [baseOutputDir, outputDir, patchHistory, progress]);
-
   // R-28 #2 — batch re-run from inside HistoryDetailModal. Mirrors
   // dispatchBatch (single-batch entry to startBatch) but pins every
   // task to the historical record id BEFORE awaiting startBatch so
@@ -2007,96 +1026,12 @@ const App: React.FC = () => {
   // re-run the long-video segment-picker modal here (the user can
   // close, sniff again on home, and re-run there if they need a
   // fresh segment pick).
-  const onBatchFromRecord = useCallback((
-    rec: HistoryRecord,
-    medias: SniffedMedia[],
-    opts: ProcessOptions
-  ) => {
-    if (!giftk) return;
-    if (medias.length === 0) return;
-    const dir = rec.options.outDir || baseOutputDir || outputDir;
-    const tasks: ProcessTask[] = medias.map((m) => {
-      const opt: ProcessOptions = { ...opts, outDir: dir };
-      const dur = m.resolved?.durationSec ?? m.durationSec ?? 0;
-      const tooLong = m.kind === 'video' && dur > opt.maxSegmentSec;
-      const userExplicit =
-        opt.startSec !== undefined ||
-        opt.endSec !== undefined ||
-        (opt.selectedSegments && opt.selectedSegments.length > 0);
-      if (tooLong && !userExplicit) {
-        // Same R-22 fallback as dispatchBatch.
-        opt.selectedSegments = [0];
-      }
-      return { id: m.id, media: m, options: opt };
-    });
-    // Pin all tasks to the record up front (must happen before await
-    // so an early process:progress event routes correctly).
-    for (const t of tasks) {
-      taskRecordMapRef.current.set(t.id, rec.id);
-    }
-    // R-29 (P1-E): snapshot prior progress per task so a busy
-    // rejection restores them instead of erasing.
-    const prevSnapshots: Record<string, TaskProgress | undefined> = {};
-    for (const t of tasks) {
-      prevSnapshots[t.id] = progress[t.id];
-    }
-    setProgress((prev) => {
-      const next = { ...prev };
-      for (const t of tasks) {
-        next[t.id] = {
-          taskId: t.id,
-          status: 'pending',
-          percent: 0,
-          message: '已加入队列'
-        };
-      }
-      return next;
-    });
-    setLogs((prev) => [
-      ...prev,
-      `[history] batch re-run "${rec.title || rec.pageUrl}" (record ${rec.id}) ${tasks.length} 项`
-    ].slice(-300));
-    // R-29 (dirfix): reuse this record's existing sub-dir for the
-    // batch re-run so all outputs share the original folder.
-    const existingDir = recordOutputDirRef.current.get(rec.id) || rec.outputDir;
-    giftk.startBatch(tasks, rec.title, existingDir)
-      .then((r) => {
-        if (r?.outputDir) {
-          setLastBatchDir(r.outputDir);
-          recordOutputDirRef.current.set(rec.id, r.outputDir);
-          patchHistory(rec.id, (cur) => ({
-            ...cur,
-            outputDir: r.outputDir,
-            options: { ...tasks[0].options }
-          }));
-        }
-      })
-      .catch((e: Error) => {
-        const msg = e?.message || '';
-        if (/\bbusy\b/i.test(msg)) {
-          setLogs((prev) => [...prev, `[busy] 已有任务在跑,请先取消或等待`].slice(-300));
-        } else {
-          setLogs((prev) => [...prev, `[error] history batch re-run: ${msg}`].slice(-300));
-        }
-        // R-29 (P1-E): restore prior snapshots + unbind.
-        setProgress((prev) => {
-          const next = { ...prev };
-          for (const t of tasks) {
-            if (next[t.id]?.status !== 'pending') continue;
-            const snap = prevSnapshots[t.id];
-            if (snap) {
-              next[t.id] = snap;
-            } else {
-              delete next[t.id];
-            }
-          }
-          return next;
-        });
-        for (const t of tasks) {
-          taskRecordMapRef.current.delete(t.id);
-        }
-      });
-  }, [baseOutputDir, outputDir, patchHistory, progress]);
+  // F2 (post R-27): we used to setView('home') in onReprocessFromHistory
+  // so the user could watch progress in the home TaskTable. With the
+  // new HistoryDetailModal the modal itself shows a record-scoped
+  // TaskTable, so jumping back to home would actually *hide* the
+  // user's view. Stay where we are. Both handlers now live inside
+  // useProcessDispatch — see hook header for the full rationale.
 
   const toggleSelected = useCallback((id: string) => {
     // F1 (post R-27): an iframe-embed media (YouTube / Bilibili / Vimeo …)
@@ -2114,51 +1049,23 @@ const App: React.FC = () => {
       else next.add(id);
       return next;
     });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items]);
 
   const openCard = useCallback((id: string) => {
     setActiveId(id);
     setPreview(null);
-  }, []);
+  }, [setPreview]);
 
   const closeModal = useCallback(() => {
     setActiveId(null);
     setPreview(null);
-  }, []);
-
-  // Drag handler for the resizable bottom panel. Computed against
-  // window.innerHeight so the gesture maps 1:1 with cursor movement.
-  // Persists final value to localStorage on mouseup.
-  const onBottomResizeStart = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    const startY = e.clientY;
-    const startH = bottomH;
-    const onMove = (ev: MouseEvent) => {
-      const dy = startY - ev.clientY;
-      const maxH = Math.max(BOTTOM_H_MIN + 1, Math.floor(window.innerHeight * 0.7));
-      const next = Math.min(maxH, Math.max(BOTTOM_H_MIN, startH + dy));
-      setBottomH(next);
-    };
-    const onUp = () => {
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-      try {
-        // setBottomH is async; read latest from a closure-stable getter.
-        // We piggy-back on next tick by reading from state on the next call.
-        // Simplest: write the most recent value via a setter snapshot.
-        setBottomH((v) => {
-          window.localStorage.setItem(BOTTOM_H_KEY, String(v));
-          return v;
-        });
-      } catch { /* ignore quota errors */ }
-    };
-    document.body.style.cursor = 'ns-resize';
-    document.body.style.userSelect = 'none';
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-  }, [bottomH]);
+    // P1.2 — discard the per-media preview override on close. Without this
+    // the next time the modal is opened (different media or even the same
+    // one) it would briefly render with a stale crop / time window before
+    // PreviewModal's `useEffect[media.id]` fires the reset.
+    setPreviewOverride({});
+  }, [setPreview, setPreviewOverride]);
 
   if (!giftk) {
     return (
@@ -2171,824 +1078,188 @@ const App: React.FC = () => {
     );
   }
 
-  const stageLabel = (s: SniffProgress['stage']): string => {
-    switch (s) {
-      case 'fetching': return '抓取页面';
-      case 'parsing': return '解析 DOM';
-      case 'probing': return '探测元数据';
-      case 'done': return '完成';
-    }
-  };
-
   return (
     <div className="app" style={{ ['--bottom-h' as string]: `${bottomH}px` } as React.CSSProperties}>
-      <div className="titlebar">
-        {/* R-84 — Brand cluster.
-            Inline SVG (no extra asset file → ships clean in dev and
-            in the asar bundle) styled to feel like the home-grown
-            "film-strip + GIF" mark. .brand-logo gets a subtle
-            gradient background so the 14px h1 still reads as the
-            primary affordance and the icon as a chip / badge.
-            -webkit-app-region:no-drag on the cluster lets users
-            click-to-focus the title without starting a window drag. */}
-        <div className="brand" aria-label="Gif Toolkit">
-          <span className="brand-logo" aria-hidden="true">
-            <svg viewBox="0 0 32 32" width="22" height="22" focusable="false">
-              <defs>
-                <linearGradient id="gtkBrandG" x1="0" y1="0" x2="1" y2="1">
-                  <stop offset="0%" stopColor="#5aa9ff" />
-                  <stop offset="100%" stopColor="#7d6bff" />
-                </linearGradient>
-              </defs>
-              <rect x="2" y="6" width="28" height="20" rx="4" fill="url(#gtkBrandG)" />
-              <rect x="4.5" y="8.5" width="3" height="3" rx="0.6" fill="rgba(255,255,255,0.85)" />
-              <rect x="4.5" y="13.5" width="3" height="3" rx="0.6" fill="rgba(255,255,255,0.85)" />
-              <rect x="4.5" y="18.5" width="3" height="3" rx="0.6" fill="rgba(255,255,255,0.85)" />
-              <rect x="24.5" y="8.5" width="3" height="3" rx="0.6" fill="rgba(255,255,255,0.85)" />
-              <rect x="24.5" y="13.5" width="3" height="3" rx="0.6" fill="rgba(255,255,255,0.85)" />
-              <rect x="24.5" y="18.5" width="3" height="3" rx="0.6" fill="rgba(255,255,255,0.85)" />
-              <text
-                x="16"
-                y="20"
-                textAnchor="middle"
-                fontFamily="-apple-system, 'Segoe UI', sans-serif"
-                fontSize="9"
-                fontWeight="700"
-                fill="#fff"
-                letterSpacing="0.5"
-              >GIF</text>
-            </svg>
-          </span>
-          <h1>Gif Toolkit · 网页媒体抓取 · 转换 · 上传</h1>
-        </div>
-        <div className="tabs">
-          <button
-            type="button"
-            className={`tab-btn ${view === 'home' ? 'active' : ''}`}
-            onClick={() => setView('home')}
-            aria-pressed={view === 'home'}
-          >
-            主页
-          </button>
-          <button
-            type="button"
-            className={`tab-btn ${view === 'history' ? 'active' : ''}`}
-            onClick={() => {
-              // R-34 — every click on the history tab forces a fresh
-              // resync from localStorage. This handles two cases:
-              //   1. in-flight progress that the 250ms debounce in
-              //      useHistory hasn't yet flushed — without this we
-              //      could show counts that are 1-2 emits behind the
-              //      home view's TaskTable;
-              //   2. external mutations (another renderer / window).
-              // Calling reload unconditionally (not gated on
-              // view !== 'history') makes "click again to refresh" a
-              // first-class affordance: if the user wants to re-poll
-              // the latest data while already on the history tab they
-              // just click 历史 again.
-              reloadHistory();
-              setView('history');
-            }}
-            aria-pressed={view === 'history'}
-          >
-            历史 {history.length > 0 ? `(${history.length})` : ''}
-          </button>
-          <button
-            type="button"
-            className={`tab-btn ${view === 'toolbox' ? 'active' : ''}`}
-            onClick={() => setView('toolbox')}
-            aria-pressed={view === 'toolbox'}
-          >
-            工具箱
-          </button>
-          <button
-            type="button"
-            className={`tab-btn ${view === 'uploads' ? 'active' : ''}`}
-            onClick={() => setView('uploads')}
-            aria-pressed={view === 'uploads'}
-            title="查看上传到图床的历史"
-          >
-            上传历史 {uploadHistory.length > 0 ? `(${uploadHistory.length})` : ''}
-          </button>
-        </div>
-        <div className="spacer" />
-        <div className="actions">
-          <button onClick={onPickDir}>{baseOutputDir ? `根目录: ${shortDir(baseOutputDir)}` : '选择输出目录'}</button>
-          {/* R-30 #1 — the per-batch "打开目录" button used to live
-              here in the global title bar. With the history tab in
-              place that placement was confusing (looked like a
-              global "open the active history's dir" while it was
-              actually only ever the latest *home* batch). It now
-              moves into the home view's grid-header below so it's
-              co-located with the media list it produced; history
-              records each carry their own per-row 打开目录. */}
-        </div>
-      </div>
+      <TopBar
+        view={view}
+        setView={setView}
+        reloadHistory={reloadHistory}
+        historyCount={history.length}
+        uploadHistoryCount={uploadHistory.length}
+        outputDirLabel={baseOutputDir ? `根目录: ${shortDir(baseOutputDir)}` : '选择输出目录'}
+        onPickDir={onPickDir}
+      />
 
       {view === 'home' ? (
       <div className="body">
         <div className="left">
-          {/* R-83 — Sidebar split into [.left-scroll: input/sniff/params/advanced]
-              + [.left-resize-handle] + [<ProgressDock />] so the dock no
-              longer covers the right column. The progress dock height is
-              still driven by --bottom-h via the persisted resize handler. */}
+          {/* Home controls only: URL/sniffing + conversion parameters.
+              The processing progress dock belongs to the right-bottom
+              workspace, matching the user's annotated layout. */}
           <div className="left-scroll">
-          <div className="section fixed">
-            <h2>1. 输入文章 URL</h2>
-            <div className="url-bar">
-              <input
-                type="text"
-                placeholder="https://example.com/article"
-                value={url}
-                onChange={(e) => {
-                  setUrl(e.target.value);
-                  if (urlError) setUrlError(null);
-                }}
-                onKeyDown={(e) => e.key === 'Enter' && onSniff()}
-              />
-              {/* R-32 — quick picker of recently-sniffed URLs. The
-                  trigger toggles the popover; the popover itself is
-                  positioned absolutely inside .url-bar so it floats
-                  above the rest of the page. */}
-              <button
-                type="button"
-                className={`sniff-hist-trigger${sniffHistoryOpen ? ' open' : ''}`}
-                onClick={() => setSniffHistoryOpen((v) => !v)}
-                disabled={sniffHistory.length === 0}
-                title={sniffHistory.length === 0 ? '暂无解析历史' : '从解析历史选择 URL'}
-                aria-haspopup="dialog"
-                aria-expanded={sniffHistoryOpen}
-                aria-label="解析历史"
-              >
-                ☰
-              </button>
-              <button className="primary" onClick={onSniff} disabled={sniffing} style={{ whiteSpace: 'nowrap' }}>
-                {sniffing ? '嗅探中…' : '嗅探'}
-              </button>
-              {/* R-44/R-47 — webview-assisted sniff button. Disabled
-                  while any sniff (headless or webview) is in flight,
-                  since both paths share `sniffing` and the same UI
-                  slot for results. R-47 reframes the entry as a
-                  general-purpose "网页嗅探" since users may use it for
-                  bot-walled / OAuth pages, not only signed-in ones.
-                  R-51 — split button: main click runs the user's last
-                  preferred mode (embedded webview vs system Chrome),
-                  the caret next to it opens a small menu so they can
-                  switch. The system-Chrome path bypasses Cloudflare
-                  TLS / HTTP/2 fingerprint checks by spawning the
-                  user's actual installed Chrome. */}
-              <div className="webview-sniff-split" style={{ position: 'relative', display: 'inline-flex' }}>
-                <button
-                  className="ghost"
-                  onClick={onPreferredWebviewSniff}
-                  disabled={sniffing}
-                  title={preferredWebviewMode === 'system-chrome'
-                    ? '在你本机 Chrome / Edge / Brave 中打开,登录或通过验证后关闭窗口完成嗅探(适合 OpenAI / Medium 等高保护站点)'
-                    : preferredWebviewMode === 'ytdlp-direct'
-                      ? '把 URL 直接交给 yt-dlp 解析,无需打开任何浏览器(适合 YouTube / X / Bilibili / TikTok 等已知视频站)'
-                      : '打开内置浏览器,先浏览到目标页面再嗅探(适合需要交互/登录/验证机器人的站点)'}
-                  style={{ whiteSpace: 'nowrap', borderTopRightRadius: 0, borderBottomRightRadius: 0 }}
-                >
-                  {sniffing
-                    ? '嗅探中…'
-                    : preferredWebviewMode === 'system-chrome'
-                      ? '🚀 真 Chrome 嗅探'
-                      : preferredWebviewMode === 'ytdlp-direct'
-                        ? '⚡ yt-dlp 直接抓'
-                        : '🌐 网页嗅探'}
-                </button>
-                <button
-                  ref={webviewCaretRef}
-                  className="ghost webview-sniff-caret"
-                  onClick={() => setWebviewMenuOpen((v) => !v)}
-                  onKeyDown={(ev) => {
-                    if (ev.key === 'ArrowDown' || ev.key === 'Enter' || ev.key === ' ') {
-                      ev.preventDefault();
-                      setWebviewMenuOpen(true);
-                    }
-                  }}
-                  disabled={sniffing}
-                  aria-haspopup="menu"
-                  aria-expanded={webviewMenuOpen}
-                  aria-label="切换网页嗅探方式"
-                  title="切换嗅探方式"
-                  style={{
-                    whiteSpace: 'nowrap',
-                    borderTopLeftRadius: 0,
-                    borderBottomLeftRadius: 0,
-                    borderLeft: 'none',
-                    padding: '0 8px',
-                    minWidth: 'auto'
-                  }}
-                >
-                  ▾
-                </button>
-                {webviewMenuOpen ? (
-                  <div
-                    ref={webviewMenuRef}
-                    role="menu"
-                    aria-label="网页嗅探方式"
-                    className="webview-sniff-menu"
-                    style={{
-                      position: 'absolute', top: 'calc(100% + 4px)',
-                      // R-55 Fix #1 — anchor side decided by useLayoutEffect
-                      // measure-after-mount; fallback to right.
-                      ...(webviewMenuAnchor === 'right' ? { right: 0 } : { left: 0 }),
-                      zIndex: 60,
-                      // R-55 Fix #1 — width is content-driven now,
-                      // bounded by 240..min(360, viewport-16) so the
-                      // popup never overflows the screen and never
-                      // collapses into a single column on tiny URL
-                      // bars.
-                      width: 'max-content',
-                      minWidth: 240,
-                      maxWidth: 'min(360px, calc(100vw - 16px))',
-                      padding: 6, borderRadius: 8,
-                      background: 'var(--bg-2, #23252b)', color: 'var(--fg, #e6e7eb)',
-                      border: '1px solid rgba(255,255,255,0.12)',
-                      boxShadow: '0 8px 24px rgba(0,0,0,0.35)'
-                    }}
-                  >
-                    <button
-                      ref={(el) => { webviewMenuItemRefs.current[0] = el; }}
-                      className="ghost"
-                      role="menuitemradio"
-                      aria-checked={preferredWebviewMode === 'embed'}
-                      tabIndex={preferredWebviewMode === 'embed' ? 0 : -1}
-                      onKeyDown={(ev) => onWebviewMenuItemKeyDown(ev, 0)}
-                      onClick={() => {
-                        setWebviewMenuOpen(false);
-                        persistPreferredMode('embed');
-                        onWebviewSniff();
-                      }}
-                      style={{
-                        display: 'block', width: '100%', textAlign: 'left',
-                        padding: '8px 10px', whiteSpace: 'normal',
-                        background: preferredWebviewMode === 'embed' ? 'rgba(42,170,119,0.12)' : 'transparent'
-                      }}
-                    >
-                      <div style={{ fontWeight: 600 }}>
-                        🌐 嵌入式嗅探(快){preferredWebviewMode === 'embed' ? ' ✓' : ''}
-                      </div>
-                      <div style={{ fontSize: 11, color: 'var(--muted, #9aa0aa)', marginTop: 2 }}>
-                        在 app 内置浏览器打开,适合普通需登录/交互的站点。
-                      </div>
-                    </button>
-                    <button
-                      ref={(el) => { webviewMenuItemRefs.current[1] = el; }}
-                      className="ghost"
-                      role="menuitemradio"
-                      aria-checked={preferredWebviewMode === 'system-chrome'}
-                      tabIndex={preferredWebviewMode === 'system-chrome' ? 0 : -1}
-                      onKeyDown={(ev) => onWebviewMenuItemKeyDown(ev, 1)}
-                      onClick={() => {
-                        setWebviewMenuOpen(false);
-                        persistPreferredMode('system-chrome');
-                        onSystemChromeSniff();
-                      }}
-                      style={{
-                        display: 'block', width: '100%', textAlign: 'left',
-                        padding: '8px 10px', whiteSpace: 'normal', marginTop: 4,
-                        background: preferredWebviewMode === 'system-chrome' ? 'rgba(42,170,119,0.12)' : 'transparent'
-                      }}
-                    >
-                      <div style={{ fontWeight: 600 }}>
-                        🚀 真 Chrome 嗅探(过 Cloudflare){preferredWebviewMode === 'system-chrome' ? ' ✓' : ''}
-                      </div>
-                      <div style={{ fontSize: 11, color: 'var(--muted, #9aa0aa)', marginTop: 2 }}>
-                        启动你本机的 Chrome / Edge / Brave,真实浏览器握手,适合 OpenAI / Medium / Patreon 等高保护站点。
-                      </div>
-                    </button>
-                    {/* R-59 — Sub-toggle for the system-chrome menu item.
-                        The「真 Chrome」branch defaults to an isolated
-                        per-host profile, which is why CF still loops on
-                        Turnstile (clean-room profile = high bot score).
-                        Letting the user opt into their REAL profile
-                        (must close Chrome first) inherits all of CF's
-                        accumulated trust signals for this device.
-                        Click on the row stops propagation so it doesn't
-                        also re-trigger the parent system-chrome run. */}
-                    <label
-                      style={{
-                        display: 'flex', alignItems: 'flex-start', gap: 8,
-                        padding: '6px 10px 8px 28px',
-                        fontSize: 11, color: 'var(--muted, #9aa0aa)',
-                        cursor: 'pointer'
-                      }}
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={useRealChromeProfile}
-                        onChange={(e) => setUseRealChromeProfile(e.target.checked)}
-                        style={{ marginTop: 2, flexShrink: 0 }}
-                      />
-                      <span>
-                        <span style={{ color: 'var(--text, #ddd)', fontWeight: 600 }}>使用我真实 Chrome profile</span>
-                        <span style={{ display: 'block', marginTop: 2 }}>
-                          继承登录态 / 历史 / 扩展 → CF 不再把你当机器人。<br />
-                          ⚠ 必须先完全退出 Chrome,否则会报错。
-                        </span>
-                      </span>
-                    </label>
-                    <button
-                      ref={(el) => { webviewMenuItemRefs.current[2] = el; }}
-                      className="ghost"
-                      role="menuitemradio"
-                      aria-checked={preferredWebviewMode === 'ytdlp-direct'}
-                      tabIndex={preferredWebviewMode === 'ytdlp-direct' ? 0 : -1}
-                      onKeyDown={(ev) => onWebviewMenuItemKeyDown(ev, 2)}
-                      onClick={() => {
-                        setWebviewMenuOpen(false);
-                        persistPreferredMode('ytdlp-direct');
-                        onYtdlpDirectSniff();
-                      }}
-                      style={{
-                        display: 'block', width: '100%', textAlign: 'left',
-                        padding: '8px 10px', whiteSpace: 'normal', marginTop: 4,
-                        background: preferredWebviewMode === 'ytdlp-direct' ? 'rgba(42,170,119,0.12)' : 'transparent'
-                      }}
-                    >
-                      <div style={{ fontWeight: 600 }}>
-                        ⚡ yt-dlp 直接抓(YouTube / X / B站 等 1900+ 站点){preferredWebviewMode === 'ytdlp-direct' ? ' ✓' : ''}
-                      </div>
-                      <div style={{ fontSize: 11, color: 'var(--muted, #9aa0aa)', marginTop: 2 }}>
-                        无需打开任何浏览器,把 URL 交给 yt-dlp 直接解析。最快,但只支持已识别的视频站。
-                      </div>
-                    </button>
-                  </div>
-                ) : null}
-              </div>
-              {/* R-55 Fix #3 — Offline import escape hatch.
-                  R-58 — The R-56「含静态图」checkbox was removed: it
-                  cluttered the toolbar (text overflowed in narrow
-                  windows) and was almost never the right call —
-                  surfacing static images defeats the project's GIF /
-                  video focus. The static-image filter still runs
-                  unconditionally inside the unified sniffFilters
-                  pipeline; we just no longer expose a UI knob for it. */}
-              <button
-                className="ghost"
-                onClick={onOfflineImport}
-                disabled={sniffing}
-                title="从本地选择 .mhtml / .html(可带 _files 目录)/ 单图 / 单视频,直接进入处理流程"
-                style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
-              >
-                📂 离线导入
-              </button>
-              <SniffHistoryPicker
-                open={sniffHistoryOpen}
-                entries={sniffHistory}
-                onPick={(picked) => {
-                  // Per R-32 design Q3: just fill the input. The user
-                  // explicitly presses 嗅探 to actually go fetch.
-                  setUrl(picked);
-                  if (urlError) setUrlError(null);
-                  setSniffHistoryOpen(false);
-                }}
-                onRemove={(picked) => removeSniffHistory(picked)}
-                onClear={() => {
-                  clearSniffHistory();
-                  setSniffHistoryOpen(false);
-                }}
-                onClose={() => setSniffHistoryOpen(false)}
-                isLoading={isSniffHistoryLoading}
-              />
-            </div>
-            {urlError ? (
-              <div className="notice danger">{urlError}</div>
-            ) : null}
-            {sniffing && sniffProgress ? (
-              <div className="sniff-progress">
-                <div className="sniff-progress-row">
-                  <span className="sniff-stage">{stageLabel(sniffProgress.stage)}</span>
-                  <span className="sniff-counts">
-                    {typeof sniffProgress.found === 'number' ? `found ${sniffProgress.found}` : ''}
-                    {typeof sniffProgress.probed === 'number' && typeof sniffProgress.total === 'number'
-                      ? ` · probed ${sniffProgress.probed}/${sniffProgress.total}`
-                      : ''}
-                  </span>
-                  <span className="sniff-percent">{Math.round(sniffProgress.percent)}%</span>
-                  {/* R-59 — Always-visible cancel button. The user
-                      called out R-58's R-55 in-banner cancel as
-                      insufficient because the amber banner ONLY
-                      shows in system-chrome 55-90% mode; for any
-                      other backend (URL / webview / yt-dlp /
-                      offline) or for system-chrome before 55%
-                      there was no escape hatch on the main page.
-                      Mounting cancel in the progress bar means
-                      every sniff run, every backend, every
-                      percent has it visible without scrolling. */}
-                  <button
-                    onClick={onCancel}
-                    title="取消嗅探"
-                    style={{
-                      marginLeft: 8,
-                      background: 'transparent',
-                      color: 'var(--danger, #e76f51)',
-                      border: '1px solid var(--danger, #e76f51)',
-                      padding: '2px 8px',
-                      borderRadius: 4,
-                      fontSize: 11,
-                      fontWeight: 600,
-                      cursor: 'pointer',
-                      flexShrink: 0
-                    }}
-                  >
-                    ✕ 取消
-                  </button>
-                </div>
-                <div className="bar-wrap">
-                  <div className="bar" style={{ width: `${Math.max(0, Math.min(100, sniffProgress.percent))}%` }} />
-                </div>
-                {sniffProgress.message ? (
-                  // R-55 Fix #2c — When the system-chrome sniff is in
-                  // its「等用户操作」60% wait phase, the message is the
-                  // ONLY signal that the app isn't frozen. Promote
-                  // that single line to a high-contrast amber banner
-                  // with a pulsing dot so the user understands input
-                  // is needed. Other progress messages (e.g. parsing
-                  // detail) keep the muted look.
-                  activeSniffMode === 'system-chrome' && sniffProgress.percent >= 55 && sniffProgress.percent < 90 ? (
-                    <div
-                      className="notice"
-                      role="status"
-                      aria-live="polite"
-                      style={{
-                        marginTop: 6,
-                        padding: '8px 10px',
-                        background: 'rgba(241, 161, 64, 0.16)',
-                        border: '1px solid rgba(241, 161, 64, 0.5)',
-                        color: '#f1a140',
-                        borderRadius: 6,
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: 8,
-                        fontSize: 12,
-                        fontWeight: 600
-                      }}
-                    >
-                      <span
-                        aria-hidden="true"
-                        style={{
-                          width: 8,
-                          height: 8,
-                          borderRadius: '50%',
-                          background: '#f1a140',
-                          animation: 'sniff-pulse 1s ease-in-out infinite alternate',
-                          flexShrink: 0
-                        }}
-                      />
-                      <span style={{ flex: 1, minWidth: 0 }}>{sniffProgress.message}</span>
-                      {/* R-58 → R-59 — Banner only carries「✓ 完成嗅探」
-                          now (a system-chrome-specific action). The
-                          plain「取消」moved up into the progress-bar
-                          row so it's available for ALL backends in
-                          ALL phases, not just the 55-90% wait. */}
-                      <button
-                        onClick={onFinalizeSystemChromeSniff}
-                        title="立即结束嗅探并返回到目前已抓到的媒体(无需关闭 Chrome 整个进程)"
-                        style={{
-                          background: '#2aaa77',
-                          color: '#fff',
-                          border: 'none',
-                          padding: '4px 10px',
-                          borderRadius: 4,
-                          fontSize: 12,
-                          fontWeight: 600,
-                          cursor: 'pointer',
-                          flexShrink: 0
-                        }}
-                      >
-                        ✓ 完成嗅探
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="notice" style={{ marginTop: 4 }}>{sniffProgress.message}</div>
-                  )
-                ) : null}
-              </div>
-            ) : null}
-            {!sniffing && result?.warnings.length ? (
-              <div className="notice danger">{result.warnings.join('; ')}</div>
-            ) : null}
-            {!sniffing && result?.infoNotices?.length ? (
-              <div className="notice notice-info">{result.infoNotices.join('; ')}</div>
-            ) : null}
-            {!sniffing && result?.title ? <div className="notice">{result.title}</div> : null}
-          </div>
+          <SniffSection
+            url={url}
+            setUrl={setUrl}
+            urlError={urlError}
+            setUrlError={setUrlError}
+            sniffing={sniffing}
+            sniffProgress={sniffProgress}
+            activeSniffMode={activeSniffMode}
+            result={result}
+            onSniff={onSniff}
+            onCancel={onCancel}
+            onPreferredWebviewSniff={onPreferredWebviewSniff}
+            onFinalizeSystemChromeSniff={onFinalizeSystemChromeSniff}
+            onOfflineImport={onOfflineImport}
+            webviewMenu={webviewMenu}
+            useRealChromeProfile={useRealChromeProfile}
+            setUseRealChromeProfile={setUseRealChromeProfile}
+            sniffHistoryOpen={sniffHistoryOpen}
+            setSniffHistoryOpen={setSniffHistoryOpen}
+            sniffHistory={sniffHistory}
+            removeSniffHistory={removeSniffHistory}
+            clearSniffHistory={clearSniffHistory}
+            isSniffHistoryLoading={isSniffHistoryLoading}
+          />
 
-          <div className="section fixed left-bottom">
-            <h2>3. 处理参数</h2>
-            <OptionsForm value={options} onChange={setOptions} />
-            {/* R-50 — 旧的内嵌「▶ 开始批处理 / ▶ 追加排队」按钮已迁移到
-                位于视口右下角的悬浮 FAB(见下方 .fab-start-batch)。FAB
-                完整继承了原按钮的所有判断逻辑:idle vs running、
-                processable.length vs appendable.length、disabled 条件、
-                title 文案。这里只保留嗅探取消入口与「已输出到子目录」
-                提示,因为它们与批处理按钮无关。 */}
-            {(sniffing || lastBatchDir) ? (
-              <div style={{ display: 'flex', gap: 8, marginTop: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-                {sniffing ? (
-                  <button onClick={onCancel} title="取消嗅探">取消嗅探</button>
-                ) : null}
-                {/* R-55 Fix #2 — Always-visible escape hatch for the
-                    real-Chrome path. The user can hit this even before
-                    the 60% banner shows up if they navigate quickly,
-                    and we still get the captured media because the
-                    finalize signal runs the synchronous DOM scan
-                    before tearing down. We deliberately do NOT gate
-                    this on percent >= 60 to keep the affordance
-                    discoverable. */}
-                {sniffing && activeSniffMode === 'system-chrome' ? (
-                  <button
-                    className="primary"
-                    onClick={onFinalizeSystemChromeSniff}
-                    title="立即结束嗅探并返回到目前已抓到的媒体(无需关闭 Chrome 整个进程)"
-                    style={{ background: '#2aaa77', color: '#fff' }}
-                  >
-                    ✓ 完成嗅探
-                  </button>
-                ) : null}
-                {lastBatchDir ? (
-                  <span style={{ color: 'var(--muted)', fontSize: 11, marginLeft: 'auto' }}>
-                    已输出到子目录
-                  </span>
-                ) : null}
-              </div>
-            ) : null}
-          </div>
-          </div>
-          {/* R-83 — Sidebar internal splitter. ns-resize handle persists
-              the dock height to localStorage via onBottomResizeStart;
-              double-click resets to BOTTOM_H_DEFAULT. The handler /
-              storage key are kept for backwards compatibility. */}
-          <div
-            className="left-resize-handle"
-            onMouseDown={onBottomResizeStart}
-            onDoubleClick={() => {
-              setBottomH(BOTTOM_H_DEFAULT);
-              try { window.localStorage.setItem(BOTTOM_H_KEY, String(BOTTOM_H_DEFAULT)); } catch { /* ignore */ }
-            }}
-            title="拖动调节高度,双击恢复默认"
-            role="separator"
-            aria-orientation="horizontal"
+          <OptionsSection
+            options={options}
+            setOptions={setOptions}
+            sniffing={sniffing}
+            lastBatchDir={lastBatchDir}
+            activeSniffMode={activeSniffMode}
+            onCancel={onCancel}
+            onFinalizeSystemChromeSniff={onFinalizeSystemChromeSniff}
           />
-          <ProgressDock
-            title={isHomeBatchProcessing ? '处理进度(运行中)' : '处理进度'}
-            items={items}
-            progress={progress}
-            onRetry={(m) => onProcessOne(m)}
-            onForceAllow={forceAllowOne}
-            onManualOptimize={onManualOptimize}
-            onCancelOne={onCancelOne}
-            onUploadOne={onUploadOne}
-            logs={logs}
-            logsVisible={logsVisible}
-            onToggleLogs={toggleLogs}
-            headerExtras={isHomeBatchProcessing ? (
-              <button
-                className="ghost"
-                onClick={onCancel}
-                title="取消当前批处理与未开始的排队任务"
-                style={{ marginLeft: 8 }}
-              >
-                ✕ 取消批处理
-              </button>
-            ) : null}
-          />
+          </div>
         </div>
 
-        <div className="right">
-          <div className="grid-pane">
-            <div className="grid-header">
-              <h2>已选媒体 {items.length > 0 ? `(${items.length})` : ''}</h2>
-              <span className="grid-tip">单击卡片打开大图预览 · 勾选后参与批处理</span>
-              {/* R-30 #1 — moved here from the title bar. Disabled
-                  until at least one batch (or a manually-picked
-                  outputDir) exists, so the affordance is honest. */}
-              <button
-                type="button"
-                className="grid-open-dir"
-                onClick={onOpenOutput}
-                disabled={!(lastBatchDir || outputDir)}
-                title={
-                  lastBatchDir
-                    ? '在文件管理器中打开本次批处理的输出子目录'
-                    : '尚未产出任何文件;先点击 ▶ 处理 / 全部处理 后再来'
+        <MediaGridPane
+          items={items}
+          selected={selected}
+          toggleSelected={toggleSelected}
+          openCard={openCard}
+          onProcessOneById={onProcessOneById}
+          isProcessingOne={isProcessingOne}
+          onResolveEmbedById={onResolveEmbedById}
+          isResolving={isResolving}
+          resolveErrorMap={resolveErrorMap}
+          onOpenOutput={onOpenOutput}
+          lastBatchDir={lastBatchDir}
+          outputDir={outputDir}
+          onForceAllowAllFailed={onForceAllowAllFailed}
+          forceAllowFailedCount={forceAllowFailedCount}
+          forceAllowAllTitle={forceAllowAllTitle}
+          onUploadAll={onUploadAll}
+          uploadAllReady={uploadAllReady}
+          uploadAllTitle={uploadAllTitle}
+          uploadAllStats={uploadAllStats}
+          setUploadSettingsOpen={setUploadSettingsOpen}
+          onBottomResizeStart={onBottomResizeStart}
+          resetBottomH={resetBottomH}
+          isHomeBatchProcessing={isHomeBatchProcessing}
+          progress={progress}
+          onProcessOne={onProcessOne}
+          forceAllowOne={forceAllowOne}
+          onManualOptimize={onManualOptimize}
+          onCancelOne={onCancelOne}
+          onUploadOne={onUploadOne}
+          logs={logs}
+          logsVisible={logsVisible}
+          toggleLogs={toggleLogs}
+          onCancel={onCancel}
+          /* R-WS-2026-05-21 — Workspace tabs strip belongs WITH the
+             right-column work surface (selected media + per-task
+             progress). Switching tabs visibly swaps both at once;
+             the left column (sniff URL / OptionsForm) follows via
+             ws.activeWs data binding. The "+" button is intentionally
+             not provided — workspaces are created exclusively by
+             嗅探 → claimForSniff. Closed workspaces remain
+             recoverable through the 历史 panel. */
+          tabs={
+            <WorkspaceTabs
+              workspaces={ws.workspaces}
+              activeId={ws.activeWsId}
+              isBusy={ws.isBusy}
+              onSwitch={ws.switchTo}
+              onClose={(id) => {
+                const w = ws.workspaces.find((x) => x.id === id);
+                if (w && ws.isBusy(w) && typeof window !== 'undefined') {
+                  const ok = window.confirm('该工作区有任务进行中,确定关闭?');
+                  if (!ok) return;
                 }
-              >
-                {lastBatchDir ? '打开本次目录' : '打开目录'}
-              </button>
-              {/* R-83 — 产物级批量动作,从底部 ProgressDock toolbar
-                  上移到这里。 ProgressDock 现在专注于「单条任务进度」,
-                  这三个按钮关心的是「全部输出已完成后干嘛」,放在媒体
-                  网格的标题栏更靠近用户的注意力轨迹。 */}
-              <button
-                className="ghost"
-                onClick={() => void onForceAllowAllFailed()}
-                title={forceAllowAllTitle}
-                disabled={forceAllowFailedCount === 0}
-                aria-disabled={forceAllowFailedCount === 0}
-                style={{ marginLeft: 8 }}
-              >
-                ⚡ 强制全部失败项{forceAllowFailedCount > 0 ? ` (${forceAllowFailedCount})` : ''}
-              </button>
-              <button
-                className="ghost"
-                onClick={() => void onUploadAll()}
-                title={uploadAllTitle}
-                disabled={!uploadAllReady}
-                aria-disabled={!uploadAllReady}
-                style={{ marginLeft: 8 }}
-              >
-                ⚡ 上传所有产物{items.length > 0 ? ` (${uploadAllStats.doneCount}/${uploadAllStats.total})` : ''}
-              </button>
-              <button
-                className="ghost"
-                onClick={() => setUploadSettingsOpen(true)}
-                title="配置图床后端(自定义 Web / GitHub / 七牛 / 阿里云 OSS / 腾讯 COS)"
-                style={{ marginLeft: 4 }}
-              >
-                📤 上传设置
-              </button>
-            </div>
-            <div className="grid-scroll">
-              <MediaGrid
-                items={items}
-                selected={selected}
-                onToggle={toggleSelected}
-                onOpen={openCard}
-                onProcessOne={onProcessOneById}
-                isProcessing={isProcessingOne}
-                onRetryResolve={onResolveEmbedById}
-                isResolving={isResolving}
-                resolveErrorMap={resolveErrorMap}
-              />
-            </div>
-          </div>
-        </div>
+                ws.close(id);
+              }}
+            />
+          }
+        />
       </div>
-      ) : view === 'history' ? (
-        <div className="body body-history" role="region" aria-label="history">
-          <HistoryPanel
-            history={history}
-            onOpenDetail={(rec) => setHistoryDetail(rec)}
-            onOpenOutputDir={onOpenHistoryDir}
-            onRemove={removeHistory}
-            onClear={clearHistory}
-            isLoading={isHistoryLoading}
-          />
-        </div>
-      ) : view === 'toolbox' ? (
-        <div className="body body-toolbox" role="region" aria-label="toolbox">
-          <ToolboxPanel />
-        </div>
       ) : (
-        <div className="body body-uploads" role="region" aria-label="uploads">
-          <UploadHistoryPanel history={uploadHistory} onRemove={removeUploadHistory} onClear={clearUploadHistory} isLoading={isUploadHistoryLoading} />
-        </div>
+        <SecondaryViews
+          view={view as 'history' | 'toolbox' | 'uploads'}
+          history={history}
+          setHistoryDetail={setHistoryDetail}
+          onOpenHistoryDir={onOpenHistoryDir}
+          removeHistory={removeHistory}
+          clearHistory={clearHistory}
+          isHistoryLoading={isHistoryLoading}
+          uploadHistory={uploadHistory}
+          removeUploadHistory={removeUploadHistory}
+          clearUploadHistory={clearUploadHistory}
+          isUploadHistoryLoading={isUploadHistoryLoading}
+        />
       )}
 
       {view === 'home' ? (
-        <>
-          {/* R-50 — Floating "Start" action button.
-              旧的内嵌主按钮已被移除(原位于 .section.fixed.left-bottom),
-              这个 FAB 完全继承了它的所有判断逻辑:idle 时显示
-              「▶ 开始批处理 (N / 共选 M)」(M≠N 才带 / 共选 M),
-              running 时显示「▶ 追加排队 (K)」;disabled 与 title 文案
-              全部 1:1 对齐;状态复用 isHomeBatchProcessing /
-              processable / appendable。FAB 是 position:fixed 故在底部
-              dock + 进度区盖住时仍可点。 */}
-          {(() => {
-            const running = isHomeBatchProcessing;
-            const count = running ? appendable.length : processable.length;
-            const disabled = count === 0;
-            const idleSuffix =
-              !running && selected.size !== processable.length
-                ? ` / 共选 ${selected.size}`
-                : '';
-            const label = running
-              ? `▶ 追加排队 (${count})`
-              : `▶ 开始批处理 (${count}${idleSuffix})`;
-            const title = running
-              ? (count === 0
-                  ? '当前没有新选中的可处理项可追加;勾选更多卡片后会启用'
-                  : `把 ${count} 个新选中的任务追加到当前队列`)
-              : (count === 0
-                  ? '请先在右侧勾选 video / gif'
-                  : '开始批处理');
-            return (
-              <button
-                type="button"
-                className="fab-start-batch"
-                onClick={running ? onAppend : onStart}
-                disabled={disabled}
-                title={title}
-                aria-label={label}
-              >
-                {label}
-              </button>
-            );
-          })()}
-        </>
-      ) : null}
-
-      {activeMedia ? (
-        <PreviewModal
-          media={activeMedia}
-          options={options}
-          onChangeOptions={setOptions}
-          onRequestPreview={onPreview}
-          previewing={previewing}
-          preview={preview}
-          onClose={closeModal}
-          onProcessOne={(m) => onProcessOne(m)}
-          processOneDisabled={isProcessingOne(activeMedia.id) || activeMedia.kind === 'image' || (!!activeMedia.requiresExternalDownload && !activeMedia.resolved)}
+        <StartBatchFab
+          isHomeBatchProcessing={isHomeBatchProcessing}
+          processable={processable}
+          appendable={appendable}
+          selected={selected}
+          onStart={onStart}
+          onAppend={onAppend}
         />
       ) : null}
 
-      {batchModal ? (
-        <BatchSegmentModal
-          entries={batchModal.entries}
-          maxSegmentSec={options.maxSegmentSec}
-          onCancel={() => setBatchModal(null)}
-          onConfirm={(perId) => {
-            // R-43.2 — 'append' 模式只把 modal 创建时的 list 子集
-            // 推到队列;'fresh' 模式沿用旧行为(传 null,dispatchBatch
-            // 内部会用 processable 全集)。
-            const snapshotList = batchModal.list;
-            const mode = batchModal.mode;
-            setBatchModal(null);
-            if (mode === 'append') {
-              setLogs((prev) => [...prev, `[batch] 追加 ${snapshotList.length} 个任务到当前队列`].slice(-300));
-              void dispatchBatch(perId, snapshotList);
-            } else {
-              void dispatchBatch(perId);
-            }
-          }}
-        />
-      ) : null}
-
-      {historyDetail ? (
-        <HistoryDetailModal
-          // Re-derive from the live history array on every render so
-          // progress events (taskStatus / outputsByTaskId / outputDir
-          // patches via patchHistory) are reflected in the modal —
-          // otherwise we'd show the snapshot taken at openDetail time.
-          rec={history.find((r) => r.id === historyDetail.id) ?? historyDetail}
-          progress={progress}
-          isProcessing={isProcessingOne}
-          onProcessOneFromRecord={onReprocessFromHistory}
-          onBatchFromRecord={onBatchFromRecord}
-          onCancel={onCancel}
-          onOpenOutputDir={onOpenHistoryDir}
-          onClose={() => setHistoryDetail(null)}
-          logs={logs}
-          // R-29 (P0-C): forward the live task→record binding so the
-          // modal can filter same-id collisions out of its TaskTable.
-          taskRecordMap={taskRecordMapRef.current}
-          // R-54 — let the modal dispatch uploads pinned to its own
-          // record so the upload outcomes are folded back into
-          // rec.uploadsByOutputPath.
-          onUploadFromRecord={(rec, plan) => void dispatchUpload(plan, { sniffRecId: rec.id })}
-          isUploadConfigured={isUploadConfigured(uploadConfigs)}
-        />
-      ) : null}
-
-      <ManualOptimizeModal
-        open={!!manualOpt}
-        currentSizeMB={manualOpt?.progress.currentSizeMB ?? 0}
-        baseOptions={options}
-        taskTitle={manualOpt ? (() => {
-          try {
-            return new URL(manualOpt.media.url).pathname.split('/').pop() || manualOpt.media.url;
-          } catch {
-            return manualOpt.media.url;
-          }
-        })() : undefined}
-        warning={manualOpt?.progress.warning}
-        onConfirm={onManualOptimizeConfirm}
-        onClose={() => setManualOpt(null)}
+      <ModalsHost
+        activeMedia={activeMedia}
+        options={options}
+        previewOverride={previewOverride}
+        setPreviewOverride={setPreviewOverride}
+        setOptions={setOptions}
+        onPreview={onPreview}
+        previewing={previewing}
+        preview={preview}
+        closeModal={closeModal}
+        onProcessOne={(m, ov) => onProcessOne(m, ov)}
+        isProcessingOne={isProcessingOne}
+        batchModal={batchModal}
+        setBatchModal={setBatchModal}
+        setLogs={setLogs}
+        dispatchBatch={dispatchBatch}
+        historyDetail={historyDetail}
+        setHistoryDetail={setHistoryDetail}
+        history={history}
+        progress={progress}
+        onReprocessFromHistory={onReprocessFromHistory}
+        onBatchFromRecord={onBatchFromRecord}
+        onCancel={onCancel}
+        onOpenHistoryDir={onOpenHistoryDir}
+        logs={logs}
+        taskRecordMapRef={taskRecordMapRef}
+        dispatchUpload={dispatchUpload}
+        uploadConfigs={uploadConfigs}
+        manualOpt={manualOpt}
+        setManualOpt={setManualOpt}
+        onManualOptimizeConfirm={onManualOptimizeConfirm}
+        uploadSettingsOpen={uploadSettingsOpen}
+        setUploadSettingsOpen={setUploadSettingsOpen}
+        onSaveUploadSettings={onSaveUploadSettings}
+        uploadResult={uploadResult}
+        setUploadResult={setUploadResult}
+        uploadHistory={uploadHistory}
+        toasterHandleSetter={toaster.handleSetter}
       />
-
-      {uploadSettingsOpen && uploadConfigs ? (
-        <UploadSettingsModal
-          initial={uploadConfigs}
-          onClose={() => setUploadSettingsOpen(false)}
-          onSave={onSaveUploadSettings}
-        />
-      ) : null}
-
-      {uploadResult ? (() => {
-        const rec = uploadHistory.find((r) => r.id === uploadResult);
-        if (!rec) return null;
-        return <UploadResultModal record={rec} onClose={() => setUploadResult(null)} />;
-      })() : null}
-
-      {/* R-62 — Cross-platform capability toaster. Always mounted;
-          renders nothing until at least one toast is pushed. */}
-      <Toaster registerHandle={toaster.handleSetter} />
     </div>
   );
 };

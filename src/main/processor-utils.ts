@@ -12,6 +12,7 @@
  * regression safety net for O1-O5 (commit 18ecc18). When you tweak any
  * tunable here, run `npm test` first.
  */
+import crypto from 'crypto';
 
 /* ------------------------- Concurrency clamp ------------------------- */
 
@@ -78,6 +79,26 @@ export function planPhase0(initialMB: number, softMB: number): Phase0Branch {
   if (initialMB <= softMB * EARLY_FAST_RATIO) return 'fast';
   if (initialMB >= softMB * SHRINK_FIRST_RATIO) return 'shrink-first';
   return 'normal';
+}
+
+export type CompressionTargetTier = 'fallback' | 'soft';
+
+/**
+ * Pick the next compression target. The pipeline is two-tiered:
+ * first get under the hard/fallback cap, then spend extra attempts on
+ * the soft/best cap. This keeps oversized GIFs from wasting early passes
+ * chasing an unrealistic soft target before they have reached a usable
+ * fallback result.
+ */
+export function chooseCompressionTargetMB(
+  hasReachedHard: boolean,
+  hardMB: number,
+  softMB: number
+): { targetMB: number; tier: CompressionTargetTier } {
+  if (!hasReachedHard && hardMB > 0) {
+    return { targetMB: hardMB, tier: 'fallback' };
+  }
+  return { targetMB: softMB, tier: 'soft' };
 }
 
 /* ------------------------- O2 adaptive lossy starting point ------------------------- */
@@ -199,4 +220,49 @@ export function filterSelectedSegments(
   );
   if (allow.size === 0) return all;
   return all.filter((s) => allow.has(s.index));
+}
+
+/* ------------------------- Partial-fetch cache key (P1.1) ------------------------- */
+
+/**
+ * Inputs that must be hashed into the partial-fetch filename so a yt-dlp
+ * `--download-sections` run with one selection cannot poison the cache for a
+ * later run with a different selection (or the full stream). Only the fields
+ * that change WHICH bytes are written are included; everything cosmetic
+ * (e.g. fps, gif quality knobs) is omitted because those don't affect the
+ * downloaded source.
+ */
+export interface PartialFetchKey {
+  selectedSegments?: readonly number[];
+  startSec?: number;
+  endSec?: number;
+  maxSegmentSec?: number;
+}
+
+/**
+ * Derive a stable sibling filename for a partial (`--download-sections`) fetch
+ * given the full-stream filename and the user's segment selection. Full-stream
+ * downloads keep the original `localName`; partial fetches go to
+ * `${stem}.sections.${hash}${ext}` so a later full or differently-scoped run
+ * sees a cache miss and re-downloads instead of reusing the stitched-only mp4.
+ *
+ * Pure function: deterministic, no I/O, safe to unit-test in isolation.
+ */
+export function derivePartialSourceName(
+  localName: string,
+  key: PartialFetchKey
+): string {
+  const dot = localName.lastIndexOf('.');
+  const ext = dot > 0 ? localName.slice(dot) : '.mp4';
+  const stem = dot > 0 ? localName.slice(0, dot) : localName;
+  const normalized = JSON.stringify({
+    selectedSegments: key.selectedSegments
+      ? [...key.selectedSegments].sort((a, b) => a - b)
+      : null,
+    startSec: key.startSec ?? null,
+    endSec: key.endSec ?? null,
+    maxSegmentSec: key.maxSegmentSec ?? null
+  });
+  const hash = crypto.createHash('sha1').update(normalized).digest('hex').slice(0, 8);
+  return `${stem}.sections.${hash}${ext}`;
 }

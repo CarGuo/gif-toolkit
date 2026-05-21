@@ -2,18 +2,54 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ProcessOptions, SniffedMedia, PreviewResult } from '../../shared/types';
 import { CropBox } from './CropBox';
 import { Timeline } from './Timeline';
+import { SegmentPicker, buildSegmentPreviews } from './SegmentPicker';
 
 type Tab = 'crop' | 'frames';
 
+/**
+ * P1.2 — fields that are ONLY meaningful for the currently-previewed media
+ * and must NOT be written back to the home-page global ProcessOptions. Crop
+ * boxes are inherently per-image; start/end seconds and the segment-pick
+ * array only make sense relative to a single video's duration. Anything else
+ * (fps / speed / maxSegmentSec / minSize / maxWidth) IS shared across the
+ * whole batch and continues to flow through `onChangeOptions`.
+ *
+ * R-22 — `selectedSegments` joined this set so the PreviewModal can let the
+ * user check segments for long videos *without* writing the picks back to
+ * the global options (which the next batch run would inherit). The home
+ * view's batch path still derives its own per-media [0] default in
+ * onProcessOne when no explicit picks come through.
+ */
+export type PreviewOverride = Pick<
+  ProcessOptions,
+  'cropRect' | 'startSec' | 'endSec' | 'selectedSegments'
+>;
+
 interface Props {
   media: SniffedMedia;
-  options: ProcessOptions;
+  /**
+   * The home-page global options. Read-only from the preview's perspective for
+   * the per-media fields (cropRect / startSec / endSec); writeable for the
+   * batch-shared fields (fps / speed / maxSegmentSec / minSize / maxWidth).
+   */
+  baseOptions: ProcessOptions;
+  /**
+   * Per-media overrides scoped to this preview session. Mutating these does
+   * NOT touch the global options the next batch run will use.
+   */
+  previewOverride: PreviewOverride;
+  onChangeOverride: (n: PreviewOverride) => void;
+  /**
+   * Used ONLY for batch-shared fields edited in the Frames tab (fps, speed,
+   * maxSegmentSec, minSize, maxWidth). Per-media crop / time edits go through
+   * `onChangeOverride` instead.
+   */
   onChangeOptions: (n: ProcessOptions) => void;
   onRequestPreview: () => void;
   previewing: boolean;
   preview: PreviewResult | null;
   onClose: () => void;
-  onProcessOne?: (media: SniffedMedia) => Promise<void> | void;
+  onProcessOne?: (media: SniffedMedia, override?: PreviewOverride) => Promise<void> | void;
   processOneDisabled?: boolean;
   processOneLabel?: string;
 }
@@ -36,7 +72,9 @@ function fileName(u: string): string {
 
 export const PreviewModal: React.FC<Props> = ({
   media,
-  options,
+  baseOptions,
+  previewOverride,
+  onChangeOverride,
   onChangeOptions,
   onRequestPreview,
   previewing,
@@ -54,6 +92,15 @@ export const PreviewModal: React.FC<Props> = ({
   const [currentTime, setCurrentTime] = useState(0);
   const [mediaError, setMediaError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+
+  // Effective options the preview UI reads from. Per-media fields come from
+  // the local override; everything else (fps, speed, maxSegmentSec, …) still
+  // reflects the global batch options. Writes for cropRect / startSec / endSec
+  // route to `onChangeOverride`, never to `onChangeOptions` (P1.2).
+  const options: ProcessOptions = useMemo(
+    () => ({ ...baseOptions, ...previewOverride }),
+    [baseOptions, previewOverride]
+  );
 
   const isGif = media.kind === 'gif';
   const isImage = media.kind === 'image';
@@ -88,7 +135,17 @@ export const PreviewModal: React.FC<Props> = ({
     setTargetEl(null);
     setCopied(false);
     setTab('crop');
-    onChangeOptions({ ...options, cropRect: undefined, startSec: undefined, endSec: undefined });
+    // P1.2 — only clear the LOCAL override when switching media; never touch
+    // the home-page global options here.
+    // R-22 — clear selectedSegments too so the next media starts from the
+    // "no picks yet" state and re-derives its own default (single-segment
+    // for short videos, [0] auto-pick for long ones).
+    onChangeOverride({
+      cropRect: undefined,
+      startSec: undefined,
+      endSec: undefined,
+      selectedSegments: undefined
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [media.id]);
 
@@ -111,25 +168,37 @@ export const PreviewModal: React.FC<Props> = ({
   }, [media.url]);
 
   const onCancelCrop = useCallback(() => {
-    onChangeOptions({ ...options, cropRect: undefined });
-  }, [options, onChangeOptions]);
+    onChangeOverride({ ...previewOverride, cropRect: undefined });
+  }, [previewOverride, onChangeOverride]);
 
   const onResetTimeline = useCallback(() => {
     if (isVideo && duration > 0) {
-      onChangeOptions({
-        ...options,
+      // R-22 — reset puts us back to the "full range, default segment pick"
+      // state. For long videos the default is `[0]` (only the first
+      // maxSegmentSec window) — matching what onLoadedMetadata seeded; for
+      // short videos `selectedSegments` stays undefined (single segment, no
+      // picker shown).
+      const isLong = duration > baseOptions.maxSegmentSec;
+      onChangeOverride({
+        ...previewOverride,
         startSec: 0,
-        endSec: Math.min(options.maxSegmentSec, duration)
+        endSec: duration,
+        selectedSegments: isLong ? [0] : undefined
       });
     } else {
-      onChangeOptions({ ...options, startSec: undefined, endSec: undefined });
+      onChangeOverride({
+        ...previewOverride,
+        startSec: undefined,
+        endSec: undefined,
+        selectedSegments: undefined
+      });
     }
-  }, [options, onChangeOptions, isVideo, duration]);
+  }, [previewOverride, onChangeOverride, isVideo, duration, baseOptions.maxSegmentSec]);
 
   const onClickProcessOne = useCallback(() => {
     if (!onProcessOne || processOneDisabled) return;
-    void onProcessOne(media);
-  }, [onProcessOne, processOneDisabled, media]);
+    void onProcessOne(media, previewOverride);
+  }, [onProcessOne, processOneDisabled, media, previewOverride]);
 
   const showFrames = tab === 'frames' && isVideo;
 
@@ -189,11 +258,28 @@ export const PreviewModal: React.FC<Props> = ({
                     const t = e.currentTarget;
                     setDuration(t.duration);
                     setNaturalSize({ w: t.videoWidth, h: t.videoHeight });
-                    if (options.endSec === undefined) {
-                      onChangeOptions({
-                        ...options,
+                    // P1.2 — auto-populate the local override (NOT the global
+                    // options) so the timeline UI starts with a sane window.
+                    // The global options stay pristine, which means closing
+                    // the modal without "单独处理本项" leaves the next batch
+                    // run unaffected.
+                    //
+                    // R-22 — KEY FIX: previously we wrote
+                    //   endSec = min(maxSegmentSec, duration)
+                    // which silently clipped long videos to the first window
+                    // and made the segment picker useless (the resulting
+                    // [start,end] range only ever covered ONE segment). Now
+                    // we keep the full [0..duration] range and instead express
+                    // "only process the first segment by default" via
+                    // selectedSegments=[0]. The user can then tick more
+                    // segments in the SegmentPicker, or click 全选 to do all.
+                    if (previewOverride.endSec === undefined) {
+                      const isLong = t.duration > baseOptions.maxSegmentSec;
+                      onChangeOverride({
+                        ...previewOverride,
                         startSec: 0,
-                        endSec: Math.min(options.maxSegmentSec, t.duration)
+                        endSec: t.duration,
+                        selectedSegments: isLong ? [0] : undefined
                       });
                     }
                   }}
@@ -221,7 +307,7 @@ export const PreviewModal: React.FC<Props> = ({
                     naturalSize={naturalSize}
                     targetEl={targetEl}
                     value={options.cropRect}
-                    onChange={(rect) => onChangeOptions({ ...options, cropRect: rect })}
+                    onChange={(rect) => onChangeOverride({ ...previewOverride, cropRect: rect })}
                   />
                 </div>
               ) : null}
@@ -233,7 +319,8 @@ export const PreviewModal: React.FC<Props> = ({
               <CropPane
                 media={media}
                 options={options}
-                onChangeOptions={onChangeOptions}
+                previewOverride={previewOverride}
+                onChangeOverride={onChangeOverride}
                 duration={duration}
                 naturalSize={naturalSize}
                 currentTime={currentTime}
@@ -312,7 +399,8 @@ export const PreviewModal: React.FC<Props> = ({
 interface CropPaneProps {
   media: SniffedMedia;
   options: ProcessOptions;
-  onChangeOptions: (n: ProcessOptions) => void;
+  previewOverride: PreviewOverride;
+  onChangeOverride: (n: PreviewOverride) => void;
   duration: number;
   naturalSize: { w: number; h: number };
   currentTime: number;
@@ -326,7 +414,8 @@ interface CropPaneProps {
 const CropPane: React.FC<CropPaneProps> = ({
   media,
   options,
-  onChangeOptions,
+  previewOverride,
+  onChangeOverride,
   duration,
   naturalSize,
   currentTime,
@@ -369,16 +458,78 @@ const CropPane: React.FC<CropPaneProps> = ({
             end={options.endSec ?? duration}
             maxSegmentSec={options.maxSegmentSec}
             currentTime={currentTime}
-            onChange={(start, end) => onChangeOptions({ ...options, startSec: start, endSec: end })}
+            onChange={(start, end) =>
+              onChangeOverride({ ...previewOverride, startSec: start, endSec: end })
+            }
             onSeek={(t) => {
               if (videoRef.current) videoRef.current.currentTime = t;
             }}
+          />
+          <SegmentPickerSection
+            duration={duration}
+            startSec={options.startSec ?? 0}
+            endSec={options.endSec ?? duration}
+            maxSegmentSec={options.maxSegmentSec}
+            selectedSegments={previewOverride.selectedSegments}
+            onChange={(picks) =>
+              onChangeOverride({
+                ...previewOverride,
+                selectedSegments: picks.length > 0 ? picks : undefined
+              })
+            }
           />
         </>
       ) : null}
 
       <div aria-hidden style={{ display: 'none' }}>{naturalSize.w}</div>
     </div>
+  );
+};
+
+/**
+ * R-22 — Segment-picker bridge for PreviewModal.
+ *
+ * `SegmentPicker` itself is a presentational component; it doesn't slice
+ * the timeline. We wrap it here so the modal can pass [startSec, endSec]
+ * pairs straight through and let `buildSegmentPreviews` compute the chip
+ * list. When the resulting list is empty (range ≤ maxSegmentSec — i.e.
+ * single-segment videos) we render nothing so the pane stays clean.
+ *
+ * This component is the missing UI that used to live in PreviewPanel
+ * (which App.tsx no longer mounts). Centralising it here keeps the
+ * "single source of segment selection" inside the modal that actually
+ * fires onProcessOne.
+ */
+interface SegmentPickerSectionProps {
+  duration: number;
+  startSec: number;
+  endSec: number;
+  maxSegmentSec: number;
+  selectedSegments: number[] | undefined;
+  onChange: (picks: number[]) => void;
+}
+
+const SegmentPickerSection: React.FC<SegmentPickerSectionProps> = ({
+  duration,
+  startSec,
+  endSec,
+  maxSegmentSec,
+  selectedSegments,
+  onChange
+}) => {
+  const segments = useMemo(
+    () => buildSegmentPreviews(startSec, endSec, maxSegmentSec),
+    [startSec, endSec, maxSegmentSec]
+  );
+  if (duration <= 0 || segments.length === 0) return null;
+  return (
+    <SegmentPicker
+      segments={segments}
+      selectedSegments={selectedSegments}
+      onChange={(next) => onChange(next ?? [])}
+      title="分段选择"
+      hint={`长视频(${duration.toFixed(1)}s)被切成 ${segments.length} 段,默认仅处理第 1 段;勾选可处理多段`}
+    />
   );
 };
 

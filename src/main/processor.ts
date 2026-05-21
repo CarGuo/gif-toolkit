@@ -41,15 +41,16 @@ import { fileNameFor, safeName } from './helpers';
 import { downloadYtdlpSections } from './resolver/ytdlp';
 import {
   DEFAULT_CONCURRENCY,
-  MAX_CONCURRENCY,
-  clampConcurrency as clampConcurrencyExt,
-  shortSideAfterCap as shortSideAfterCapExt,
+  clampConcurrency,
+  shortSideAfterCap,
   compressCacheKey,
-  ACCEPT_TOL as ACCEPT_TOL_EXT,
-  EARLY_FAST_RATIO as EARLY_FAST_RATIO_EXT,
-  SHRINK_FIRST_RATIO as SHRINK_FIRST_RATIO_EXT,
+  chooseCompressionTargetMB,
+  ACCEPT_TOL,
+  EARLY_FAST_RATIO,
+  SHRINK_FIRST_RATIO,
   enumerateSegments,
-  filterSelectedSegments
+  filterSelectedSegments,
+  derivePartialSourceName
 } from './processor-utils';
 
 let currentConcurrency = DEFAULT_CONCURRENCY;
@@ -68,17 +69,6 @@ const taskAborts: Map<string, AbortController> = new Map();
 // the OLD batches must fully settle (including in-flight ffmpeg/gifsicle child
 // processes) before a new batch may take their place.
 const activeBatchPromises: Set<Promise<void>> = new Set();
-// Re-export the unit values the local closures still reference; the
-// processor-utils versions are the single source of truth, these aliases
-// preserve the old call sites without one-line shotgun edits across the file.
-void MAX_CONCURRENCY;
-
-// Local thin wrappers that delegate to the unit-tested processor-utils.
-// We keep wrappers (instead of replacing every call site) so the diff stays
-// small and JS-side hot path doesn't add module-boundary indirection cost.
-function clampConcurrency(n: number | undefined): number {
-  return clampConcurrencyExt(n);
-}
 
 class CancelledError extends Error {
   constructor() {
@@ -111,15 +101,6 @@ class AspectRatioConstraintError extends Error {
     this.minSide = p.minSide;
     this.shortSideAtMax = p.shortSideAtMax;
   }
-}
-
-/**
- * Given an image with `(longestSide, shortestSide)` and a target longest side,
- * return what the shortest side will become (rounded) while preserving aspect.
- * Returns 0 when shape is unknown.
- */
-function shortSideAfterCap(longest: number, shortest: number, cap: number): number {
-  return shortSideAfterCapExt(longest, shortest, cap);
 }
 
 export async function cancelAllTasks(): Promise<void> {
@@ -312,12 +293,10 @@ async function compressLoop(
   const clampColors = (n: number): number => Math.max(colorsFloor, Math.min(256, Math.round(n)));
   const TOTAL_STEPS = 8; // new realistic ceiling, was 12
   let stepCounter = 0;
-  // Tunables — exposed as constants so a follow-up benchmark pass can
-  // tweak them without re-reading the strategy comment. Sourced from
-  // processor-utils so unit tests can pin the boundary behaviour.
-  const ACCEPT_TOL = ACCEPT_TOL_EXT;          // O2: ±12% of target counts as "good enough"
-  const EARLY_FAST_RATIO = EARLY_FAST_RATIO_EXT;     // O1: <= softMB × this → fast path
-  const SHRINK_FIRST_RATIO = SHRINK_FIRST_RATIO_EXT;   // O1: > softMB × this → skip lossy on orig size
+  // Tunables ACCEPT_TOL / EARLY_FAST_RATIO / SHRINK_FIRST_RATIO are
+  // imported from processor-utils as the single source of truth — see
+  // [tests/main/processor-utils.test.ts](file:///Users/guoshuyu/workspace/gif-toolkit/tests/main/processor-utils.test.ts)
+  // for the boundary behaviour they pin.
   const phaseFailures: string[] = [];
   let producedAny = false;
   const recordPhaseFailure = (phase: string, err: unknown): void => {
@@ -591,7 +570,8 @@ async function compressLoop(
   let curSize: number;
   if (initialSize <= softMB * EARLY_FAST_RATIO) {
     try {
-      curSize = await lossySearch(workSrc, workWidth, softMB, 256, 'fast');
+      const target = chooseCompressionTargetMB(bestUnderHard, hardMB, softMB);
+      curSize = await lossySearch(workSrc, workWidth, target.targetMB, 256, `fast-${target.tier}`);
     } catch (e) {
       if (isAbortError(e)) throw new CancelledError();
       recordPhaseFailure('phase-B-fast', e);
@@ -619,7 +599,8 @@ async function compressLoop(
   } else {
     // Normal regime: Phase B at original dimensions targeting soft.
     try {
-      curSize = await lossySearch(workSrc, workWidth, softMB, 256, 'soft');
+      const target = chooseCompressionTargetMB(bestUnderHard, hardMB, softMB);
+      curSize = await lossySearch(workSrc, workWidth, target.targetMB, 256, target.tier);
     } catch (e) {
       if (isAbortError(e)) throw new CancelledError();
       recordPhaseFailure('phase-B-lossySearch', e);
@@ -703,7 +684,8 @@ async function compressLoop(
       // Final round: invest in one more refine via lossySearch (which is
       // now itself at most 2 passes thanks to O2).
       try {
-        curSize = await lossySearch(curSrc, curWidth, softMB, 256, `r${round + 1}-final`);
+        const target = chooseCompressionTargetMB(bestUnderHard, hardMB, softMB);
+        curSize = await lossySearch(curSrc, curWidth, target.targetMB, 256, `r${round + 1}-final-${target.tier}`);
       } catch (e) {
         if (isAbortError(e)) throw new CancelledError();
         recordPhaseFailure(`phase-C-r${round + 1}-final-lossySearch`, e);
@@ -909,6 +891,88 @@ interface RunArgs {
   batchTaken: Set<string>;
 }
 
+async function reencodeGifForManualOptimize(
+  inputGif: string,
+  workDir: string,
+  baseName: string,
+  options: ProcessOptions,
+  fps: number,
+  emit: (info: { message: string; detail?: string; currentSizeMB?: number }) => void,
+  signal?: AbortSignal
+): Promise<string> {
+  checkCancel(signal);
+  let info: ProbeInfo;
+  try {
+    info = await probe(inputGif);
+  } catch (e) {
+    log(`manual reopt probe failed, falling back to gifsicle-only path: ${(e as Error).message}`);
+    return inputGif;
+  }
+  if (!info.hasVideo || info.durationSec <= 0) return inputGif;
+
+  const srcW = info.width || 0;
+  const srcH = info.height || 0;
+  const longest = Math.max(srcW, srcH);
+  const shortest = Math.min(srcW, srcH);
+  const minSide = Math.max(HARD_MIN_SIZE, options.minSize);
+  const maxSide = Math.max(1, options.maxWidth || longest || 0);
+  let targetWidth = 0;
+  let resizeDetail = '';
+
+  if (srcW > 0 && srcH > 0 && longest > 0 && maxSide < longest) {
+    const shortAtMax = shortSideAfterCap(longest, shortest, maxSide);
+    if (shortAtMax >= minSide || options.forceAllowSmallSide) {
+      targetWidth = Math.max(1, Math.round(srcW * (maxSide / longest)));
+      resizeDetail = `resize long ${longest}->${maxSide} short=${shortAtMax}`;
+    } else {
+      emit({
+        message: 'manual resize skipped by minSize guard',
+        detail: `requested long ${maxSide}px would make short side ${shortAtMax}px (< minSize ${minSide}px); lower minSize or use force-allow to shrink geometry`
+      });
+    }
+  }
+
+  const safeFps = Math.max(1, Math.min(60, Math.round(fps || options.fps || 12)));
+  const sourceFps = info.frameRate || 0;
+  const reducesFps = sourceFps <= 0 || safeFps < sourceFps - 0.25;
+  const speed = options.speed > 0 ? options.speed : 1;
+  const changesSpeed = Math.abs(speed - 1) > 0.001;
+
+  if (!targetWidth && !reducesFps && !changesSpeed) {
+    return inputGif;
+  }
+
+  const out = path.join(workDir, `${baseName}.reencode.f${safeFps}.w${targetWidth || srcW || 0}.gif`);
+  emit({
+    message: `manual re-encode fps=${safeFps}`,
+    detail: [
+      sourceFps > 0 ? `fps ${sourceFps.toFixed(1)}->${safeFps}` : `fps=${safeFps}`,
+      resizeDetail,
+      changesSpeed ? `speed=${speed}` : ''
+    ].filter(Boolean).join(' · ')
+  });
+  await videoToGifPalette(
+    {
+      input: inputGif,
+      output: out,
+      startSec: 0,
+      durationSec: info.durationSec,
+      fps: safeFps,
+      width: targetWidth,
+      speed,
+      statsMode: 'diff'
+    },
+    (s) => log(`ffmpeg reopt: ${s}`),
+    signal
+  );
+  const size = await statSizeMB(out);
+  emit({
+    message: `manual re-encode produced ${size.toFixed(2)}MB`,
+    currentSizeMB: size
+  });
+  return out;
+}
+
 async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }: RunArgs): Promise<void> {
   const { media } = task;
   // R-24: `options` may be rewritten after a partial yt-dlp section
@@ -971,26 +1035,104 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
     // outputs (gifsicle artefacts) live alongside it as usual. We never
     // rename / mutate the user's original output file.
     await fsp.copyFile(options.reoptimizeFromGifPath, reSrc);
-    const result = await compressLoop(
-      reSrc,
-      work,
-      fileNameFor(media, ''),
-      options,
-      (info) =>
-        emit({
-          taskId: task.id,
-          status: 'compressing',
-          percent: info.percent,
-          message: info.message,
-          substep: info.substep,
-          stepIndex: info.stepIndex,
-          totalSteps: info.totalSteps,
-          detail: info.detail,
-          currentSizeMB: info.currentSizeMB,
-          elapsedMs: elapsed()
-        }),
-      signal
-    );
+    const userFps = options.fps > 0 ? Math.max(1, Math.round(options.fps)) : 12;
+    const fpsAttempts = Array.from(new Set([userFps, 12, 10, 8, 6, 5]))
+      .filter((f) => f >= 1 && f <= userFps);
+    let bestAttempt: { result: CompressResult; fps: number } | null = null;
+    for (const attemptFps of fpsAttempts) {
+      checkCancel(signal);
+      const attemptOptions: ProcessOptions = { ...options, fps: attemptFps };
+      const attemptBase = `${fileNameFor(media, '')}.reopt.f${attemptFps}`;
+      const preparedGif = await reencodeGifForManualOptimize(
+        reSrc,
+        work,
+        attemptBase,
+        attemptOptions,
+        attemptFps,
+        (info) =>
+          emit({
+            taskId: task.id,
+            status: 'converting',
+            percent: 45,
+            message: info.message,
+            substep: 'encoding-segment',
+            detail: info.detail,
+            currentSizeMB: info.currentSizeMB,
+            elapsedMs: elapsed()
+          }),
+        signal
+      );
+      const result = await compressLoop(
+        preparedGif,
+        work,
+        attemptBase,
+        attemptOptions,
+        (info) =>
+          emit({
+            taskId: task.id,
+            status: 'compressing',
+            percent: info.percent,
+            message: info.message,
+            substep: info.substep,
+            stepIndex: info.stepIndex,
+            totalSteps: info.totalSteps,
+            detail: info.detail,
+            currentSizeMB: info.currentSizeMB,
+            elapsedMs: elapsed()
+          }),
+        signal
+      );
+      if (
+        !bestAttempt ||
+        (result.reachedSoft && !bestAttempt.result.reachedSoft) ||
+        (!result.given && bestAttempt.result.given) ||
+        (result.given === bestAttempt.result.given && result.sizeMB < bestAttempt.result.sizeMB)
+      ) {
+        bestAttempt = { result, fps: attemptFps };
+      }
+      if (result.reachedSoft || !result.given) {
+        break;
+      }
+      emit({
+        taskId: task.id,
+        status: 'compressing',
+        percent: 88,
+        message: `still over hard target at fps=${attemptFps}; trying lower fps`,
+        substep: 'planning',
+        detail: `current ${result.sizeMB.toFixed(2)}MB > ${(attemptOptions.maxBytes / (1024 * 1024)).toFixed(2)}MB`,
+        currentSizeMB: result.sizeMB,
+        elapsedMs: elapsed()
+      });
+    }
+    if (!bestAttempt) {
+      throw new Error('manual re-optimize produced no attempts');
+    }
+    const result = bestAttempt.result;
+    // P1 (#6) FIX — manual re-optimize was emitting `done` with an output
+    // path even when every phase of compressLoop failed. compressLoop's
+    // contract on full failure is to return `finalPath` pointing at the
+    // unchanged input, so without this guard the user got a "successful"
+    // re-optimisation that silently produced a copy of the original gif
+    // and never surfaced the underlying diagnostics. Mirror the regular
+    // GIF path: refuse to copy, emit `failed` with `phaseFailures`, and
+    // omit `outputs` so downstream pipelines (uploader, history) treat
+    // it as a clean failure.
+    if (result.allPhasesFailed) {
+      const diag = result.phaseFailures.length
+        ? result.phaseFailures.slice(0, 3).join(' | ')
+        : 'no phase produced any output (input file kept as-is)';
+      emit({
+        taskId: task.id,
+        status: 'failed',
+        percent: 100,
+        currentSizeMB: result.sizeMB,
+        phaseFailures: result.phaseFailures.length > 0 ? result.phaseFailures : undefined,
+        error: `gif re-optimize: every phase failed → kept original ${result.sizeMB.toFixed(2)}MB. ${diag}`,
+        message: 'gif re-optimize failed (no phase produced output)',
+        elapsedMs: elapsed()
+      });
+      return;
+    }
     const finalOut = path.join(outputBaseDir, fileNameFor(media, '.opt.gif', batchTaken));
     await fsp.copyFile(result.finalPath, finalOut);
     const targetMBLocal = options.maxBytes / (1024 * 1024);
@@ -1026,7 +1168,7 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
       currentSizeMB: result.sizeMB,
       warning,
       phaseFailures: result.phaseFailures.length > 0 ? result.phaseFailures : undefined,
-      message: `gif re-optimized (${result.sizeMB.toFixed(2)}MB ${tier})`,
+      message: `gif re-optimized (${result.sizeMB.toFixed(2)}MB ${tier}, fps=${bestAttempt.fps})`,
       elapsedMs: elapsed()
     });
     return;
@@ -1042,6 +1184,20 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
   });
   const localName = fileNameFor(media);
   const sourcePath = path.join(work, localName);
+  // P1.1 — partial fetches (`yt-dlp --download-sections`) MUST NOT share
+  // the cache key of full-stream downloads. Otherwise the first run that
+  // picks segment [0] writes a tiny stitched mp4 to `sourcePath`, and the
+  // second run (full or different subset) sees `fileExistsNonEmpty` and
+  // happily reuses that wrong file. We derive a stable hash from the
+  // user's segment selection + time window and write partials to a
+  // sibling path. Full-stream downloads keep using `sourcePath`.
+  const partialLocalName = derivePartialSourceName(localName, {
+    selectedSegments: options.selectedSegments,
+    startSec: options.startSec,
+    endSec: options.endSec,
+    maxSegmentSec: options.maxSegmentSec
+  });
+  const partialSourcePath = path.join(work, partialLocalName);
   // R-24: when the source is a yt-dlp resolved page AND the user has
   // explicitly limited the work to a strict subset of segments AND we
   // know the resolved duration up-front (sniffer probed it), download
@@ -1066,7 +1222,7 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
     userPickedSubset === true;
 
   let partialFetchUsed = false;
-  if (canPartialFetch && !(await fileExistsNonEmpty(sourcePath))) {
+  if (canPartialFetch && !(await fileExistsNonEmpty(partialSourcePath))) {
     // Pre-compute segments using the resolved duration so we know which
     // [start,end] ranges to ask yt-dlp for. enumerateSegments uses the
     // same equal-split policy that processor.ts later applies, so the
@@ -1087,13 +1243,16 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
           substep: 'downloading',
           elapsedMs: elapsed()
         });
-        await downloadYtdlpSections(media.pageUrl, sourcePath, sections, signal);
+        await downloadYtdlpSections(media.pageUrl, partialSourcePath, sections, signal);
         partialFetchUsed = true;
       } catch (e) {
         log(`[R-24] section download failed, falling back to full download: ${(e as Error).message}`);
         // Fall through to legacy full-stream download.
       }
     }
+  } else if (canPartialFetch && (await fileExistsNonEmpty(partialSourcePath))) {
+    // Cached partial from a previous run with the same segment selection.
+    partialFetchUsed = true;
   }
   // After a successful partial fetch, the local file already contains
   // ONLY the picked segments stitched end-to-end. Re-applying the
@@ -1132,6 +1291,13 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
     });
   }
 
+  // P1.1 — downstream code (probe / ffmpeg / copy) must read from whichever
+  // file actually holds the bytes for this run. Partial runs read from
+  // `partialSourcePath`, full runs from `sourcePath`. Keeping the variable
+  // name short avoids touching every reference below.
+  const activeSourcePath = partialFetchUsed ? partialSourcePath : sourcePath;
+  const activeLocalName = partialFetchUsed ? partialLocalName : localName;
+
   checkCancel(signal);
 
   const targetMB = options.maxBytes / (1024 * 1024);
@@ -1154,7 +1320,7 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
     // not *intentional skip*).
     if (options.skipCompress === true) {
       const finalOut = path.join(outputBaseDir, fileNameFor(media, '.gif', batchTaken));
-      await fsp.copyFile(sourcePath, finalOut);
+      await fsp.copyFile(activeSourcePath, finalOut);
       const sizeMB = await statSizeMB(finalOut);
       emit({
         taskId: task.id,
@@ -1169,7 +1335,7 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
     }
 
     const result = await compressLoop(
-      sourcePath,
+      activeSourcePath,
       work,
       fileNameFor(media, ''),
       options,
@@ -1188,19 +1354,15 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
         }),
       signal
     );
-    const finalOut = path.join(outputBaseDir, fileNameFor(media, '.gif', batchTaken));
-    await fsp.copyFile(result.finalPath, finalOut);
-    const softMB = options.softMaxBytes / (1024 * 1024);
-    const tier = result.reachedSoft
-      ? `<= ${softMB.toFixed(1)}MB (best)`
-      : !result.given
-        ? `<= ${targetMB.toFixed(1)}MB (fallback)`
-        : `over ${targetMB.toFixed(1)}MB`;
-
-    // R-08 / Bug B: distinguish "we tried hard, couldn't shrink" from
-    // "every phase actually failed and we silently kept the original".
-    // If allPhasesFailed === true, surface the diagnostics through `error`
-    // and flip status to 'failed' instead of 'done'.
+    // P1 (#6) FIX — must check `allPhasesFailed` BEFORE copying the result
+    // to the output directory. Previously we copyFile'd straight into the
+    // user-visible output dir and only afterwards inspected the failure
+    // flag; on full failure compressLoop returns `finalPath` pointing at
+    // the *un-touched original gif*, which then leaked into the output
+    // folder as a fake "result" even though we correctly emitted
+    // status:'failed' a few lines later. The user ended up with a file on
+    // disk for a task we declared failed, and (worse) anything that scans
+    // the output dir for completed artefacts would see a stale gif.
     if (result.allPhasesFailed) {
       const diag = result.phaseFailures.length
         ? result.phaseFailures.slice(0, 3).join(' | ')
@@ -1210,12 +1372,22 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
         status: 'failed',
         percent: 100,
         currentSizeMB: result.sizeMB,
+        // No `outputs` — failed runs MUST NOT advertise an output file.
+        phaseFailures: result.phaseFailures.length > 0 ? result.phaseFailures : undefined,
         error: `gif compression: every phase failed → kept original ${result.sizeMB.toFixed(2)}MB. ${diag}`,
         message: 'gif compression failed (no phase produced output)',
         elapsedMs: elapsed()
       });
       return;
     }
+    const finalOut = path.join(outputBaseDir, fileNameFor(media, '.gif', batchTaken));
+    await fsp.copyFile(result.finalPath, finalOut);
+    const softMB = options.softMaxBytes / (1024 * 1024);
+    const tier = result.reachedSoft
+      ? `<= ${softMB.toFixed(1)}MB (best)`
+      : !result.given
+        ? `<= ${targetMB.toFixed(1)}MB (fallback)`
+        : `over ${targetMB.toFixed(1)}MB`;
 
     let warning: string | undefined;
     if (result.given) {
@@ -1269,7 +1441,7 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
       outputBaseDir,
       fileNameFor(media, cleanExt, batchTaken)
     );
-    await fsp.copyFile(sourcePath, finalOut);
+    await fsp.copyFile(activeSourcePath, finalOut);
     emit({
       taskId: task.id,
       status: 'done',
@@ -1302,7 +1474,7 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
   // bad source, not a stale cache.
   let info: ProbeInfo;
   try {
-    info = await probe(sourcePath);
+    info = await probe(activeSourcePath);
   } catch (e) {
     const msg = (e as Error).message || '';
     const corrupted = /moov atom not found|Invalid data found|Truncating packet|could not find codec parameters/i.test(msg);
@@ -1316,15 +1488,15 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
       substep: 'downloading',
       elapsedMs: elapsed()
     });
-    await fsp.unlink(sourcePath).catch(() => undefined);
+    await fsp.unlink(activeSourcePath).catch(() => undefined);
     // Also clean any sidecar partial markers if present.
-    await fsp.unlink(`${sourcePath}.part`).catch(() => undefined);
-    await downloadToFile(fetchUrl, work, localName, {
+    await fsp.unlink(`${activeSourcePath}.part`).catch(() => undefined);
+    await downloadToFile(fetchUrl, work, activeLocalName, {
       referer: fetchReferer,
       headers: fetchHeaders,
       signal
     });
-    info = await probe(sourcePath);
+    info = await probe(activeSourcePath);
   }
   if (!info.hasVideo || info.durationSec <= 0) {
     throw new Error('invalid video stream');
@@ -1452,7 +1624,7 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
         try {
           await videoToGifPalette(
             {
-              input: sourcePath,
+              input: activeSourcePath,
               output: out,
               startSec: seg.start,
               durationSec: seg.duration,
@@ -1543,6 +1715,33 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
       signal
     );
 
+    // P1 (#6) FIX (extension to the 4th compressLoop site) — same
+    // contract as the regular GIF / manual reopt / toolbox budget
+    // paths: when every phase failed, compressLoop returns
+    // `finalPath` pointing at the un-compressed input; we MUST NOT
+    // copy that fake "result" into the user-visible output dir.
+    // Previously the segment was copied *before* the failure check,
+    // recorded into `segResults[i]`, and bubbled up as a successful
+    // output of the overall video-to-gif batch — only a textual
+    // warning hinted at the underlying failure. Now we skip the
+    // copy, leave segResults[i] undefined, aggregate the
+    // phaseFailures, and let the post-loop `outputs.length === 0`
+    // guard turn the whole task into `failed` if every segment
+    // collapsed.
+    if (compressed.allPhasesFailed) {
+      const diag = compressed.phaseFailures.length
+        ? compressed.phaseFailures.slice(0, 2).join(' | ')
+        : 'no phase produced any output';
+      warnings.push(
+        `seg ${i + 1} compress: every phase failed (${diag}); segment dropped`
+      );
+      if (compressed.phaseFailures.length > 0) {
+        const prefix = segments.length > 1 ? `seg ${i + 1}: ` : '';
+        for (const f of compressed.phaseFailures) videoPhaseFailures.push(`${prefix}${f}`);
+      }
+      return;
+    }
+
     const finalOut = path.join(
       outputBaseDir,
       fileNameFor(media, segments.length > 1 ? `.part${i + 1}.gif` : '.gif', batchTaken)
@@ -1550,12 +1749,7 @@ async function processOneTask({ task, outputBaseDir, emit, signal, batchTaken }:
     await fsp.copyFile(compressed.finalPath, finalOut);
     segResults[i] = finalOut;
 
-    if (compressed.allPhasesFailed) {
-      const diag = compressed.phaseFailures.length
-        ? compressed.phaseFailures.slice(0, 2).join(' | ')
-        : 'no phase produced any output';
-      warnings.push(`seg ${i + 1} compress: every phase failed (${diag}); kept ${compressed.sizeMB.toFixed(2)}MB`);
-    } else if (compressed.given) {
+    if (compressed.given) {
       const trail = compressed.phaseFailures.length
         ? ` · ${compressed.phaseFailures.length} phase failure(s) — click for details`
         : '';
@@ -1886,6 +2080,26 @@ async function processToolboxJob({ job, outputBaseDir, emit, signal, batchTaken 
           }),
         signal
       );
+      // P1 (#6) FIX (extension to the toolbox video→gif path) — same
+      // contract: when every compress phase failed, refuse to copy
+      // the un-compressed input into the output dir and emit failed
+      // instead of done.
+      if (result.allPhasesFailed) {
+        const diag = result.phaseFailures.length
+          ? result.phaseFailures.slice(0, 3).join(' | ')
+          : 'no phase produced any output (input file kept as-is)';
+        emit({
+          taskId: job.id,
+          status: 'failed',
+          percent: 100,
+          currentSizeMB: result.sizeMB,
+          phaseFailures: result.phaseFailures.length > 0 ? result.phaseFailures : undefined,
+          error: `gif toolbox video→gif: every phase failed → kept original ${result.sizeMB.toFixed(2)}MB. ${diag}`,
+          message: 'gif toolbox video→gif failed (no phase produced output)',
+          elapsedMs: elapsed()
+        });
+        return;
+      }
       await fsp.copyFile(result.finalPath, finalOut);
       emit({
         taskId: job.id,
@@ -2075,6 +2289,28 @@ async function processToolboxJob({ job, outputBaseDir, emit, signal, batchTaken 
         }),
       signal
     );
+    // P1 (#6) FIX — toolbox 「按目标体积优化」 path also needs the
+    // allPhasesFailed guard. Without it a budget run with a broken
+    // gifsicle / unreadable source would emit `done` with the
+    // unchanged input copied to the output directory, masking the
+    // real diagnostics behind a fake success and polluting the
+    // output folder with a stale gif.
+    if (result.allPhasesFailed) {
+      const diag = result.phaseFailures.length
+        ? result.phaseFailures.slice(0, 3).join(' | ')
+        : 'no phase produced any output (input file kept as-is)';
+      emit({
+        taskId: job.id,
+        status: 'failed',
+        percent: 100,
+        currentSizeMB: result.sizeMB,
+        phaseFailures: result.phaseFailures.length > 0 ? result.phaseFailures : undefined,
+        error: `gif toolbox optimize: every phase failed → kept original ${result.sizeMB.toFixed(2)}MB. ${diag}`,
+        message: 'gif toolbox optimize failed (no phase produced output)',
+        elapsedMs: elapsed()
+      });
+      return;
+    }
     const finalOut = path.join(outputBaseDir, fileNameFor(fakeMedia, '.opt.gif', batchTaken));
     await fsp.copyFile(result.finalPath, finalOut);
     emit({

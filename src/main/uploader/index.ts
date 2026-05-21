@@ -24,9 +24,16 @@
 import { BrowserWindow, app, ipcMain } from 'electron';
 import axios from 'axios';
 import { promises as fsp } from 'fs';
-import { createHash } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import path from 'path';
 import { log } from '../logger';
+import {
+  log as logSession,
+  openSession as openLogSession,
+  closeSession as closeLogSession,
+  reopenSession,
+  readSession as readLogSession
+} from '../sessionLogger';
 import { dispatchUpload } from './backends';
 import {
   TINY_PNG_BYTES,
@@ -255,9 +262,37 @@ export function registerUploaderIpc(opts: {
     const altTemplate = typeof p.altTemplate === 'string' ? p.altTemplate : undefined;
     const jobs = p.jobs.map((j) => sanitiseJob(j, opts));
     const jobIds = jobs.map((j) => j.id);
+    // Per-session log: reuse the renderer-pinned sessionId when present
+    // (so upload entries land in the same chain as the preceding sniff
+    // / process round). When the user uploads from the history panel
+    // without a fresh sniff, mint a standalone session so the upload
+    // is still observable. If the upstream session was already closed
+    // by `process:start`, reopen it so this new stage can keep
+    // appending entries against the same session_id.
+    let sid: string;
+    if (typeof p.sessionId === 'string' && p.sessionId) {
+      sid = p.sessionId;
+      const existing = readLogSession(sid);
+      if (existing && existing.closedAt != null) {
+        reopenSession({ sessionId: sid, origin: 'upload:start' });
+      } else if (!existing) {
+        // Session was never opened upstream — open it now.
+        openLogSession({ sessionId: sid, origin: 'upload:start (resumed)' });
+      }
+    } else {
+      sid = `upl-${Date.now()}-${randomBytes(4).toString('hex')}`;
+      openLogSession({ sessionId: sid, origin: 'upload:start (standalone)' });
+    }
+    logSession({
+      sessionId: sid,
+      stage: 'upload',
+      substep: 'start',
+      message: `upload start: ${jobs.length} job(s) backend=${backend}`,
+      data: { backend, jobIds, altTemplate, jobCount: jobs.length }
+    });
     // Fire-and-forget; results stream over upload:progress.
-    void runBatch(backend, configs, jobs, altTemplate);
-    return { ok: true, jobIds };
+    void runBatch(backend, configs, jobs, altTemplate, sid);
+    return { ok: true, jobIds, sessionId: sid };
   });
 
   ipcMain.handle('upload:cancel', async (_e, jobId: unknown) => {
@@ -379,17 +414,57 @@ function emit(p: UploadProgress): void {
     if (w.isDestroyed()) continue;
     try { w.webContents.send('upload:progress', p); } catch { /* ignore */ }
   }
+  // R-? — Session log fan-out. We only mirror terminal transitions
+  // (done / failed / cancelled) to keep the log readable; in-flight
+  // bytesUploaded ticks fire dozens of times per second per job and
+  // would otherwise drown the .log file.
+  const sid = jobSessionMap.get(p.jobId);
+  if (!sid) return;
+  if (p.status !== 'done' && p.status !== 'failed' && p.status !== 'cancelled') return;
+  const level = p.status === 'failed' ? 'error' : (p.status === 'cancelled' ? 'warn' : 'info');
+  logSession({
+    sessionId: sid,
+    stage: 'upload',
+    level,
+    substep: `job.${p.status}`,
+    message: `[${p.jobId}] ${p.status}${p.error ? ': ' + p.error : ''}${p.url ? ' -> ' + p.url : ''}`,
+    data: {
+      jobId: p.jobId,
+      status: p.status,
+      backend: p.backend,
+      url: p.url,
+      reused: p.reused,
+      bytesTotal: p.bytesTotal,
+      bytesUploaded: p.bytesUploaded,
+      attempt: p.attempt,
+      maxAttempts: p.maxAttempts,
+      fileHash: p.fileHash,
+      error: p.error
+    }
+  });
+  // Drop the mapping once the job hits a terminal state to avoid
+  // unbounded memory growth across long-running app sessions.
+  jobSessionMap.delete(p.jobId);
 }
+
+/** R-? — jobId → sessionId map. Populated by runBatch when the
+ *  caller passes a sessionId on UploadStartPayload, drained by
+ *  emit() on terminal transitions. */
+const jobSessionMap = new Map<string, string>();
 
 async function runBatch(
   backend: UploadBackend,
   configs: UploadConfigs,
   jobs: UploadJob[],
-  altTemplate?: string
+  altTemplate?: string,
+  sessionId?: string
 ): Promise<void> {
   const concurrency = configs.maxConcurrent ?? 3;
   const maxRetries = configs.maxRetries ?? 2;
   log(`[upload] start batch backend=${backend} jobs=${jobs.length} concurrency=${concurrency} retries=${maxRetries}`);
+  if (sessionId) {
+    for (const j of jobs) jobSessionMap.set(j.id, sessionId);
+  }
   // R-46 — Bounded-concurrency worker pool. We spawn `concurrency`
   // workers that pull from a shared queue. This replaces the previous
   // strictly serial loop so users can saturate egress without
@@ -404,13 +479,47 @@ async function runBatch(
       await runOneJob(backend, configs, job, maxRetries, altTemplate);
     }
   };
+  let runError: unknown = null;
   try {
     for (let i = 0; i < Math.min(concurrency, jobs.length); i++) workers.push(seat());
     await Promise.all(workers);
+  } catch (e) {
+    runError = e;
   } finally {
     pendingQueues.delete(queue);
   }
   log(`[upload] batch done backend=${backend}`);
+  if (sessionId) {
+    if (runError) {
+      logSession({
+        sessionId,
+        stage: 'upload',
+        level: 'error',
+        substep: 'batch.error',
+        message: `upload batch error backend=${backend}: ${(runError as Error).message}`,
+        data: { backend, jobCount: jobs.length }
+      });
+      closeLogSession({
+        sessionId,
+        outcome: 'error',
+        message: `upload batch error: ${(runError as Error).message}`
+      });
+    } else {
+      logSession({
+        sessionId,
+        stage: 'upload',
+        substep: 'batch.done',
+        message: `upload batch done backend=${backend}`,
+        data: { backend, jobCount: jobs.length }
+      });
+      closeLogSession({
+        sessionId,
+        outcome: 'done',
+        message: `upload batch finished — ${jobs.length} job(s)`
+      });
+    }
+  }
+  if (runError) throw runError;
 }
 
 async function runOneJob(

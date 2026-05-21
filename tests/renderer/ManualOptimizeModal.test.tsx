@@ -67,6 +67,38 @@ describe('ManualOptimizeModal', () => {
     expect(req.maxWidth).toBe(600);
   });
 
+  it('presets shrink from the current gif dimensions and keep the hard fallback cap', () => {
+    const onConfirm = vi.fn<[ManualOptimizeRequest], void>();
+    const base = {
+      ...DEFAULT_OPTIONS,
+      fps: 12,
+      maxBytes: 4 * 1024 * 1024,
+      softMaxBytes: 2 * 1024 * 1024,
+      maxWidth: 800,
+      minSize: 450
+    };
+    render(
+      <ManualOptimizeModal
+        open={true}
+        currentSizeMB={13.16}
+        currentWidth={538}
+        currentHeight={389}
+        baseOptions={base}
+        onConfirm={onConfirm}
+        onClose={vi.fn()}
+      />
+    );
+    fireEvent.click(screen.getByText('优先尺寸'));
+    fireEvent.click(screen.getByText('运行优化'));
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    const req = onConfirm.mock.calls[0][0];
+    expect(req.maxBytes).toBe(4 * 1024 * 1024);
+    expect(req.softMaxBytes).toBe(2 * 1024 * 1024);
+    // 538 * 0.75 would be 404, but the visible preset respects minSize=450.
+    expect(req.maxWidth).toBe(450);
+    expect(req.fps).toBe(12);
+  });
+
   it('clicking 优先帧率 lowers fps by 4, maxWidth unchanged', () => {
     const onConfirm = vi.fn<[ManualOptimizeRequest], void>();
     const base = { ...DEFAULT_OPTIONS, fps: 15, maxWidth: 800 };

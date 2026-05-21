@@ -90,7 +90,16 @@ export function isUnderTargetDone(p: TaskProgress): boolean {
   if (p.status !== 'done') return false;
   const w = p.warning;
   if (!w) return false;
-  return w.includes('exceeds hard target') || w.includes('did not reach soft target');
+  // R-69 — 三种 warning 都意味着 "成品超过 hard target":
+  //   - "exceeds hard target ...MB at min ...px"  : single-pass 路径 (image / video 一段过)
+  //   - "did not reach soft target ...MB; saved at ...MB" : 软目标没达成
+  //   - "seg N final X.XXMB exceeds Y.YMB target" : 多段 video 路径 (processor.ts L1780)
+  // 之前的 predicate 漏了第三种 → 视频跑出超标产物时按钮不出现, 这是产品 bug.
+  return (
+    w.includes('exceeds hard target') ||
+    w.includes('did not reach soft target') ||
+    /seg\s+\d+\s+final\s+[\d.]+MB\s+exceeds\s+[\d.]+MB\s+target/.test(w)
+  );
 }
 
 interface DetailModalState {

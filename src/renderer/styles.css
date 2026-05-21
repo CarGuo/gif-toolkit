@@ -55,18 +55,11 @@ input[type="text"]:focus { border-color: var(--accent); }
 
 .app {
   display: grid;
-  /* R-83 — Rows: titlebar | body. The progress dock used to live in a
-     dedicated bottom row; it is now docked inside the left sidebar
-     (.body > .left > .progress-dock) so it no longer covers the
-     right-hand grid + form columns. The custom property --bottom-h
-     still drives the dock height (and is dragged via the in-sidebar
-     splitter), kept for backwards-compatible persistence. */
+  /* Rows: titlebar | body. --bottom-h sizes the home progress dock,
+     now mounted in the right-bottom workspace. */
   grid-template-rows: 56px 1fr;
   height: 100vh;
 }
-/* R-83 — the historic global splitter row (.bottom-resize-handle) was
-   removed when the dock moved into the sidebar. See .left-resize-handle
-   above for the replacement. */
 .titlebar {
   display: flex;
   align-items: center;
@@ -81,11 +74,7 @@ input[type="text"]:focus { border-color: var(--accent); }
   font-weight: 600;
   letter-spacing: 0.3px;
 }
-/* R-84 — Brand cluster. .brand groups the inline-SVG logo + h1
-   so they share spacing and so the SVG's gradient stays visually
-   coupled to the title. The cluster opts out of -webkit-app-region
-   drag so the user can click directly on it (e.g. to focus the
-   window) without inadvertently starting a window-drag gesture. */
+/* Brand cluster uses the packaged project icon, not a drawn surrogate. */
 .brand {
   display: flex;
   align-items: center;
@@ -96,13 +85,18 @@ input[type="text"]:focus { border-color: var(--accent); }
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   border-radius: 6px;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
-  background: rgba(255, 255, 255, 0.04);
+  overflow: hidden;
+  background: transparent;
 }
-.brand-logo svg { display: block; }
+.brand-logo img {
+  display: block;
+  width: 28px;
+  height: 28px;
+  object-fit: contain;
+}
 .titlebar .spacer { flex: 1; }
 .titlebar .actions { -webkit-app-region: no-drag; display: flex; gap: 8px; }
 
@@ -127,13 +121,6 @@ input[type="text"]:focus { border-color: var(--accent); }
   min-height: 0;
   overflow: hidden;
 }
-/* R-83 — left sidebar is now split vertically:
-     [.left-scroll: URL / sniff / params / advanced — flex 1, scrollable]
-     [.left-resize-handle: ns-resize, persisted via --bottom-h]
-     [.progress-dock: TaskTable + optional LogBox, height = var(--bottom-h)]
-   The dock used to be a sibling of .body sitting at the bottom of the
-   viewport, covering the right-hand media grid. Moving it into the
-   sidebar gives the right column the entire vertical run. */
 .left-scroll {
   flex: 1 1 auto;
   display: flex;
@@ -142,7 +129,7 @@ input[type="text"]:focus { border-color: var(--accent); }
   overflow-y: auto;
   overflow-x: hidden;
 }
-.left-resize-handle {
+.right-resize-handle {
   flex: 0 0 6px;
   background: transparent;
   border-top: 1px solid var(--border);
@@ -152,7 +139,7 @@ input[type="text"]:focus { border-color: var(--accent); }
   z-index: 5;
   transition: background-color 0.12s ease;
 }
-.left-resize-handle::after {
+.right-resize-handle::after {
   content: '';
   position: absolute;
   left: 50%;
@@ -165,9 +152,9 @@ input[type="text"]:focus { border-color: var(--accent); }
   background: var(--border);
   transition: background-color 0.12s ease;
 }
-.left-resize-handle:hover { background: rgba(120, 140, 200, 0.12); }
-.left-resize-handle:hover::after,
-.left-resize-handle:active::after { background: var(--accent); }
+.right-resize-handle:hover { background: rgba(120, 140, 200, 0.12); }
+.right-resize-handle:hover::after,
+.right-resize-handle:active::after { background: var(--accent); }
 .right {
   display: flex;
   flex-direction: column;
@@ -202,7 +189,15 @@ input[type="text"]:focus { border-color: var(--accent); }
    layouts the row wraps so the URL field gets a full row to itself
    instead of being squeezed to a few characters. */
 .url-bar { display: flex; flex-wrap: wrap; gap: 8px; position: relative; row-gap: 6px; }
-.url-bar input {
+/* R-X — IMPORTANT: scope to the URL text input only.
+   The previous selector `.url-bar input` was a descendant selector and
+   accidentally targeted EVERY `<input>` rendered inside the URL bar
+   subtree, including checkboxes inside floating popovers (e.g. the
+   webview-sniff-menu's「用我的 Chrome 配置」toggle). That made a 13px
+   checkbox blow up to a 220px-min-width flex item that sat in the
+   middle of the popup. Selecting `> input[type="text"]` keeps the
+   intent (size the URL field) without leaking into popover descendants. */
+.url-bar > input[type="text"] {
   flex: 1 1 220px;
   min-width: 220px;
 }
@@ -532,6 +527,30 @@ details.advanced-gif > summary {
   background: var(--input-bg, #1e1e1e);
   border: 1px solid var(--border, #444);
   border-radius: 4px;
+}
+.advanced-gif-intro {
+  grid-column: 1 / -1;
+  margin: 0 0 4px 0;
+  padding: 6px 8px;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.03);
+  border-left: 2px solid var(--border, #444);
+  border-radius: 4px;
+}
+.advanced-gif-intro strong {
+  color: var(--text);
+  font-weight: 600;
+}
+.field-hint {
+  display: block;
+  margin-top: 2px;
+  font-size: 10.5px;
+  font-weight: normal;
+  line-height: 1.45;
+  color: var(--muted);
+  opacity: 0.85;
 }
 
 .preview-pane {
@@ -1273,9 +1292,8 @@ details.advanced-gif > summary {
   border-top: 1px solid var(--border);
   background: var(--bg-2);
   display: grid;
-  /* R-83 — Same row layout as the legacy .bottom dock (toolbar /
-     TaskTable / optional LogBox) but mounted inside the left sidebar
-     as flex-basis = var(--bottom-h, 180px). Width fills the parent. */
+  /* Toolbar / TaskTable / optional LogBox, mounted in the right-bottom
+     progress region and sized by the persisted --bottom-h value. */
   grid-template-rows: auto 1fr auto;
   grid-template-columns: 1fr;
   flex: 0 0 var(--bottom-h, 180px);
@@ -1889,29 +1907,38 @@ details.advanced-gif > summary {
   flex-direction: column;
   gap: 12px;
   min-height: 0;
-  /* R-83 — left column hosts source/params cards (top, scrollable) +
-     <ProgressDock /> (bottom, fixed). Inner scroll lives on
-     .hist-detail-modal-cards so the dock stays in view as the user
-     scrolls the cards. Remove the global .left border that would
-     otherwise clash with modal padding. */
+  /* R-X — Mirror the home view: left column is a pure control panel
+     (source + options cards) that stretches the full available
+     height. ProgressDock no longer lives here — it has been moved to
+     the bottom of the right column where the home view keeps it.
+     Remove the global .left border so it doesn't clash with modal
+     padding, and keep the column scrollable so long OptionsForm
+     content doesn't blow out the modal. */
   border-right: none;
   background: transparent;
-  overflow: hidden;
+  overflow-y: auto;
 }
 .hist-detail-modal-cards {
-  flex: 1 1 auto;
+  /* R-X — No longer a separate scroll container layered above a
+     fixed dock. The cards now flow naturally inside .left, which
+     itself owns the scroll. Keep the gap so cards stay visually
+     grouped. */
   display: flex;
   flex-direction: column;
   gap: 12px;
-  overflow-y: auto;
-  min-height: 0;
 }
 .hist-detail-modal .progress-dock {
-  flex: 0 0 280px;
+  /* R-X — Match the home view exactly: the dock now lives at the
+     bottom of the right column (under the media grid) just like the
+     home page, with the same persisted --bottom-h sizing. The dock
+     itself is unchanged; only its host container moved. */
+  flex: 0 0 var(--bottom-h, 180px);
+  min-height: 120px;
+  max-height: 70vh;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--bg-2);
-  max-height: 60vh;
+  margin-top: 8px;
 }
 .hist-detail-modal .layout > .right {
   flex: 1 1 auto;
@@ -2950,3 +2977,121 @@ details.advanced-gif > summary {
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
 }
 
+/* ============================================================
+   Workspace tabs (Chrome-style strip under the titlebar).
+   ------------------------------------------------------------
+   Each tab is one in-memory "嗅探 workspace": URL + selected
+   media + processing options + per-task progress + logs. The
+   strip lives between titlebar (56px) and body, so it does not
+   participate in the existing 360px+1fr column grid. We rely on
+   a flexbox horizontal layout with overflow-x: auto so a long
+   list of tabs scrolls instead of pushing the body content
+   off-screen.
+   ============================================================ */
+.ws-tabs {
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+  /* Tabs surface should not be part of the macOS draggable
+     titlebar — otherwise click-to-switch would fight the drag
+     handler. */
+  -webkit-app-region: no-drag;
+}
+.ws-tabs-strip {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 4px 8px 0 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+.ws-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 8px 0 10px;
+  min-width: 120px;
+  max-width: 220px;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-top-left-radius: 6px;
+  border-top-right-radius: 6px;
+  cursor: pointer;
+  font-size: 12.5px;
+  user-select: none;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+.ws-tab:hover {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+}
+.ws-tab.active {
+  background: var(--bg);
+  color: var(--text);
+  border-color: var(--border);
+  /* Hide the bottom border of the body's separator under the
+     active tab so the tab visually merges with the content. */
+  margin-bottom: -1px;
+  padding-bottom: 1px;
+}
+.ws-tab-label {
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ws-tab-busy-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px rgba(91, 141, 239, 0.18);
+  animation: ws-tab-busy-pulse 1.4s ease-in-out infinite;
+}
+@keyframes ws-tab-busy-pulse {
+  0%, 100% { opacity: 0.55; transform: scale(0.85); }
+  50%      { opacity: 1;    transform: scale(1.08); }
+}
+.ws-tab-close {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+.ws-tab-close:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+}
+.ws-tab-new {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 30px;
+  margin-left: 4px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  border-top-left-radius: 6px;
+  border-top-right-radius: 6px;
+}
+.ws-tab-new:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+}

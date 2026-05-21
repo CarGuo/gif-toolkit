@@ -572,11 +572,15 @@ export async function gifsicleOptimize(
  *   - 'optimize-transparency': -O3 with `--use-colormap=web` + `--no-extensions`,
  *                              clamps to a stable palette so transparency
  *                              regions can be optimised across frames.
+ *   - 'wechat-safe'        : ffmpeg full-frame re-encode + gifsicle -O0 cleanup,
+ *                            with auto frame downsampling to ≤ 300 frames.
+ *                            Targets WeChat's twin hard limits — see
+ *                            scripts/sanitize-gif.mjs for the rationale.
  */
 export async function gifsicleMethod(
   input: string,
   output: string,
-  method: 'lossy' | 'color-reduction' | 'color-dither' | 'drop-every-nth' | 'drop-duplicates' | 'optimize-transparency',
+  method: 'lossy' | 'color-reduction' | 'color-dither' | 'drop-every-nth' | 'drop-duplicates' | 'optimize-transparency' | 'wechat-safe',
   opts: { lossy?: number; colors?: number; dropEveryN?: number; signal?: AbortSignal } = {}
 ): Promise<void> {
   // R-41 — webp passthrough wrapper, see gifsicleOptimize for the
@@ -636,6 +640,59 @@ export async function gifsicleMethod(
     }
     case 'optimize-transparency': {
       await run(gifsicle, ['-O3', '--use-colormap=web', input, '-o', output], { signal: opts.signal });
+      return;
+    }
+    case 'wechat-safe': {
+      // Two-pass pipeline matching scripts/sanitize-gif.mjs:
+      //
+      //   ① ffmpeg `palettegen + paletteuse new=0` + `-gifflags
+      //      -transdiff-offsetting` to produce a single global palette,
+      //      no local color tables, every frame as a full-frame
+      //      (logical-screen sized) image. Optionally downsample fps when
+      //      the source is over 300 frames so the output stays within the
+      //      WeChat editor's hard cap.
+      //   ② gifsicle `-O0 --no-extensions --no-comments --no-names
+      //      --lossy=N` to strip any remaining application/comment
+      //      metadata and reclaim some bytes via lossy LZW. Critically
+      //      `-O0` (not -O3) — -O3 reintroduces diff-frames and ruins
+      //      the "header is structurally clean" guarantee we paid for
+      //      in pass ①.
+      //
+      // We probe frame count first so the chosen output fps caps total
+      // frames at ≤ 285 (95 % of the 300 limit) — that's the same 5 %
+      // safety margin the CLI script uses to absorb rounding.
+      const ffmpeg = getFfmpegPath();
+      const info = await runCapture(gifsicle, ['-I', input], { signal: opts.signal });
+      const frameCount = (info.match(/^\s*\+\s+image\s+#\d+/gm) ?? []).length || 1;
+      const delays = [...info.matchAll(/delay\s+([0-9.]+)s/g)].map((m) => Number(m[1]));
+      const totalDelay = delays.reduce((s, d) => s + d, 0);
+      const WECHAT_MAX_FRAMES = 300;
+      let downsampleFps: number | null = null;
+      if (frameCount > WECHAT_MAX_FRAMES && totalDelay > 0) {
+        downsampleFps = Math.max(1, Math.floor((WECHAT_MAX_FRAMES * 0.95) / totalDelay));
+      }
+      const filter = downsampleFps != null
+        ? `fps=${downsampleFps},split[a][b];[a]palettegen=stats_mode=full[p];[b][p]paletteuse=dither=bayer:bayer_scale=5:new=0`
+        : `split[a][b];[a]palettegen=stats_mode=full[p];[b][p]paletteuse=dither=bayer:bayer_scale=5:new=0`;
+      const tmp = `${output}.wsafe.tmp.gif`;
+      await run(ffmpeg, [
+        '-y', '-i', input,
+        '-vf', filter,
+        '-gifflags', '-transdiff-offsetting',
+        '-an', tmp,
+      ], { signal: opts.signal });
+      try {
+        const gArgs = ['--no-extensions', '--no-comments', '--no-names'];
+        if (lossy > 0 && gifsicleSupportsLossy()) gArgs.push(`--lossy=${lossy}`);
+        gArgs.push('-O0', tmp, '-o', output);
+        await run(gifsicle, gArgs, { signal: opts.signal });
+      } finally {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-var-requires
+          const fs = require('fs') as typeof import('fs');
+          if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
+        } catch { /* ignore */ }
+      }
       return;
     }
     default: {

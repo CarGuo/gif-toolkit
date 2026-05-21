@@ -30,6 +30,7 @@
  */
 import path from 'path';
 import type { SniffResult, SniffedMedia } from '../shared/types';
+import { log as sessionLog } from './sessionLogger';
 
 /**
  * Static-image extensions that almost always represent thumbnails /
@@ -104,21 +105,55 @@ export function shouldDropForFilters(item: SniffedMedia, opts: SniffFilterOption
  * Empty/missing `opts` is treated as "all defaults" so every existing
  * call site can append `applySniffFilters(r, opts)` with zero risk
  * of accidentally enabling a rule the caller did not ask for.
+ *
+ * `sessionId` is optional — when present every drop / dedup decision
+ * also lands in the per-session structured log so the user can later
+ * answer "why did this URL get dropped" without re-running the sniff.
  */
 export function applySniffFilters(
   result: SniffResult,
-  opts: SniffFilterOptions = {}
+  opts: SniffFilterOptions = {},
+  sessionId?: string
 ): SniffResult {
   const beforeCount = result.items.length;
   const survivors: SniffedMedia[] = [];
   let droppedStatic = 0;
+  const droppedUrls: string[] = [];
 
   for (const item of result.items) {
     if (shouldDropForFilters(item, opts)) {
       droppedStatic += 1;
+      if (droppedUrls.length < 20) droppedUrls.push(item.url);
+      if (sessionId) {
+        sessionLog({
+          sessionId,
+          stage: 'sniff',
+          level: 'debug',
+          substep: 'filter.drop',
+          message: `dropped static image: ${item.url}`,
+          data: { url: item.url, kind: item.kind }
+        });
+      }
       continue;
     }
     survivors.push(item);
+  }
+
+  if (sessionId) {
+    sessionLog({
+      sessionId,
+      stage: 'sniff',
+      level: droppedStatic > 0 ? 'info' : 'debug',
+      substep: 'filter.summary',
+      message: `filter: ${beforeCount} → ${survivors.length} (dropped ${droppedStatic})`,
+      data: {
+        before: beforeCount,
+        after: survivors.length,
+        droppedStatic,
+        sampleDropped: droppedUrls,
+        opts
+      }
+    });
   }
 
   // Fast-path: nothing changed → return the original envelope so

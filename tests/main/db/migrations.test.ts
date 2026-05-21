@@ -44,7 +44,8 @@ describe('R-80 migrations runner', () => {
         history: HEAD_VERSIONS.history,
         upload_history: HEAD_VERSIONS.upload_history,
         sniff_history: HEAD_VERSIONS.sniff_history,
-        toolbox_history: HEAD_VERSIONS.toolbox_history
+        toolbox_history: HEAD_VERSIONS.toolbox_history,
+        session_logs: HEAD_VERSIONS.session_logs
       });
     } finally {
       db.close();
@@ -63,6 +64,8 @@ describe('R-80 migrations runner', () => {
         'upload_history_items',
         'sniff_history',
         'toolbox_history',
+        'session_logs',
+        'session_log_entries',
         'schema_meta'
       ]) {
         expect(tables).toContain(expected);

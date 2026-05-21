@@ -10,6 +10,13 @@ import { sniffViaYtdlp } from './ytdlpDirectSniff';
 import { previewMedia, startBatch, cancelAllTasks, cancelTask, prefetchThumbnail, startToolbox } from './processor';
 import { killAllProcs, probe as probeMedia, extractFrameDataUrl } from './ffmpeg';
 import { log } from './logger';
+import {
+  openSession as openLogSession,
+  closeSession as closeLogSession,
+  log as logSession,
+  updateSessionMeta,
+  attachSessionLogBroadcast
+} from './sessionLogger';
 import { printPathsAsync } from './binaries';
 import { getCapabilityReport } from './capabilities';
 import { registerUploaderIpc } from './uploader';
@@ -460,7 +467,7 @@ function sanitizeToolboxParams(p: unknown): ToolboxParams {
   const method = obj.method;
   const ALLOWED_METHODS = new Set([
     'lossy', 'color-reduction', 'color-dither',
-    'drop-every-nth', 'drop-duplicates', 'optimize-transparency', 'budget'
+    'drop-every-nth', 'drop-duplicates', 'optimize-transparency', 'wechat-safe', 'budget'
   ]);
   if (typeof method === 'string' && ALLOWED_METHODS.has(method)) {
     result.method = method as ToolboxParams['method'];
@@ -626,6 +633,10 @@ async function createWindow(): Promise<void> {
     mainWindow?.show();
   });
 
+  // Wire the per-session log broadcaster to the new window so live
+  // tail updates (`session:log:append` etc.) reach the renderer.
+  if (mainWindow) attachSessionLogBroadcast(mainWindow);
+
   // R-62 / R-64 — On macOS the BrowserWindow `icon` field is ignored
   // for the Dock; Dock icon comes from Info.plist (.icns), which only
   // exists in packaged builds. In `npm run dev` we therefore fall
@@ -709,9 +720,35 @@ function readSniffFilterOpts(raw: unknown): SniffFilterOptions {
   return out;
 }
 
+/**
+ * Mint a fresh sessionId for a sniff round. The renderer can also
+ * supply one (via the optional `sessionId` field of the IPC payload)
+ * when it wants to pin a follow-up batch / upload to the same id.
+ * The id is short-but-unique enough to be safe in a filename.
+ */
+function mintSessionId(prefix = 'sess'): string {
+  const r = crypto.randomBytes(4).toString('hex');
+  return `${prefix}-${Date.now()}-${r}`;
+}
+
+/**
+ * Best-effort extract of a renderer-supplied sessionId from the
+ * filter-opts bag (renderer pins the same id across sniff modes /
+ * retries). Falls back to a new id when missing.
+ */
+function readOrMintSessionId(raw: unknown, prefix?: string): string {
+  if (raw && typeof raw === 'object') {
+    const v = (raw as Record<string, unknown>).sessionId;
+    if (typeof v === 'string' && v.length > 0 && v.length < 80) return v;
+  }
+  return mintSessionId(prefix);
+}
+
 ipcMain.handle('sniff:url', async (_e, url: unknown, maybeFilterOpts: unknown) => {
   const safe = assertHttpUrl(url);
   const filterOpts = readSniffFilterOpts(maybeFilterOpts);
+  const sessionId = readOrMintSessionId(maybeFilterOpts, 'sniff');
+  openLogSession({ sessionId, pageUrl: safe, origin: 'sniff:url' });
   // Cancel any sniff that is still mid-flight before starting a new one.
   if (currentSniffCtrl) {
     try { currentSniffCtrl.abort(); } catch { /* ignore */ }
@@ -719,19 +756,45 @@ ipcMain.handle('sniff:url', async (_e, url: unknown, maybeFilterOpts: unknown) =
   const ctrl = new AbortController();
   currentSniffCtrl = ctrl;
   try {
+    logSession({ sessionId, stage: 'sniff', substep: 'url.start', message: `headless sniff start: ${safe}`, data: { url: safe, filterOpts } });
     const r = await sniffPage(
       safe,
       (p) => {
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('sniff:progress', p);
         }
+        logSession({
+          sessionId,
+          stage: 'sniff',
+          level: 'debug',
+          substep: `url.${p.stage}`,
+          message: p.message ? `${p.stage}: ${p.message}` : `${p.stage} ${p.percent}%`,
+          data: { stage: p.stage, percent: p.percent, found: p.found, probed: p.probed, total: p.total }
+        });
       },
       ctrl.signal
     );
+    if (r.title) updateSessionMeta({ sessionId, title: r.title });
+    logSession({
+      sessionId,
+      stage: 'sniff',
+      substep: 'url.result',
+      message: `headless sniff produced ${r.items.length} item(s) (raw)`,
+      data: { itemCount: r.items.length, title: r.title, warnings: r.warnings, infoNotices: r.infoNotices }
+    });
     // R-57 — Run every sniff result through the unified filter pipeline
     // before handing it to the renderer. New rules go into
     // `applySniffFilters` and automatically apply to all 5 sniff modes.
-    return applySniffFilters(r, filterOpts);
+    const filtered = applySniffFilters(r, filterOpts, sessionId);
+    logSession({
+      sessionId, stage: 'sniff', substep: 'sniff.done',
+      message: `sniff finished — ${filtered.items.length} item(s) ready (session stays open for downstream process/upload)`,
+      data: { itemCount: filtered.items.length }
+    });
+    return { ...filtered, sessionId };
+  } catch (e) {
+    closeLogSession({ sessionId, outcome: 'error', message: (e as Error).message });
+    throw e;
   } finally {
     if (currentSniffCtrl === ctrl) currentSniffCtrl = null;
   }
@@ -771,6 +834,8 @@ ipcMain.handle('sniff:webview', async (_e, url: unknown, maybeFilterOpts: unknow
   }
   const safe = assertHttpUrl(url);
   const filterOpts = readSniffFilterOpts(maybeFilterOpts);
+  const sessionId = readOrMintSessionId(maybeFilterOpts, 'sniff-wv');
+  openLogSession({ sessionId, pageUrl: safe, origin: 'sniff:webview' });
   if (currentSniffCtrl) {
     try { currentSniffCtrl.abort(); } catch { /* ignore */ }
   }
@@ -778,11 +843,36 @@ ipcMain.handle('sniff:webview', async (_e, url: unknown, maybeFilterOpts: unknow
   currentSniffCtrl = ctrl;
   webviewSniffInFlight = true;
   try {
+    logSession({ sessionId, stage: 'sniff', substep: 'webview.start', message: `webview sniff start: ${safe}`, data: { url: safe, filterOpts } });
     const r = await openWebviewSniff(safe, mainWindow, { signal: ctrl.signal });
+    if (r) {
+      if (r.title) updateSessionMeta({ sessionId, title: r.title });
+      logSession({
+        sessionId, stage: 'sniff', substep: 'webview.result',
+        message: `webview produced ${r.items.length} item(s) (raw)`,
+        data: { itemCount: r.items.length, warnings: r.warnings, infoNotices: r.infoNotices }
+      });
+    } else {
+      logSession({ sessionId, stage: 'sniff', level: 'warn', substep: 'webview.empty', message: 'webview cancelled or empty' });
+    }
     // R-57 — Unified post-filter (no-op for webview today since the
     // webRequest listener already drops static images, but keeps the
     // pipeline single-chokepoint for future rules).
-    return r ? applySniffFilters(r, filterOpts) : r;
+    const filtered = r ? applySniffFilters(r, filterOpts, sessionId) : r;
+    if (filtered) {
+      logSession({
+        sessionId, stage: 'sniff', substep: 'sniff.done',
+        message: `webview sniff finished — ${filtered.items.length} item(s) ready (session stays open)`,
+        data: { itemCount: filtered.items.length }
+      });
+      return { ...filtered, sessionId };
+    }
+    // No result == terminal end of pipeline, close with 'cancelled'.
+    closeLogSession({ sessionId, outcome: 'cancelled', message: 'webview returned no result' });
+    return filtered;
+  } catch (e) {
+    closeLogSession({ sessionId, outcome: 'error', message: (e as Error).message });
+    throw e;
   } finally {
     webviewSniffInFlight = false;
     if (currentSniffCtrl === ctrl) currentSniffCtrl = null;
@@ -804,6 +894,8 @@ ipcMain.handle('sniff:system-chrome', async (_e, url: unknown, maybeFilterOpts: 
   }
   const safe = assertHttpUrl(url);
   const filterOpts = readSniffFilterOpts(maybeFilterOpts);
+  const sessionId = readOrMintSessionId(maybeFilterOpts, 'sniff-sc');
+  openLogSession({ sessionId, pageUrl: safe, origin: 'sniff:system-chrome' });
   // R-59 — Renderer can opt in to using the user's REAL Chrome profile
   // (rather than our isolated per-host one). This is the highest-impact
   // CF-Turnstile-loop fix because a clean-room profile is the #1 bot
@@ -825,6 +917,7 @@ ipcMain.handle('sniff:system-chrome', async (_e, url: unknown, maybeFilterOpts: 
   currentSystemChromeFinalizeCtrl = finalizeCtrl;
   systemChromeSniffInFlight = true;
   try {
+    logSession({ sessionId, stage: 'sniff', substep: 'system-chrome.start', message: `system-chrome sniff start: ${safe}`, data: { url: safe, useRealProfile, filterOpts } });
     const r = await sniffViaSystemChrome(safe, {
       signal: ctrl.signal,
       finalizeSignal: finalizeCtrl.signal,
@@ -833,10 +926,26 @@ ipcMain.handle('sniff:system-chrome', async (_e, url: unknown, maybeFilterOpts: 
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('sniff:progress', p);
         }
+        logSession({
+          sessionId, stage: 'sniff', level: 'debug', substep: `system-chrome.${p.stage}`,
+          message: p.message ? `${p.stage}: ${p.message}` : `${p.stage} ${p.percent}%`,
+          data: { stage: p.stage, percent: p.percent, found: p.found }
+        });
       }
     });
+    if (r.title) updateSessionMeta({ sessionId, title: r.title });
+    logSession({ sessionId, stage: 'sniff', substep: 'system-chrome.result', message: `system-chrome produced ${r.items.length} item(s) (raw)`, data: { itemCount: r.items.length, warnings: r.warnings, infoNotices: r.infoNotices } });
     // R-57 — Unified post-filter at the IPC chokepoint.
-    return applySniffFilters(r, filterOpts);
+    const filtered = applySniffFilters(r, filterOpts, sessionId);
+    logSession({
+      sessionId, stage: 'sniff', substep: 'sniff.done',
+      message: `sniff finished — ${filtered.items.length} item(s) ready (session stays open for downstream process/upload)`,
+      data: { itemCount: filtered.items.length }
+    });
+    return { ...filtered, sessionId };
+  } catch (e) {
+    closeLogSession({ sessionId, outcome: 'error', message: (e as Error).message });
+    throw e;
   } finally {
     systemChromeSniffInFlight = false;
     if (currentSniffCtrl === ctrl) currentSniffCtrl = null;
@@ -896,6 +1005,8 @@ ipcMain.handle('sniff:offlineImport', async (_e, maybePath: unknown, maybeOpts: 
   }
   if (!absPath) return null;
   const filterOpts = readSniffFilterOpts(maybeOpts);
+  const sessionId = readOrMintSessionId(maybeOpts, 'sniff-off');
+  openLogSession({ sessionId, pageUrl: absPath, origin: 'sniff:offlineImport' });
   // R-57 — Always pass `includeStaticImages: true` to the offline parser
   // so it harvests every <img>; the global filter then decides what to
   // drop based on `filterOpts`. Single chokepoint, single rule set.
@@ -907,6 +1018,7 @@ ipcMain.handle('sniff:offlineImport', async (_e, maybePath: unknown, maybeOpts: 
   const ctrl = new AbortController();
   currentSniffCtrl = ctrl;
   try {
+    logSession({ sessionId, stage: 'sniff', substep: 'offline.start', message: `offline import start: ${absPath}`, data: { absPath, filterOpts } });
     const r = await importOfflinePath(absPath, {
       signal: ctrl.signal,
       includeStaticImages: true,
@@ -914,9 +1026,31 @@ ipcMain.handle('sniff:offlineImport', async (_e, maybePath: unknown, maybeOpts: 
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('sniff:progress', p);
         }
+        logSession({
+          sessionId, stage: 'sniff', level: 'debug', substep: `offline.${p.stage}`,
+          message: p.message ? `${p.stage}: ${p.message}` : `${p.stage} ${p.percent}%`,
+          data: { stage: p.stage, percent: p.percent, found: p.found }
+        });
       }
     });
-    return r ? applySniffFilters(r, filterOpts) : r;
+    if (r) {
+      if (r.title) updateSessionMeta({ sessionId, title: r.title });
+      logSession({ sessionId, stage: 'sniff', substep: 'offline.result', message: `offline import produced ${r.items.length} item(s) (raw)`, data: { itemCount: r.items.length, warnings: r.warnings, infoNotices: r.infoNotices } });
+    }
+    const filtered = r ? applySniffFilters(r, filterOpts, sessionId) : r;
+    if (filtered) {
+      logSession({
+        sessionId, stage: 'sniff', substep: 'sniff.done',
+        message: `offline sniff finished — ${filtered.items.length} item(s) ready (session stays open)`,
+        data: { itemCount: filtered.items.length }
+      });
+      return { ...filtered, sessionId };
+    }
+    closeLogSession({ sessionId, outcome: 'cancelled', message: 'offline returned no result' });
+    return filtered;
+  } catch (e) {
+    closeLogSession({ sessionId, outcome: 'error', message: (e as Error).message });
+    throw e;
   } finally {
     if (currentSniffCtrl === ctrl) currentSniffCtrl = null;
   }
@@ -934,6 +1068,8 @@ ipcMain.handle('sniff:ytdlp-direct', async (_e, url: unknown, maybeFilterOpts: u
   }
   const safe = assertHttpUrl(url);
   const filterOpts = readSniffFilterOpts(maybeFilterOpts);
+  const sessionId = readOrMintSessionId(maybeFilterOpts, 'sniff-yt');
+  openLogSession({ sessionId, pageUrl: safe, origin: 'sniff:ytdlp-direct' });
   if (currentSniffCtrl) {
     try { currentSniffCtrl.abort(); } catch { /* ignore */ }
   }
@@ -941,16 +1077,33 @@ ipcMain.handle('sniff:ytdlp-direct', async (_e, url: unknown, maybeFilterOpts: u
   currentSniffCtrl = ctrl;
   ytdlpDirectSniffInFlight = true;
   try {
+    logSession({ sessionId, stage: 'sniff', substep: 'ytdlp.start', message: `ytdlp direct sniff start: ${safe}`, data: { url: safe } });
     const r = await sniffViaYtdlp(safe, {
       signal: ctrl.signal,
       onProgress: (p) => {
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('sniff:progress', p);
         }
+        logSession({
+          sessionId, stage: 'sniff', level: 'debug', substep: `ytdlp.${p.stage}`,
+          message: p.message ? `${p.stage}: ${p.message}` : `${p.stage} ${p.percent}%`,
+          data: { stage: p.stage, percent: p.percent }
+        });
       }
     });
+    if (r.title) updateSessionMeta({ sessionId, title: r.title });
+    logSession({ sessionId, stage: 'sniff', substep: 'ytdlp.result', message: `ytdlp direct produced ${r.items.length} item(s) (raw)`, data: { itemCount: r.items.length, warnings: r.warnings, infoNotices: r.infoNotices } });
     // R-57 — Unified post-filter at the IPC chokepoint.
-    return applySniffFilters(r, filterOpts);
+    const filtered = applySniffFilters(r, filterOpts, sessionId);
+    logSession({
+      sessionId, stage: 'sniff', substep: 'sniff.done',
+      message: `sniff finished — ${filtered.items.length} item(s) ready (session stays open for downstream process/upload)`,
+      data: { itemCount: filtered.items.length }
+    });
+    return { ...filtered, sessionId };
+  } catch (e) {
+    closeLogSession({ sessionId, outcome: 'error', message: (e as Error).message });
+    throw e;
   } finally {
     ytdlpDirectSniffInFlight = false;
     if (currentSniffCtrl === ctrl) currentSniffCtrl = null;
@@ -978,6 +1131,7 @@ ipcMain.handle('process:start', async (_e, payload: unknown) => {
   let tasks: unknown;
   let pageTitle: string | undefined;
   let outputDirOverride: string | undefined;
+  let sessionId: string | undefined;
   if (Array.isArray(payload)) {
     tasks = payload;
   } else if (payload && typeof payload === 'object') {
@@ -986,6 +1140,9 @@ ipcMain.handle('process:start', async (_e, payload: unknown) => {
     if (typeof obj.pageTitle === 'string') pageTitle = obj.pageTitle;
     if (typeof obj.outputDirOverride === 'string' && obj.outputDirOverride) {
       outputDirOverride = obj.outputDirOverride;
+    }
+    if (typeof obj.sessionId === 'string' && obj.sessionId) {
+      sessionId = obj.sessionId;
     }
   }
   if (!Array.isArray(tasks)) throw new Error('tasks must be an array');
@@ -999,6 +1156,17 @@ ipcMain.handle('process:start', async (_e, payload: unknown) => {
       options: sanitizeOptions(obj.options)
     };
   });
+  // If the renderer didn't supply a sessionId (e.g. process-only
+  // workflow with no preceding sniff), mint a fresh one so the
+  // batch still emits a structured log.
+  if (!sessionId) {
+    sessionId = mintSessionId('proc');
+    openLogSession({ sessionId, pageUrl: pageTitle ?? '', origin: 'process:start (standalone)' });
+  } else {
+    // Idempotent — session opened by the upstream sniff handler stays.
+    openLogSession({ sessionId, pageUrl: pageTitle ?? '', origin: 'process:start' });
+  }
+  const sid = sessionId;
   // R-29: if the renderer hands us an existing batch sub-directory
   // (because all these tasks belong to a record that already has one
   // — single-process / retry / additional batch within the same
@@ -1032,12 +1200,60 @@ ipcMain.handle('process:start', async (_e, payload: unknown) => {
     await fsp.mkdir(subDir, { recursive: true });
     allowedOutputDirs.add(subDir);
   }
+  logSession({
+    sessionId: sid, stage: 'process', substep: 'batch.start',
+    message: `batch start: ${safeTasks.length} task(s) → ${subDir}`,
+    data: {
+      taskCount: safeTasks.length,
+      subDir,
+      pageTitle,
+      taskIds: safeTasks.map((t) => t.id)
+    }
+  });
   startBatch(safeTasks, subDir, (p) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('process:progress', p);
     }
-  }).catch((e) => log(`batch error: ${(e as Error).message}`));
-  return { ok: true, outputDir: subDir };
+    // Forward every TaskProgress emit into the session log. We log
+    // running ticks at debug level (so the file isn't dominated by
+    // ffmpeg %%) and terminal transitions at info / warn / error
+    // so the user can spot failed compressions at a glance.
+    const isTerminal = p.status === 'done' || p.status === 'failed' || p.status === 'cancelled' || p.status === 'skipped';
+    const level = p.status === 'failed' ? 'error' : (p.status === 'cancelled' ? 'warn' : (isTerminal ? 'info' : 'debug'));
+    logSession({
+      sessionId: sid, stage: 'process', level,
+      substep: `task.${p.substep ?? p.status}`,
+      message: `[${p.taskId}] ${p.status}${p.message ? ': ' + p.message : ''}${p.detail ? ' — ' + p.detail : ''}`,
+      data: {
+        taskId: p.taskId,
+        status: p.status,
+        substep: p.substep,
+        percent: p.percent,
+        outputs: p.outputs,
+        currentSizeMB: p.currentSizeMB,
+        bytesDownloaded: p.bytesDownloaded,
+        bytesTotal: p.bytesTotal,
+        error: p.error,
+        errorCode: p.errorCode,
+        warning: p.warning,
+        phaseFailures: p.phaseFailures
+      }
+    });
+  }).then(
+    () => {
+      logSession({ sessionId: sid, stage: 'process', substep: 'batch.done', message: `batch finished` });
+      // R-session — close after process so the UI sees a final outcome.
+      // If the user subsequently triggers upload, upload:start will
+      // re-open this same sid (see uploader/index.ts).
+      closeLogSession({ sessionId: sid, outcome: 'done', message: `process batch finished — ${safeTasks.length} task(s)` });
+    },
+    (e) => {
+      logSession({ sessionId: sid, stage: 'process', level: 'error', substep: 'batch.error', message: `batch error: ${(e as Error).message}` });
+      closeLogSession({ sessionId: sid, outcome: 'error', message: (e as Error).message });
+      log(`batch error: ${(e as Error).message}`);
+    }
+  );
+  return { ok: true, outputDir: subDir, sessionId: sid };
 });
 
 ipcMain.handle('process:cancelAll', async () => {

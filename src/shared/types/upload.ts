@@ -194,6 +194,12 @@ export interface UploadStartPayload {
   /** Optional Markdown alt text template. Defaults to filename
    *  without extension. Supports `{name}` / `{ext}` tokens. */
   altTemplate?: string;
+  /** Optional sessionId to associate this upload batch with a
+   *  pre-existing session log (created during sniff/process). When
+   *  provided, the upload coordinator emits stage='upload' entries
+   *  into the same log so the user can trace one history record's
+   *  full lifecycle in a single .log/.json export. */
+  sessionId?: string;
 }
 
 export interface UploadStartResult {
@@ -202,6 +208,13 @@ export interface UploadStartResult {
    *  insertion order; the renderer correlates streamed
    *  UploadProgress events with these ids. */
   jobIds: string[];
+  /** The session id this upload batch logs against. Either echoed
+   *  from the request payload (when the renderer pinned a session
+   *  from the upstream sniff/process round) or freshly minted by the
+   *  main process for standalone uploads (e.g. re-upload from the
+   *  history panel). The renderer uses this to wire follow-up actions
+   *  (history record patch, log panel) to the same session. */
+  sessionId: string;
 }
 
 /**

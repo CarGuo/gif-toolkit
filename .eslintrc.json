@@ -13,7 +13,32 @@
     "react/react-in-jsx-scope": "off",
     "react/prop-types": "off",
     "@typescript-eslint/no-explicit-any": "warn",
-    "@typescript-eslint/no-unused-vars": ["warn", { "argsIgnorePattern": "^_" }]
+    "@typescript-eslint/no-unused-vars": ["warn", { "argsIgnorePattern": "^_" }],
+    "max-lines": [
+      "warn",
+      { "max": 600, "skipBlankLines": false, "skipComments": false }
+    ]
   },
+  "overrides": [
+    {
+      "files": [
+        "src/main/processor.ts",
+        "src/main/index.ts",
+        "src/main/ffmpeg.ts",
+        "src/renderer/App.tsx",
+        "src/renderer/components/ToolboxPanel.tsx",
+        "src/renderer/components/HistoryDetailModal.tsx",
+        "src/main/offlineImport.ts",
+        "src/main/systemChromeSniff.ts",
+        "src/main/uploader/index.ts",
+        "src/main/webviewSniff.ts",
+        "src/renderer/components/PreviewModal.tsx",
+        "src/main/sniffer.ts"
+      ],
+      "rules": {
+        "max-lines": "off"
+      }
+    }
+  ],
   "ignorePatterns": ["dist", "release", "node_modules"]
 }

@@ -29,3 +29,4 @@ export * from './process';
 export * from './toolbox';
 export * from './upload';
 export * from './system';
+export * from './log';

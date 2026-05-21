@@ -3,7 +3,7 @@
  *
  * These cover the non-Electron pieces of `webviewSniffUtils.ts`:
  *  - Content-Type → MediaKind classification (video/gif/animated webp).
- *  - Lightweight dedup key (host + pathname, query stripped).
+ *  - Shared media dedup key (generic transform path/query canonicalisation).
  *  - Merge function: dedup, hard cap, source stamping.
  */
 import { describe, expect, it } from 'vitest';
@@ -63,13 +63,25 @@ describe('classifyByContentType', () => {
 });
 
 describe('webviewDedupKey', () => {
-  it('combines host + pathname, lower-cased', () => {
-    expect(webviewDedupKey('https://CDN.Example.com/Path/Foo.MP4')).toBe('cdn.example.com/path/foo.mp4');
+  it('combines host + canonical pathname', () => {
+    expect(webviewDedupKey('https://CDN.Example.com/Path/Foo.MP4')).toBe('cdn.example.com/Path/Foo.MP4');
   });
 
-  it('strips query string and hash so cache-busters do not produce ghost duplicates', () => {
+  it('strips presentation query params and hash so cache-busters do not produce ghost duplicates', () => {
     const a = webviewDedupKey('https://x.com/a/b.gif?v=1');
     const b = webviewDedupKey('https://x.com/a/b.gif?v=2&token=abc#frag');
+    expect(a).toBe(b);
+  });
+
+  it('preserves unknown query params so distinct business resources do not merge', () => {
+    const a = webviewDedupKey('https://x.com/a/b.gif?id=a&w=400');
+    const b = webviewDedupKey('https://x.com/a/b.gif?id=b&w=800');
+    expect(a).not.toBe(b);
+  });
+
+  it('collapses generic CDN path transforms captured by real Chrome', () => {
+    const a = webviewDedupKey('https://cdn.example.com/v2/resize:fit:1400/format:webp/foo.gif');
+    const b = webviewDedupKey('https://cdn.example.com/v2/resize:fit:1440/foo.gif');
     expect(a).toBe(b);
   });
 
@@ -106,13 +118,13 @@ describe('mergeWebviewMedia', () => {
     expect(m.id).toMatch(/^[0-9a-f]{16}$/);
   });
 
-  it('first-write-wins: a later DOM-scan duplicate does not overwrite an earlier network capture', () => {
+  it('keeps the earlier network capture when it has a stronger variant score', () => {
     const map = new Map<string, SniffedMedia>();
     mergeWebviewMedia(map, [
       { url: 'https://x.com/a.gif?v=net', kind: 'gif', mime: 'image/gif', pageUrl: PAGE }
     ]);
     mergeWebviewMedia(map, [
-      // Same dedup key (query stripped); should be ignored.
+      // Same dedup key (query stripped); lower score should be ignored.
       { url: 'https://x.com/a.gif?v=dom', kind: 'gif', pageUrl: PAGE }
     ]);
     expect(map.size).toBe(1);
@@ -138,6 +150,56 @@ describe('mergeWebviewMedia', () => {
       { url: 'https://x.com/a.mp4', kind: 'video', mime: 'video/mp4', pageUrl: PAGE }
     ]);
     expect(Array.from(map.values())[0].mime).toBe('video/mp4');
+  });
+
+  it('dedupes real-Chrome transform variants of the same asset', () => {
+    const map = new Map<string, SniffedMedia>();
+    mergeWebviewMedia(map, [
+      {
+        url: 'https://miro.medium.com/v2/resize:fit:1400/format:webp/1*FyWSKI69_GcAv7MoAbPbww.gif',
+        kind: 'gif',
+        pageUrl: PAGE
+      },
+      {
+        url: 'https://miro.medium.com/v2/resize:fit:1400/1*FyWSKI69_GcAv7MoAbPbww.gif',
+        kind: 'gif',
+        pageUrl: PAGE
+      },
+      {
+        url: 'https://miro.medium.com/v2/resize:fit:1100/format:webp/1*BU1kKyxkWidSLXOA37nPLg.gif',
+        kind: 'gif',
+        pageUrl: PAGE
+      },
+      {
+        url: 'https://miro.medium.com/v2/resize:fit:1440/1*BU1kKyxkWidSLXOA37nPLg.gif',
+        kind: 'gif',
+        pageUrl: PAGE
+      }
+    ]);
+    expect(map.size).toBe(2);
+  });
+
+  it('replaces a low-res transform variant with a later larger variant while preserving id', () => {
+    const map = new Map<string, SniffedMedia>();
+    mergeWebviewMedia(map, [
+      {
+        url: 'https://cdn.example.com/v2/resize:fit:200/format:webp/foo.gif',
+        kind: 'gif',
+        pageUrl: PAGE
+      }
+    ]);
+    const originalId = Array.from(map.values())[0].id;
+    mergeWebviewMedia(map, [
+      {
+        url: 'https://cdn.example.com/v2/resize:fit:1440/foo.gif',
+        kind: 'gif',
+        pageUrl: PAGE
+      }
+    ]);
+    expect(map.size).toBe(1);
+    const m = Array.from(map.values())[0];
+    expect(m.id).toBe(originalId);
+    expect(m.url).toBe('https://cdn.example.com/v2/resize:fit:1440/foo.gif');
   });
 });
 

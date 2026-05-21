@@ -79,6 +79,11 @@ const VIDEO_OR_GIF: readonly string[] = [...VIDEO_EXTS, ...GIF_EXTS];
  *   - drop-every-nth   : gifsicle --delete "#0n,#1n,..." then --optimize
  *   - drop-duplicates  : gifsicle --optimize=3 (frame-dedupe pass)
  *   - optimize-transp  : gifsicle --optimize=3 --transparent (transparency)
+ *   - wechat-safe      : ffmpeg full-frame re-encode (palettegen+paletteuse new=0,
+ *                        -gifflags -transdiff-offsetting) + gifsicle -O0
+ *                        --no-extensions/--no-comments/--no-names + auto frame
+ *                        downsample to ≤ 300 frames. Targets the WeChat editor's
+ *                        twin hard limits ("帧数超过 300 帧" + "来源信息无法识别").
  *   - budget           : run the full 4-Phase compressLoop (size-target).
  *
  * Note: the existing single-pass gifsicleOptimize(file, lossy, colors)
@@ -91,6 +96,7 @@ export type ToolboxOptimizeMethod =
   | 'drop-every-nth'
   | 'drop-duplicates'
   | 'optimize-transparency'
+  | 'wechat-safe'
   | 'budget';
 
 /** Per-tool params. All fields are optional — sanitiseToolboxOptions in

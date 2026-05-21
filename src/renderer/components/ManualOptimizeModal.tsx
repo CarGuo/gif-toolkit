@@ -58,6 +58,8 @@ export interface ManualOptimizeRequest {
 interface Props {
   open: boolean;
   currentSizeMB: number;
+  currentWidth?: number;
+  currentHeight?: number;
   baseOptions: ProcessOptions;
   taskTitle?: string;
   warning?: string;
@@ -71,7 +73,7 @@ interface Preset {
   key: PresetKey;
   label: string;
   hint: string;
-  build: (base: ProcessOptions, currentSizeMB: number) => ManualOptimizeRequest;
+  build: (base: ProcessOptions, currentSizeMB: number, source?: { width?: number; height?: number }) => ManualOptimizeRequest;
 }
 
 function clampInt(n: number, min: number, max: number): number {
@@ -84,15 +86,22 @@ function clampNum(n: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, n));
 }
 
+function sourceLongestSide(base: ProcessOptions, source?: { width?: number; height?: number }): number {
+  const w = typeof source?.width === 'number' && source.width > 0 ? source.width : 0;
+  const h = typeof source?.height === 'number' && source.height > 0 ? source.height : 0;
+  const actual = Math.max(w, h);
+  return actual > 0 ? Math.min(base.maxWidth, actual) : base.maxWidth;
+}
+
 const PRESETS: Preset[] = [
   {
     key: 'harder',
     label: '更狠压',
-    hint: '目标 -30% / fps -2 / 边长 ×0.85 / lossy=160 colors=64',
-    build: (base, sizeMB) => ({
-      maxBytes: Math.max(100 * 1024, Math.round(Math.min(base.maxBytes, sizeMB * 1024 * 1024) * 0.7)),
+    hint: '先保硬上限 / fps -2 / 当前边长 ×0.85 / lossy=160 colors=64',
+    build: (base, _sizeMB, source) => ({
+      maxBytes: base.maxBytes,
       fps: clampInt(base.fps - 2, 5, 60),
-      maxWidth: clampInt(Math.round(base.maxWidth * 0.85), Math.max(64, base.minSize), 4096),
+      maxWidth: clampInt(Math.round(sourceLongestSide(base, source) * 0.85), Math.max(64, base.minSize), 4096),
       // R-81 — "更狠压" 真的去动 lossy / colors。lossy=160 是 gifsicle 公认
       // "明显能看出来,但还能接受" 的拐点;colors=64 是体积/质量平衡线。
       lossyCeiling: 160,
@@ -102,20 +111,20 @@ const PRESETS: Preset[] = [
   {
     key: 'size',
     label: '优先尺寸',
-    hint: '边长 ×0.75,fps 不变,lossy 用全局值',
-    build: (base, sizeMB) => ({
-      maxBytes: Math.max(100 * 1024, Math.round(Math.min(base.maxBytes, sizeMB * 1024 * 1024) * 0.8)),
+    hint: '先保硬上限,当前边长 ×0.75,fps 不变',
+    build: (base, _sizeMB, source) => ({
+      maxBytes: base.maxBytes,
       fps: base.fps,
-      maxWidth: clampInt(Math.round(base.maxWidth * 0.75), Math.max(64, base.minSize), 4096),
+      maxWidth: clampInt(Math.round(sourceLongestSide(base, source) * 0.75), Math.max(64, base.minSize), 4096),
       // R-81 — 让 adaptive 搜索自由发挥(不锁 lossy/colors);用户专注让边长缩。
     }),
   },
   {
     key: 'fps',
     label: '优先帧率',
-    hint: 'fps -4,边长不变,lossy 用全局值',
-    build: (base, sizeMB) => ({
-      maxBytes: Math.max(100 * 1024, Math.round(Math.min(base.maxBytes, sizeMB * 1024 * 1024) * 0.8)),
+    hint: '先保硬上限,fps -4,边长不变',
+    build: (base) => ({
+      maxBytes: base.maxBytes,
       fps: clampInt(base.fps - 4, 5, 60),
       maxWidth: base.maxWidth,
       // R-81 — 不锁 lossy/colors,让 adaptive 自己来。用户用减帧抢体积。
@@ -125,8 +134,8 @@ const PRESETS: Preset[] = [
     key: 'fidelity',
     label: '近于原图',
     hint: '只降目标大小,lossy=20 colors=256(最高画质)',
-    build: (base, sizeMB) => ({
-      maxBytes: Math.max(100 * 1024, Math.round(Math.min(base.maxBytes, sizeMB * 1024 * 1024) * 0.9)),
+    build: (base) => ({
+      maxBytes: base.maxBytes,
       fps: base.fps,
       maxWidth: base.maxWidth,
       // R-81 — 把 lossy 上限压到 20(gifsicle 几乎无察觉)、colors 锁满 256
@@ -141,6 +150,8 @@ const PRESETS: Preset[] = [
 export const ManualOptimizeModal: React.FC<Props> = ({
   open,
   currentSizeMB,
+  currentWidth,
+  currentHeight,
   baseOptions,
   taskTitle,
   warning,
@@ -148,9 +159,13 @@ export const ManualOptimizeModal: React.FC<Props> = ({
   onClose
 }) => {
   const [activePreset, setActivePreset] = useState<PresetKey>('harder');
+  const sourceMetrics = useMemo(
+    () => ({ width: currentWidth, height: currentHeight }),
+    [currentWidth, currentHeight]
+  );
   const initial = useMemo(
-    () => PRESETS[0].build(baseOptions, currentSizeMB),
-    [baseOptions, currentSizeMB]
+    () => PRESETS[0].build(baseOptions, currentSizeMB, sourceMetrics),
+    [baseOptions, currentSizeMB, sourceMetrics]
   );
   // Hard / soft caps in MB so the user types human-friendly numbers.
   const [maxBytesMB, setMaxBytesMB] = useState<string>(
@@ -185,7 +200,7 @@ export const ManualOptimizeModal: React.FC<Props> = ({
 
   useEffect(() => {
     if (!open) return;
-    const p = PRESETS[0].build(baseOptions, currentSizeMB);
+    const p = PRESETS[0].build(baseOptions, currentSizeMB, sourceMetrics);
     setActivePreset('harder');
     setMaxBytesMB((p.maxBytes / (1024 * 1024)).toFixed(2));
     // R-79: presets only fill the three "shape" knobs they were
@@ -206,7 +221,7 @@ export const ManualOptimizeModal: React.FC<Props> = ({
     setColorsFloor(String(p.colorsFloor ?? baseOptions.colorsFloor ?? DEFAULT_OPTIONS.colorsFloor ?? GIF_COLORS_MIN));
     setOptimizeLevel(baseOptions.optimizeLevel ?? DEFAULT_OPTIONS.optimizeLevel ?? 3);
     setDither(baseOptions.dither ?? DEFAULT_OPTIONS.dither ?? 'floyd-steinberg');
-  }, [open, baseOptions, currentSizeMB]);
+  }, [open, baseOptions, currentSizeMB, sourceMetrics]);
 
   useEffect(() => {
     if (!open) return;
@@ -222,7 +237,7 @@ export const ManualOptimizeModal: React.FC<Props> = ({
   const applyPreset = (key: PresetKey): void => {
     const p = PRESETS.find((x) => x.key === key);
     if (!p) return;
-    const next = p.build(baseOptions, currentSizeMB);
+    const next = p.build(baseOptions, currentSizeMB, sourceMetrics);
     setActivePreset(key);
     setMaxBytesMB((next.maxBytes / (1024 * 1024)).toFixed(2));
     setFps(String(next.fps));
@@ -396,6 +411,7 @@ export const ManualOptimizeModal: React.FC<Props> = ({
                 value={lossyCeiling}
                 onChange={(e) => setLossyCeiling(e.target.value)}
               />
+              <span className="field-hint">越大越省体积,画质越糙。常用 80–160。</span>
             </label>
             <label>
               <span>colors 下限 (2-256)</span>
@@ -407,6 +423,7 @@ export const ManualOptimizeModal: React.FC<Props> = ({
                 value={colorsFloor}
                 onChange={(e) => setColorsFloor(e.target.value)}
               />
+              <span className="field-hint">越小越省体积,色越少。常用 64–128。</span>
             </label>
             <label>
               <span>-O 级别</span>
@@ -421,6 +438,7 @@ export const ManualOptimizeModal: React.FC<Props> = ({
                   <option key={lvl} value={String(lvl)}>{`-O${lvl}`}</option>
                 ))}
               </select>
+              <span className="field-hint">压缩力度。-O3 最强(默认)。</span>
             </label>
             <label>
               <span>dither</span>
@@ -435,6 +453,7 @@ export const ManualOptimizeModal: React.FC<Props> = ({
                   <option key={d} value={d}>{d}</option>
                 ))}
               </select>
+              <span className="field-hint">削色后的过渡处理,默认即可。</span>
             </label>
           </div>
         </div>

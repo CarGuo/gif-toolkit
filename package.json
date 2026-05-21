@@ -34,6 +34,10 @@
     "test:db:to-electron": "electron-rebuild -f -w better-sqlite3",
     "test:db:run": "cross-env GIFTK_DB_TESTS=1 vitest run tests/main/db",
     "test:db": "node scripts/test-db.mjs",
+    "test:e2e": "npm run build && playwright test",
+    "docs:render": "node scripts/render-mermaid.mjs",
+    "docs:screenshots": "npm run build && node scripts/capture-screenshots.mjs",
+    "docs:all": "npm run docs:render && npm run docs:screenshots",
     "postinstall": "npm rebuild sharp ffmpeg-static ffprobe-static @343dev/gifsicle ytdlp-nodejs && electron-rebuild -f -w better-sqlite3 && node scripts/patch-electron-plist.mjs",
     "lockfile:lint": "lockfile-lint --path package-lock.json --type npm --validate-https --allowed-hosts npm --validate-integrity --validate-package-names"
   },
@@ -55,6 +59,7 @@
   },
   "devDependencies": {
     "@electron/rebuild": "3.7.2",
+    "@playwright/test": "1.60.0",
     "@testing-library/dom": "10.4.0",
     "@testing-library/jest-dom": "6.6.3",
     "@testing-library/react": "16.1.0",

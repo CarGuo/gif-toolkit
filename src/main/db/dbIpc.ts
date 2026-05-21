@@ -50,6 +50,17 @@ import {
   createToolboxHistoryRepo,
   type ToolboxHistoryRow
 } from './repos/toolboxHistoryRepo';
+import {
+  listSessions,
+  readSession,
+  removeSession,
+  clearSessions,
+  snapshotToLogText,
+  snapshotToJsonText
+} from '../sessionLogger';
+import { dialog } from 'electron';
+import { promises as fsp } from 'fs';
+import path from 'path';
 
 /** Tag used by the lazy repo accessors. */
 type RepoCache = {
@@ -166,6 +177,50 @@ export function registerDbIpc(): void {
       bootstrapImport(openDb(), payload ?? {})
     )
   );
+
+  // session-scoped operation logs (sniff → process → upload).
+  ipcMain.handle('db:sessionLogs:list', safeHandle('sessionLogs:list', async () => listSessions()));
+  ipcMain.handle('db:sessionLogs:read', safeHandle('sessionLogs:read', async (_e, sessionId: unknown) => {
+    if (typeof sessionId !== 'string' || !sessionId) return null;
+    return readSession(sessionId);
+  }));
+  ipcMain.handle('db:sessionLogs:remove', safeHandle('sessionLogs:remove', async (_e, sessionId: unknown) => {
+    if (typeof sessionId !== 'string' || !sessionId) return;
+    removeSession(sessionId);
+  }));
+  ipcMain.handle('db:sessionLogs:clear', safeHandle('sessionLogs:clear', async () => {
+    clearSessions();
+  }));
+  // Export — main writes the file via the renderer-driven save dialog
+  // because the main process owns the absolute disk path. Returns the
+  // chosen path for renderer toast / "open in folder" actions.
+  ipcMain.handle('db:sessionLogs:export', safeHandle('sessionLogs:export', async (_e, payload: unknown) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('export payload required');
+    }
+    const obj = payload as { sessionId?: unknown; format?: unknown; suggestedName?: unknown };
+    const sessionId = typeof obj.sessionId === 'string' ? obj.sessionId : '';
+    if (!sessionId) throw new Error('sessionId required');
+    const format = obj.format === 'json' ? 'json' : 'log';
+    const snap = readSession(sessionId);
+    if (!snap) throw new Error(`session not found: ${sessionId}`);
+    const body = format === 'json' ? snapshotToJsonText(snap) : snapshotToLogText(snap);
+    const ext = format === 'json' ? 'json' : 'log';
+    const safeBase = (typeof obj.suggestedName === 'string' && obj.suggestedName)
+      ? String(obj.suggestedName).replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80)
+      : `session-${sessionId}`;
+    const r = await dialog.showSaveDialog({
+      title: '导出嗅探日志',
+      defaultPath: `${safeBase}.${ext}`,
+      filters: format === 'json'
+        ? [{ name: 'JSON', extensions: ['json'] }]
+        : [{ name: 'Log', extensions: ['log', 'txt'] }]
+    });
+    if (r.canceled || !r.filePath) return { ok: false, cancelled: true };
+    const abs = path.resolve(r.filePath);
+    await fsp.writeFile(abs, body, 'utf-8');
+    return { ok: true, path: abs };
+  }));
 }
 
 /** Test helper — wipes the lazy repo cache so a fresh `openDb()` gets

@@ -221,6 +221,10 @@ export interface ThumbnailResult {
 export interface BatchStartResult {
   ok: boolean;
   outputDir: string;
+  /** Session log id for this batch; renderer pins it onto the
+   *  HistoryRecord so the rerun / single-process / upload paths can
+   *  thread it back into subsequent IPC calls. */
+  sessionId?: string;
 }
 
 export const DEFAULT_OPTIONS: ProcessOptions = {

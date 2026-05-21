@@ -24,10 +24,11 @@ interface NumFieldProps {
   min: number;
   max?: number;
   step?: number;
+  hint?: string;
   onCommit: (n: number) => void;
 }
 
-const NumField: React.FC<NumFieldProps> = ({ label, unit, value, defaultValue, min, max, step, onCommit }) => {
+const NumField: React.FC<NumFieldProps> = ({ label, unit, value, defaultValue, min, max, step, hint, onCommit }) => {
   // R-82: NumField MUST never display `min` as the apparent value just
   // because `value` is undefined — that misled users into thinking
   // lossyCeiling/colorsFloor defaulted to 2 when the real default is
@@ -65,6 +66,7 @@ const NumField: React.FC<NumFieldProps> = ({ label, unit, value, defaultValue, m
           if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
         }}
       />
+      {hint ? <span className="field-hint">{hint}</span> : null}
     </label>
   );
 };
@@ -161,6 +163,9 @@ export const OptionsForm: React.FC<Props> = ({ value, onChange }) => {
       <details className="advanced-gif">
         <summary>高级 GIF 优化</summary>
         <div className="options advanced-gif-grid">
+          <p className="advanced-gif-intro">
+            压不下来或想保画质时再调,默认即可。
+          </p>
           <NumField
             label="lossy 上限"
             value={value.lossyCeiling}
@@ -168,6 +173,7 @@ export const OptionsForm: React.FC<Props> = ({ value, onChange }) => {
             min={0}
             max={GIF_LOSSY_MAX}
             step={5}
+            hint="越大越省体积,画质越糙。常用 80–160。"
             onCommit={(n) => set('lossyCeiling', Math.max(0, Math.min(GIF_LOSSY_MAX, Math.round(n))))}
           />
           <NumField
@@ -177,6 +183,7 @@ export const OptionsForm: React.FC<Props> = ({ value, onChange }) => {
             min={GIF_COLORS_MIN}
             max={GIF_COLORS_MAX}
             step={2}
+            hint="越小越省体积,色越少。常用 64–128。"
             onCommit={(n) => set('colorsFloor', Math.max(GIF_COLORS_MIN, Math.min(GIF_COLORS_MAX, Math.round(n))))}
           />
           <label>
@@ -192,6 +199,7 @@ export const OptionsForm: React.FC<Props> = ({ value, onChange }) => {
                 <option key={lvl} value={String(lvl)}>{`-O${lvl}`}</option>
               ))}
             </select>
+            <span className="field-hint">压缩力度。-O3 最强(默认)。</span>
           </label>
           <label>
             dither
@@ -206,6 +214,7 @@ export const OptionsForm: React.FC<Props> = ({ value, onChange }) => {
                 <option key={d} value={d}>{d}</option>
               ))}
             </select>
+            <span className="field-hint">削色后的过渡处理,默认即可。</span>
           </label>
         </div>
       </details>

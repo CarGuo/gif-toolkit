@@ -8,6 +8,7 @@ import { classifyByExt as _classifyByExt } from '../shared/mediaKind';
 import { log } from './logger';
 import { isPrivateHost } from './helpers';
 import { fetchRenderedDom } from './headlessFetch';
+import { canonicalMediaDedupKey, mediaVariantScore } from './mediaDedup';
 
 const UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
@@ -98,195 +99,8 @@ export function matchEmbedProvider(host: string, fullUrl: string): string | null
   return null;
 }
 
-/**
- * Build a dedup key that treats two URLs as equal when they differ only in
- * "presentation transforms" (size / crop / quality / format hints) of the
- * same underlying asset.
- *
- * Design goal: be CDN-agnostic. We do NOT hard-code host whitelists. Instead
- * we recognise *structural* patterns that virtually all CDNs and CMSes use
- * to express transforms:
- *
- *   1) Whole path segment is a transform expression
- *      - Blogger / Photos:        `s1600`, `s16000`, `w640-h640`, `h480-w800`
- *      - Cloudinary / similar:    `c_fill,w_300,h_300`, `q_auto`, `f_auto`,
- *                                 `w_800`, `h_600`
- *      - Semantic size buckets:   `thumb`, `thumbnail`, `thumbs`,
- *                                 `max`, `resize`, `fit`, `fit-in`,
- *                                 `crop`, `scale`
- *      - A pure-number segment immediately after a sizing keyword
- *        (e.g. Medium `/max/800/foo.png` → drop both `max` and `800`).
- *
- *   2) Segment-tail transform suffix
- *      - googleusercontent style: `…CCC=s2048`, `…=w1024-h768`
- *      - Twitter pbs style:       `…ABCDEFG.jpg:large`, `:orig`, `:small`
- *
- *   3) Filename-embedded size hints
- *      - WordPress / generic:     `foo-1024x768.jpg`, `foo_1024x768.jpg`
- *      - Shopify:                 `shoe_300x.jpg`, `shoe_300x300.jpg`
- *      - Wikipedia thumb:         `800px-Foo.jpg` → strip the prefix and
- *        also collapse the `/thumb/.../` directory pair.
- *      - Generic numeric suffix:  `foo@2x.png`, `foo-large.jpg`
- *
- *   4) Extension family normalisation: `.jpeg` ≡ `.jpg`.
- *
- *   5) Query string is dropped entirely (signed tokens, cache busters,
- *      transform query keys like imgix `?w=300`, Squarespace `?format=2500w`,
- *      Twitter `?name=large` all collapse here).
- *
- * Edge cases (accepted, by user request):
- *   - A real path like `/users/s1234/avatar.png` will lose `s1234` even
- *     though here it is a user-id bucket, not a size. False merge.
- *   - A real CMS path like `/issue/s12/cover.jpg` likewise. False merge.
- *   These are inherent ambiguities of the URL string alone and are
- *   accepted as a trade-off for a single, structural, host-independent
- *   rule set.
- */
-
-// Whole-segment patterns
-const SEG_BLOGGER_RX = /^(?:s\d{2,5}|w\d{2,5}(?:-h\d{2,5})?|h\d{2,5}(?:-w\d{2,5})?)$/i;
-const SEG_CLOUDINARY_RX = /^(?:[a-z]_[\w.-]+(?:,[a-z]_[\w.-]+)*)$/i;
-const CLOUDINARY_KEYS = /(?:^|,)(?:w|h|c|q|f|x|y|r|e|g|dpr|ar|fl|so|du|eo|l|t|b|co|bo|o|a|z|pg)_/i;
-const SEG_SEMANTIC_RX = /^(?:thumb|thumbs|thumbnail|thumbnails|max|resize|fit|fit-in|crop|scale|small|medium|large|original|orig)$/i;
-const SEG_NUMERIC_RX = /^\d{2,5}$/;
-
-// Segment-tail transform suffixes
-const TAIL_GOOG_RX = /=(?:s\d{2,5}|w\d{2,5}(?:-h\d{2,5})?|h\d{2,5})(?:-[a-z0-9]+)?$/i;
-const TAIL_COLON_RX = /:(?:large|orig|original|small|medium|thumb|thumbnail)$/i;
-
-// Filename transforms
-const FN_WIKI_PX_RX = /^\d{2,5}px-/i;
-const FN_NXN_RX = /[-_]\d{2,5}x\d{0,5}(?=\.[a-z0-9]+$)/i;
-const FN_AT_X_RX = /@\d(?:\.\d)?x(?=\.[a-z0-9]+$)/i;
-const FN_SEMANTIC_RX = /[-_](?:thumb|thumbnail|small|medium|large|orig|original)(?=\.[a-z0-9]+$)/i;
-
-const EXT_FAMILY: Record<string, string> = { '.jpeg': '.jpg' };
-
-function normaliseFilename(name: string): string {
-  let n = name;
-  // Wikipedia thumb: `800px-Foo.jpg` → `Foo.jpg`
-  n = n.replace(FN_WIKI_PX_RX, '');
-  // `foo-1024x768.jpg` / `foo_300x.jpg` / `foo-300x300.jpg`
-  n = n.replace(FN_NXN_RX, '');
-  // `foo@2x.png`
-  n = n.replace(FN_AT_X_RX, '');
-  // `foo-large.jpg` / `foo_thumb.png`
-  n = n.replace(FN_SEMANTIC_RX, '');
-  // jpeg → jpg
-  const dot = n.lastIndexOf('.');
-  if (dot >= 0) {
-    const ext = n.slice(dot).toLowerCase();
-    if (EXT_FAMILY[ext]) n = n.slice(0, dot) + EXT_FAMILY[ext];
-  }
-  return n;
-}
-
-function stripSegmentTail(seg: string): string {
-  let s = seg;
-  s = s.replace(TAIL_GOOG_RX, '');
-  s = s.replace(TAIL_COLON_RX, '');
-  return s;
-}
-
-function isTransformSegment(seg: string): boolean {
-  if (!seg) return false;
-  if (SEG_BLOGGER_RX.test(seg)) return true;
-  if (SEG_CLOUDINARY_RX.test(seg) && CLOUDINARY_KEYS.test(',' + seg)) return true;
-  if (SEG_SEMANTIC_RX.test(seg)) return true;
-  return false;
-}
-
 export function dedupKey(url: string): string {
-  try {
-    const u = new URL(url);
-    const rawSegs = u.pathname.split('/');
-    const segs: string[] = [];
-    let prevWasSizingKeyword = false;
-    for (let i = 0; i < rawSegs.length; i += 1) {
-      let seg = rawSegs[i];
-      if (i === rawSegs.length - 1 && seg) {
-        seg = stripSegmentTail(seg);
-        seg = normaliseFilename(seg);
-      } else {
-        seg = stripSegmentTail(seg);
-      }
-      if (!seg) {
-        prevWasSizingKeyword = false;
-        continue;
-      }
-      // Drop pure-number segment that follows a sizing keyword (Medium `/max/800/`)
-      if (prevWasSizingKeyword && SEG_NUMERIC_RX.test(seg)) {
-        prevWasSizingKeyword = false;
-        continue;
-      }
-      if (isTransformSegment(seg)) {
-        prevWasSizingKeyword = SEG_SEMANTIC_RX.test(seg);
-        continue;
-      }
-      prevWasSizingKeyword = false;
-      segs.push(seg);
-    }
-    // Collapse trailing duplicated leaf (Wikipedia thumb pattern: `/a/ab/Foo.jpg/Foo.jpg`
-    // — after dropping the `thumb` directory, the original filename appears twice).
-    if (segs.length >= 2 && segs[segs.length - 1] === segs[segs.length - 2]) {
-      segs.pop();
-    }
-    return `${u.host.toLowerCase()}/${segs.join('/')}`;
-  } catch {
-    return url;
-  }
-}
-
-/**
- * Score a candidate variant. Higher = preferred when two URLs collide on
- * dedupKey. We prefer (in order):
- *   - URLs that already carry HEAD-probed metadata (size / mime / poster)
- *   - URLs whose path segments express a larger size hint
- *   - URLs that are NOT obvious thumbnails / small variants
- */
-function variantScore(x: SniffedMedia): number {
-  let s = 0;
-  if (x.sizeBytes && x.sizeBytes > 0) s += 4;
-  if (x.mime) s += 1;
-  if (x.poster) s += 1;
-  try {
-    const u = new URL(x.url);
-    let maxDim = 0;
-    let demote = 0;
-    for (const seg of u.pathname.split('/')) {
-      if (!seg) continue;
-      // Blogger / Photos size segment
-      const m1 = /^(?:s|w|h)(\d{2,5})(?:-(?:w|h)(\d{2,5}))?$/i.exec(seg);
-      if (m1) {
-        const a = Number(m1[1]) || 0;
-        const b = Number(m1[2]) || 0;
-        maxDim = Math.max(maxDim, a, b);
-      }
-      // Cloudinary `w_800`
-      const m2 = /(?:^|,)(?:w|h)_(\d{2,5})/i.exec(seg);
-      if (m2) maxDim = Math.max(maxDim, Number(m2[1]) || 0);
-      // Trailing `=s2048` etc on segment tail
-      const m3 = /=(?:s|w|h)(\d{2,5})/i.exec(seg);
-      if (m3) maxDim = Math.max(maxDim, Number(m3[1]) || 0);
-      // `:large`/`:orig` are "big" hints
-      if (/:(?:large|orig|original)$/i.test(seg)) maxDim = Math.max(maxDim, 1600);
-      if (/:(?:small|thumb|thumbnail)$/i.test(seg)) demote += 2;
-      // semantic size words
-      if (/^(?:thumb|thumbs|thumbnail|thumbnails|small)$/i.test(seg)) demote += 2;
-      if (/^(?:large|original|orig)$/i.test(seg)) maxDim = Math.max(maxDim, 1600);
-      // filename `-1024x768`
-      const m4 = /[-_](\d{2,5})x(\d{0,5})(?=\.[a-z0-9]+$)/i.exec(seg);
-      if (m4) maxDim = Math.max(maxDim, Number(m4[1]) || 0, Number(m4[2]) || 0);
-      // filename `800px-Foo.jpg`
-      const m5 = /^(\d{2,5})px-/i.exec(seg);
-      if (m5) maxDim = Math.max(maxDim, Number(m5[1]) || 0);
-    }
-    if (maxDim > 0) s += Math.min(5, Math.floor(maxDim / 400));
-    s -= Math.min(4, demote);
-  } catch {
-    // ignore
-  }
-  return s;
+  return canonicalMediaDedupKey(url);
 }
 
 function pushUnique(map: Map<string, SniffedMedia>, m: SniffedMedia): void {
@@ -297,7 +111,7 @@ function pushUnique(map: Map<string, SniffedMedia>, m: SniffedMedia): void {
     map.set(key, m);
     return;
   }
-  if (variantScore(m) > variantScore(existing)) {
+  if (mediaVariantScore(m) > mediaVariantScore(existing)) {
     // Keep the original id so renderer references stay stable across repeated sniffs.
     map.set(key, { ...m, id: existing.id });
   }

@@ -8,22 +8,28 @@
 
 ## 1. 双层目标(R-05)
 
-```
-┌──────────── softMaxBytes (默认 2 MB, best target) ────────────┐
-│                                                                │
-│   Phase A 缩到 ≤ maxSide  →  Phase B 二分 lossy                │
-│                                                                │
-└────────────────────────────────────────────────────────────────┘
+![双层目标](./images/compression-1-targets.png)
 
-  若 Phase B 结束仍 > softMaxBytes,继续:
+```mermaid
+flowchart TD
+  Start(["输入：oversized GIF"]) --> A["Phase A: 缩到 maxSide<br/>(长边硬约束)"]
+  A --> B["Phase B: 二分 lossy<br/>(自适应起点)"]
+  B --> Hit1{"≤ softMaxBytes?"}
+  Hit1 -- "是" --> DoneSoft(["✅ 落 best target<br/>'X.XX MB ≤ 2.0MB (best)'"])
+  Hit1 -- "否" --> C["Phase C: 几何缩长边 × 0.85<br/>守 longSideFloor"]
+  C --> Hit2{"≤ softMaxBytes?"}
+  Hit2 -- "是" --> DoneSoft
+  Hit2 -- "否" --> D["Phase D: finalSide + lossy=200"]
+  D --> Hit3{"≤ maxBytes?"}
+  Hit3 -- "是" --> DoneHard(["⚠️ 落 fallback target<br/>'X.XX MB ≤ 4.0MB (fallback)'<br/>R-79 warning toast"])
+  Hit3 -- "否" --> Skip(["❌ skipped<br/>'gif over 4.0MB, marking skipped'<br/>**不输出文件**"])
 
-┌──────────── maxBytes (默认 4 MB, fallback target) ─────────────┐
-│                                                                │
-│   Phase C 几何缩边(longSideFloor 守护)→ Phase D 终极兜底     │
-│                                                                │
-└────────────────────────────────────────────────────────────────┘
-
-  若 Phase D 结束仍 > maxBytes:**标 skipped,不输出**
+  classDef ok fill:#e8f5e9,stroke:#2e7d32;
+  classDef warn fill:#fff3e0,stroke:#e65100;
+  classDef bad fill:#ffebee,stroke:#c62828;
+  class DoneSoft ok;
+  class DoneHard warn;
+  class Skip bad;
 ```
 
 UI 上 `softMaxBytes ≤ maxBytes` 互相 clamp,见 [OptionsForm.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/OptionsForm.tsx)。

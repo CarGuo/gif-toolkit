@@ -27,6 +27,7 @@ import {
   UPLOAD_HISTORY_DDL,
   SNIFF_HISTORY_DDL,
   TOOLBOX_HISTORY_DDL,
+  SESSION_LOGS_DDL,
   HEAD_VERSIONS,
   type TableFamily
 } from './schema';
@@ -43,6 +44,22 @@ const MIGRATORS: Readonly<Record<TableFamily, ReadonlyArray<Migrator>>> = {
     () => undefined,
     (db) => {
       db.exec(HISTORY_DDL);
+    },
+    // R-X v1 → v2: add `session_id` column to existing history table
+    // so already-installed users keep their rows. We use the standard
+    // SQLite "add column if missing" guard via PRAGMA table_info because
+    // ALTER TABLE...ADD COLUMN itself is not idempotent.
+    (db) => {
+      const cols = db
+        .prepare("PRAGMA table_info('history')")
+        .all() as Array<{ name: string }>;
+      const hasSessionId = cols.some((c) => c.name === 'session_id');
+      if (!hasSessionId) {
+        db.exec("ALTER TABLE history ADD COLUMN session_id TEXT");
+      }
+      db.exec(
+        'CREATE INDEX IF NOT EXISTS history_session_idx ON history(session_id)'
+      );
     }
   ],
   upload_history: [
@@ -61,6 +78,12 @@ const MIGRATORS: Readonly<Record<TableFamily, ReadonlyArray<Migrator>>> = {
     () => undefined,
     (db) => {
       db.exec(TOOLBOX_HISTORY_DDL);
+    }
+  ],
+  session_logs: [
+    () => undefined,
+    (db) => {
+      db.exec(SESSION_LOGS_DDL);
     }
   ]
 };
@@ -92,7 +115,8 @@ export function runMigrations(db: Database.Database): void {
     'history',
     'upload_history',
     'sniff_history',
-    'toolbox_history'
+    'toolbox_history',
+    'session_logs'
   ];
   for (const family of families) {
     const head = HEAD_VERSIONS[family];

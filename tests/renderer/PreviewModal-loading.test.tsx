@@ -34,7 +34,9 @@ describe('PreviewModal media-loading overlay (R-25 #1)', () => {
     render(
       <PreviewModal
         media={mkVideo()}
-        options={{ ...DEFAULT_OPTIONS }}
+        baseOptions={{ ...DEFAULT_OPTIONS }}
+        previewOverride={{}}
+        onChangeOverride={() => undefined}
         onChangeOptions={() => undefined}
         onRequestPreview={() => undefined}
         previewing={false}
@@ -53,7 +55,9 @@ describe('PreviewModal media-loading overlay (R-25 #1)', () => {
     render(
       <PreviewModal
         media={mkVideo()}
-        options={{ ...DEFAULT_OPTIONS }}
+        baseOptions={{ ...DEFAULT_OPTIONS }}
+        previewOverride={{}}
+        onChangeOverride={() => undefined}
         onChangeOptions={() => undefined}
         onRequestPreview={() => undefined}
         previewing={false}

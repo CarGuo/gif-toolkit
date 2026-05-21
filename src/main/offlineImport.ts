@@ -42,6 +42,7 @@ import type { SniffResult, SniffedMedia, MediaKind, SniffProgress } from '../sha
 import { classifyByExt as _classifyByExt } from '../shared/mediaKind';
 import { log } from './logger';
 import { matchEmbedProvider } from './sniffer';
+import { probe } from './ffmpeg';
 
 /**
  * R-56 — Convert an absolute on-disk path into the renderer-displayable
@@ -446,8 +447,19 @@ function collectFromDom(
  * Single-file path: emit one synthesised SniffedMedia and call it a
  * day. We still wrap it in a SniffResult so the renderer doesn't need
  * a separate code path.
+ *
+ * R-68 — For video / gif inputs we also probe duration + width/height
+ * via ffprobe so the renderer's long-video segment picker (which keys
+ * off `resolved.durationSec ?? media.durationSec`) actually fires.
+ * Pre-R-68 the offline single-file path always returned `durationSec`
+ * undefined, so a 60-second mp4 dragged into the URL bar would skip
+ * the BatchSegmentModal entirely and burn the whole clip — surprising
+ * users who picked the file precisely because it was too long for a
+ * single-shot conversion. ffprobe is forgiving (it's the same binary
+ * the processor uses on every job) and we degrade silently if it
+ * errors so static images / odd containers still surface as a row.
  */
-function importSingleMediaFile(absPath: string): SniffResult {
+async function importSingleMediaFile(absPath: string): Promise<SniffResult> {
   const kind = classifyByExt(absPath);
   if (!kind) {
     throw new Error(`不支持的离线媒体扩展名: ${path.extname(absPath)}`);
@@ -455,11 +467,29 @@ function importSingleMediaFile(absPath: string): SniffResult {
   const url = pathToGiftkLocalURL(absPath);
   let sizeBytes: number | undefined;
   try { sizeBytes = fs.statSync(absPath).size; } catch { /* ignore */ }
+  let durationSec: number | undefined;
+  let width: number | undefined;
+  let height: number | undefined;
+  if (kind === 'video' || kind === 'gif') {
+    try {
+      const info = await probe(absPath);
+      if (info.durationSec > 0) durationSec = info.durationSec;
+      if (info.width > 0) width = info.width;
+      if (info.height > 0) height = info.height;
+    } catch (e) {
+      // Probe failure is non-fatal: the renderer falls back to its
+      // existing "no duration metadata" path (= no segment picker).
+      log(`offline single-file probe skipped: ${(e as Error).message}`);
+    }
+  }
   const item: SniffedMedia = {
     id: shortId(url),
     url,
     kind,
     sizeBytes,
+    durationSec,
+    width,
+    height,
     source: kind === 'image' || kind === 'gif' ? 'img-tag' : 'video-tag',
     pageUrl: url
   };
@@ -817,7 +847,7 @@ export async function importOfflinePath(
     r = importHtmlFile(absPath, opts);
   } else if (classifyByExt(absPath)) {
     opts.onProgress?.({ stage: 'parsing', percent: 60, message: '识别为单一媒体文件,直接合成结果…' });
-    r = importSingleMediaFile(absPath);
+    r = await importSingleMediaFile(absPath);
   } else {
     throw new Error(`不支持的离线导入类型: ${ext || '(无扩展名)'}`);
   }

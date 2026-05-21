@@ -284,6 +284,21 @@ describe('TaskTable manual-optimize button (R-33)', () => {
     expect(cb).toHaveBeenCalledTimes(1);
     expect(cb).toHaveBeenCalledWith(m, expect.objectContaining({ warning: 'exceeds hard target' }));
   });
+
+  // R-69 — multi-segment video 路径的 warning 是 "seg N final X.XXMB exceeds Y.YMB target",
+  // 之前的 predicate 只识别 "exceeds hard target" / "did not reach soft target", 导致
+  // 用户跑超长视频被切多段时即便产物超标也看不到手动优化按钮. SUITE M 暴露了这个
+  // bug, 修复后这条 case 锁住回归. 见 src/main/processor.ts L1780.
+  it('renders 手动优化 on done rows whose warning is the multi-segment over-target form', () => {
+    const items = [mkMedia('a'), mkMedia('b'), mkMedia('c')];
+    const progress = {
+      a: mkProgress('a', 'done', { warning: 'seg 1 final 0.79MB exceeds 0.1MB target' }),
+      b: mkProgress('b', 'done', { warning: 'seg 2 final 0.28MB exceeds 0.1MB target; seg 1 final 0.27MB exceeds 0.1MB target; seg 3 final 0.26MB exceeds 0.1MB target' }),
+      c: mkProgress('c', 'done', { warning: 'segments produced (3)' })  // 不匹配该模式 → 不渲染
+    };
+    render(<TaskTable items={items} progress={progress} onManualOptimize={vi.fn()} />);
+    expect(screen.getAllByRole('button', { name: /手动优化/ })).toHaveLength(2);
+  });
 });
 
 // R-43.2 — per-row cancel button. Visible only while the task is in a

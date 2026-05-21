@@ -62,6 +62,15 @@ export interface SniffResult {
    * call sites that emit only `warnings` continue to work unchanged.
    */
   infoNotices?: string[];
+  /**
+   * Per-session operation log id. Set by every sniff IPC handler so
+   * the renderer can pin the resulting [HistoryRecord](../../renderer/components/useHistory.ts)
+   * to the same id and later replay the full sniff → process →
+   * upload trail via [sessionLogger](../../main/sessionLogger.ts).
+   * Optional purely for back-compat with offline fixtures and tests
+   * that build SniffResult by hand.
+   */
+  sessionId?: string;
 }
 
 export type SniffStage =

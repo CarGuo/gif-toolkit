@@ -46,10 +46,15 @@ CREATE TABLE IF NOT EXISTS history (
   options_json TEXT NOT NULL,
   outputs_json TEXT NOT NULL DEFAULT '{}',
   status_json TEXT NOT NULL DEFAULT '{}',
-  uploads_json TEXT NOT NULL DEFAULT '{}'
+  uploads_json TEXT NOT NULL DEFAULT '{}',
+  /* R-X — link to session_logs.session_id so the history detail
+     panel can pull the full sniff→process→upload session log.
+     Nullable so legacy rows imported pre-R-X stay valid. */
+  session_id TEXT
 );
 CREATE INDEX IF NOT EXISTS history_created_idx ON history(created_at DESC);
 CREATE INDEX IF NOT EXISTS history_page_url_idx ON history(page_url);
+CREATE INDEX IF NOT EXISTS history_session_idx ON history(session_id);
 ` as const;
 
 export const UPLOAD_HISTORY_DDL = `
@@ -105,6 +110,49 @@ CREATE INDEX IF NOT EXISTS toolbox_history_finished_idx ON toolbox_history(finis
 ` as const;
 
 /**
+ * Per-session operation log family. Two tables:
+ *
+ *   - `session_logs`        — one row per session (sniff round / batch /
+ *                             upload). Carries open / close meta so the
+ *                             history detail panel can render an
+ *                             "outcome" label without scanning entries.
+ *   - `session_log_entries` — append-only buffer of every event inside
+ *                             the session. ON DELETE CASCADE means
+ *                             clearing a session also clears its
+ *                             entries — convenient for the wipe-history
+ *                             button.
+ *
+ * Both tables are indexed on `session_id` so the renderer can pull a
+ * full snapshot in a single SELECT, ordered by `seq` for replay
+ * stability across tight bursts (Date.now() can repeat).
+ */
+export const SESSION_LOGS_DDL = `
+CREATE TABLE IF NOT EXISTS session_logs (
+  session_id TEXT PRIMARY KEY,
+  opened_at INTEGER NOT NULL,
+  closed_at INTEGER,
+  page_url TEXT NOT NULL DEFAULT '',
+  title TEXT,
+  origin TEXT,
+  outcome TEXT
+);
+CREATE INDEX IF NOT EXISTS session_logs_opened_idx ON session_logs(opened_at DESC);
+
+CREATE TABLE IF NOT EXISTS session_log_entries (
+  session_id TEXT NOT NULL REFERENCES session_logs(session_id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL,
+  ts INTEGER NOT NULL,
+  level TEXT NOT NULL,
+  stage TEXT NOT NULL,
+  substep TEXT,
+  message TEXT NOT NULL,
+  data_json TEXT,
+  PRIMARY KEY (session_id, seq)
+);
+CREATE INDEX IF NOT EXISTS session_log_entries_session_idx ON session_log_entries(session_id, seq);
+` as const;
+
+/**
  * Logical "table family" key used in `schema_meta(k, v)`. Each family
  * owns its own version counter and migration chain — that way adding
  * a column to `toolbox_history` doesn't force a bump on the much
@@ -114,13 +162,15 @@ export type TableFamily =
   | 'history'
   | 'upload_history'
   | 'sniff_history'
-  | 'toolbox_history';
+  | 'toolbox_history'
+  | 'session_logs';
 
 /** Current head version per family. Bump and append a migrator in
  *  migrations.ts when changing the schema. */
 export const HEAD_VERSIONS: Readonly<Record<TableFamily, number>> = {
-  history: 1,
+  history: 2,
   upload_history: 1,
   sniff_history: 1,
-  toolbox_history: 1
+  toolbox_history: 1,
+  session_logs: 1
 };

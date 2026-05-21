@@ -44,6 +44,11 @@ export interface HistoryRow {
   outputsByTaskId: Record<string, unknown>;
   taskStatus: Record<string, unknown>;
   uploadsByOutputPath?: Record<string, unknown>;
+  /** R-X — pin the row to a session_logs.session_id so the history
+   *  detail panel can pull the full sniff→process→upload log.
+   *  Optional because (a) legacy rows imported before R-X have NULL,
+   *  (b) renderer may not have a sessionId for some toolbox-only paths. */
+  sessionId?: string;
 }
 
 interface DbRow {
@@ -57,6 +62,7 @@ interface DbRow {
   outputs_json: string;
   status_json: string;
   uploads_json: string;
+  session_id: string | null;
 }
 
 function parseJsonOrDefault<T>(s: string | null | undefined, fallback: T): T {
@@ -95,6 +101,7 @@ function rowToRecord(r: DbRow): HistoryRow | null {
     };
     if (r.title) rec.title = r.title;
     if (r.output_dir) rec.outputDir = r.output_dir;
+    if (r.session_id) rec.sessionId = r.session_id;
     const uploads = parseJsonOrDefault<Record<string, unknown> | null>(
       r.uploads_json,
       null
@@ -118,11 +125,11 @@ export interface HistoryRepo {
 
 export function createHistoryRepo(db: Database.Database): HistoryRepo {
   const selectAll = db.prepare<[], DbRow>(
-    'SELECT id, created_at, page_url, title, output_dir, items_json, options_json, outputs_json, status_json, uploads_json FROM history ORDER BY created_at DESC'
+    'SELECT id, created_at, page_url, title, output_dir, items_json, options_json, outputs_json, status_json, uploads_json, session_id FROM history ORDER BY created_at DESC'
   );
   const upsertStmt = db.prepare(
-    `INSERT INTO history (id, created_at, page_url, title, output_dir, items_json, options_json, outputs_json, status_json, uploads_json)
-     VALUES (@id, @created_at, @page_url, @title, @output_dir, @items_json, @options_json, @outputs_json, @status_json, @uploads_json)
+    `INSERT INTO history (id, created_at, page_url, title, output_dir, items_json, options_json, outputs_json, status_json, uploads_json, session_id)
+     VALUES (@id, @created_at, @page_url, @title, @output_dir, @items_json, @options_json, @outputs_json, @status_json, @uploads_json, @session_id)
      ON CONFLICT(id) DO UPDATE SET
        created_at = excluded.created_at,
        page_url = excluded.page_url,
@@ -132,11 +139,12 @@ export function createHistoryRepo(db: Database.Database): HistoryRepo {
        options_json = excluded.options_json,
        outputs_json = excluded.outputs_json,
        status_json = excluded.status_json,
-       uploads_json = excluded.uploads_json`
+       uploads_json = excluded.uploads_json,
+       session_id = excluded.session_id`
   );
   const insertIgnoreStmt = db.prepare(
-    `INSERT OR IGNORE INTO history (id, created_at, page_url, title, output_dir, items_json, options_json, outputs_json, status_json, uploads_json)
-     VALUES (@id, @created_at, @page_url, @title, @output_dir, @items_json, @options_json, @outputs_json, @status_json, @uploads_json)`
+    `INSERT OR IGNORE INTO history (id, created_at, page_url, title, output_dir, items_json, options_json, outputs_json, status_json, uploads_json, session_id)
+     VALUES (@id, @created_at, @page_url, @title, @output_dir, @items_json, @options_json, @outputs_json, @status_json, @uploads_json, @session_id)`
   );
   const removeStmt = db.prepare('DELETE FROM history WHERE id = ?');
   const clearStmt = db.prepare('DELETE FROM history');
@@ -152,7 +160,8 @@ export function createHistoryRepo(db: Database.Database): HistoryRepo {
       options_json: JSON.stringify(rec.options ?? {}),
       outputs_json: JSON.stringify(rec.outputsByTaskId ?? {}),
       status_json: JSON.stringify(rec.taskStatus ?? {}),
-      uploads_json: JSON.stringify(rec.uploadsByOutputPath ?? {})
+      uploads_json: JSON.stringify(rec.uploadsByOutputPath ?? {}),
+      session_id: rec.sessionId ?? null
     };
   }
 

@@ -47,6 +47,7 @@ import {
   WEBVIEW_MAX_ITEMS as MAX_ITEMS,
   mediaId
 } from './webviewSniffUtils';
+import { mediaVariantScore } from './mediaDedup';
 import { DOM_SCAN_SCRIPT } from './webviewSniff';
 import {
   getCandidatePaths,
@@ -433,8 +434,10 @@ export async function sniffViaSystemChrome(
       const accepted = acceptWebviewMedia(null, cand.mime, cand.url);
       if (!accepted) return;
       const key = webviewDedupKey(cand.url);
-      if (captured.has(key)) return;
-      captured.set(key, { url: cand.url, kind: accepted, mime: cand.mime ?? undefined });
+      const next = { url: cand.url, kind: accepted, mime: cand.mime ?? undefined };
+      const existing = captured.get(key);
+      if (existing && mediaVariantScore(next) <= mediaVariantScore(existing)) return;
+      captured.set(key, next);
     };
 
     // R-60 — auto-attach to all child targets (cross-origin iframes,

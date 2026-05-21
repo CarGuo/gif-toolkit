@@ -115,6 +115,13 @@ export interface HistoryRecord {
    * tolerates that by defaulting to `{}`.
    */
   uploadsByOutputPath?: Record<string, UploadRefForHistory>;
+  /**
+   * Session log id minted by the main process when the originating
+   * sniff started. Threaded through every downstream stage (process
+   * batch, upload batch) so the user can open one cohesive log per
+   * history record. Pre-existing records simply lack the field.
+   */
+  sessionId?: string;
 }
 
 function genId(): string {
@@ -159,7 +166,8 @@ function parseRecord(e: unknown): HistoryRecord | null {
     uploadsByOutputPath:
       r.uploadsByOutputPath && typeof r.uploadsByOutputPath === 'object'
         ? (r.uploadsByOutputPath as Record<string, UploadRefForHistory>)
-        : undefined
+        : undefined,
+    sessionId: typeof r.sessionId === 'string' && r.sessionId ? r.sessionId : undefined
   };
 }
 
@@ -485,6 +493,9 @@ export function makeHistoryRecord(args: {
    *  it default. */
   id?: string;
   createdAt?: number;
+  /** Session log id minted at sniff time so the entire flow's logs
+   *  are persisted under the same key. */
+  sessionId?: string;
 }): HistoryRecord {
   return {
     id: args.id || genId(),
@@ -495,7 +506,8 @@ export function makeHistoryRecord(args: {
     options: args.options,
     outputDir: args.outputDir,
     outputsByTaskId: {},
-    taskStatus: {}
+    taskStatus: {},
+    sessionId: args.sessionId
   };
 }
 

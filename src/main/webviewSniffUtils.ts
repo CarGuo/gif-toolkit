@@ -6,16 +6,14 @@
  * `ipcMain` are not available under vitest's Node host).
  *
  * NOTE: this module deliberately does not import `sniffer.ts` (which
- * transitively imports `headlessFetch.ts` -> `electron`); we use a
- * lightweight dedup key here that covers the cases webview-captured
- * URLs hit in practice (host + pathname, lower-cased, query stripped).
- * The fancier path-segment normaliser in `sniffer.ts:dedupKey()` is
- * tuned for HTML scrape variants (Wikipedia thumbs, Cloudinary
- * transforms, ...) which the network/DOM observer here does not see.
+ * transitively imports `headlessFetch.ts` -> `electron`). Instead it
+ * imports the pure mediaDedup helper so webview / real-Chrome / static
+ * HTML sniff paths share the same host-agnostic transform canonicaliser.
  */
 import crypto from 'crypto';
 import type { SniffedMedia, MediaKind } from '../shared/types';
 import { acceptSniffedKind, classifyByContentType } from '../shared/mediaKind';
+import { canonicalMediaDedupKey, mediaVariantScore } from './mediaDedup';
 
 const VIDEO_MIME = /^video\//i;
 // Note: GIF_MIME / IMAGE_MIME used to be referenced by the local
@@ -279,30 +277,23 @@ export function mediaId(input: string): string {
 }
 
 /**
- * Lightweight dedup key: lower-case host + pathname, query/hash stripped.
- * Matches the level of variation a real-time network observer is likely
- * to see (CDN cache-busting tokens, tracking params, fragment IDs); it
- * intentionally does NOT try to canonicalise sizing variants — those
- * come from HTML scrape paths and are handled by `sniffer.ts:dedupKey`.
+ * Shared dedup key for webview / real-Chrome captures. It strips generic
+ * presentation transforms (resize / format / quality / cache signatures)
+ * without relying on host-specific branches.
  */
 export function webviewDedupKey(url: string): string {
-  try {
-    const u = new URL(url);
-    return `${u.host.toLowerCase()}${u.pathname.toLowerCase()}`;
-  } catch {
-    return url;
-  }
+  return canonicalMediaDedupKey(url);
 }
 
 /**
  * Merge raw URLs collected from the webview with the running map of
- * SniffedMedia, applying our lightweight dedup so a user toggling between
+ * SniffedMedia, applying our shared dedup so a user toggling between
  * `sniff:url` and `sniff:webview` does not see ghost duplicates in the
  * grid.
  *
  * - Stops accepting new entries once `map.size >= WEBVIEW_MAX_ITEMS`.
- * - First-write-wins on dedup: webRequest captures (called first by the
- *   caller) take priority over later DOM-scan entries.
+ * - On dedup, keeps the better-looking variant while preserving the
+ *   original id so renderer selection state stays stable.
  */
 export function mergeWebviewMedia(
   map: Map<string, SniffedMedia>,
@@ -311,7 +302,6 @@ export function mergeWebviewMedia(
   for (const c of candidates) {
     if (map.size >= WEBVIEW_MAX_ITEMS) break;
     const key = webviewDedupKey(c.url);
-    if (map.has(key)) continue;
     const m: SniffedMedia = {
       id: mediaId(c.url),
       url: c.url,
@@ -320,6 +310,13 @@ export function mergeWebviewMedia(
       source: 'webview',
       mime: c.mime
     };
+    const existing = map.get(key);
+    if (existing) {
+      if (mediaVariantScore(m) > mediaVariantScore(existing)) {
+        map.set(key, { ...m, id: existing.id });
+      }
+      continue;
+    }
     map.set(key, m);
   }
 }

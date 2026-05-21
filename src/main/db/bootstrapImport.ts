@@ -145,6 +145,8 @@ function coerceHistory(arr: unknown[]): HistoryRow[] {
     if (outputDir) rec.outputDir = outputDir;
     const uploads = asObject(obj.uploadsByOutputPath);
     if (uploads) rec.uploadsByOutputPath = uploads;
+    const sessionId = asString(obj.sessionId);
+    if (sessionId) rec.sessionId = sessionId;
     out.push(rec);
   }
   return out;

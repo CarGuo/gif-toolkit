@@ -18,7 +18,10 @@ import type {
   UploadStartPayload,
   UploadStartResult,
   UploadTestResult,
-  CapabilityReport
+  CapabilityReport,
+  SessionLogEntry,
+  SessionLogSnapshot,
+  SessionLogExportFormat
 } from '../shared/types';
 import type { BuildInfo } from '../shared/buildInfo';
 
@@ -136,13 +139,15 @@ const api = {
   async startBatch(
     tasks: ProcessTask[],
     pageTitle?: string,
-    outputDirOverride?: string
+    outputDirOverride?: string,
+    sessionId?: string
   ): Promise<BatchStartResult> {
     if (!Array.isArray(tasks)) throw new TypeError('tasks must be array');
     return ipcRenderer.invoke('process:start', {
       tasks,
       pageTitle,
-      outputDirOverride
+      outputDirOverride,
+      sessionId
     });
   },
   async cancelAll(): Promise<void> {
@@ -317,6 +322,41 @@ const api = {
   },
 
   /**
+   * Subscribe to session log lifecycle + entry broadcasts. The main
+   * process opens a session, streams `append` events for every log
+   * line (sniff/process/upload stages), and finally fires `close`
+   * with a terminal summary. The renderer uses these to drive a
+   * live "Logs" tab without having to poll the DB.
+   *
+   * Returns an unsubscribe function that detaches all three IPC
+   * listeners; safe to call multiple times.
+   */
+  onSessionLog(cb: (
+    ev:
+      | { kind: 'open'; snapshot: Omit<SessionLogSnapshot, 'entries'> }
+      | { kind: 'append'; entry: SessionLogEntry }
+      | { kind: 'close'; snapshot: Omit<SessionLogSnapshot, 'entries'> }
+  ) => void): () => void {
+    const onOpen = (_: unknown, snapshot: Omit<SessionLogSnapshot, 'entries'>): void => {
+      try { cb({ kind: 'open', snapshot }); } catch { /* swallow */ }
+    };
+    const onAppend = (_: unknown, entry: SessionLogEntry): void => {
+      try { cb({ kind: 'append', entry }); } catch { /* swallow */ }
+    };
+    const onClose = (_: unknown, snapshot: Omit<SessionLogSnapshot, 'entries'>): void => {
+      try { cb({ kind: 'close', snapshot }); } catch { /* swallow */ }
+    };
+    ipcRenderer.on('session:log:open', onOpen);
+    ipcRenderer.on('session:log:append', onAppend);
+    ipcRenderer.on('session:log:close', onClose);
+    return () => {
+      ipcRenderer.removeListener('session:log:open', onOpen);
+      ipcRenderer.removeListener('session:log:append', onAppend);
+      ipcRenderer.removeListener('session:log:close', onClose);
+    };
+  },
+
+  /**
    * R-80 — SQLite-backed history. Each sub-namespace mirrors one of
    * the four `useXxxHistory` hooks 1:1. The renderer keeps the same
    * record types it had under localStorage; the main process is just
@@ -380,6 +420,42 @@ const api = {
       },
       clear(): Promise<void> {
         return ipcRenderer.invoke('db:toolboxHistory:clear');
+      }
+    },
+    /**
+     * Session-scoped operation logs (sniff → process → upload).
+     * `list` returns lightweight session metadata (no entries) for the
+     * picker; `read` pulls one full snapshot (meta + every entry) the
+     * UI then renders or hands to the export dialog. Both `remove` and
+     * `clear` are destructive — the renderer is expected to confirm
+     * with the user first.
+     */
+    sessionLogs: {
+      list(): Promise<Array<Omit<SessionLogSnapshot, 'entries'>>> {
+        return ipcRenderer.invoke('db:sessionLogs:list');
+      },
+      read(sessionId: string): Promise<SessionLogSnapshot | null> {
+        return ipcRenderer.invoke('db:sessionLogs:read', ensureString(sessionId, 'sessionId'));
+      },
+      remove(sessionId: string): Promise<void> {
+        return ipcRenderer.invoke('db:sessionLogs:remove', ensureString(sessionId, 'sessionId'));
+      },
+      clear(): Promise<void> {
+        return ipcRenderer.invoke('db:sessionLogs:clear');
+      },
+      /**
+       * Export one session's log to disk via a native save-dialog.
+       * `format` picks .log (per-line text) vs .json (structured).
+       * Returns `{ ok:false, cancelled:true }` if the user dismissed
+       * the dialog; `{ ok:true, path }` on success.
+       */
+      export(payload: {
+        sessionId: string;
+        format: SessionLogExportFormat;
+        suggestedName?: string;
+      }): Promise<{ ok: boolean; cancelled?: boolean; path?: string }> {
+        ensureObject(payload, 'payload');
+        return ipcRenderer.invoke('db:sessionLogs:export', payload);
       }
     },
     /**

@@ -62,15 +62,14 @@ import { ProgressDock } from './ProgressDock';
 import { PreviewModal } from './PreviewModal';
 import type { HistoryRecord } from './useHistory';
 import { backendLabel } from './useUploadHistory';
+import { useSessionLogs } from './useSessionLogs';
+import type { SessionLogEntry } from '../../shared/types';
 
 const giftk = (typeof window !== 'undefined' ? window.giftk : undefined);
 
-// R-79b — separate localStorage key from the home view's
-// `giftk.logsVisible` so the two preferences can be remembered
-// independently. The history detail panel is a transient modal where
-// the user usually only wants logs on demand, while the home view's
-// preference is more "always on / always off".
-const HIST_DETAIL_LOGS_VISIBLE_KEY = 'giftk.histDetailLogsVisible';
+// R-X — `HIST_DETAIL_LOGS_VISIBLE_KEY` (the persisted in-memory log
+// toggle) was retired together with the duplicate dock log button.
+// SessionLogPanel pop-up is now the only log surface in this modal.
 
 export interface HistoryDetailModalProps {
   rec: HistoryRecord;
@@ -97,9 +96,13 @@ export interface HistoryDetailModalProps {
   onOpenOutputDir: (dir: string) => void;
   /** Close the modal without aborting in-flight work. */
   onClose: () => void;
-  /** Optional log lines to surface — App passes its global logs and we
-   *  filter to lines that mention this record id when available. */
-  logs: string[];
+  /** R-X — Deprecated: previously surfaced as a filtered LogStream
+   *  inside a dock toggle. Now ignored — the history detail uses
+   *  SessionLogPanel (DB-backed session_log_entries) as its only log
+   *  surface. Kept in the prop shape so existing callers in App.tsx
+   *  compile without an immediate refactor. Safe to delete once all
+   *  call sites stop passing it. */
+  logs?: string[];
   /** R-29 (P0-C): live taskId → owning record id map. The modal uses
    *  this to confirm that a progress entry for `media.id` actually
    *  belongs to *this* record before rendering it, so a same-id task
@@ -134,7 +137,10 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
   onCancel,
   onOpenOutputDir,
   onClose,
-  logs,
+  // R-X — `logs` accepted in the prop shape but intentionally not
+  // destructured: the history detail no longer renders an in-memory
+  // LogStream view. Removing the binding keeps lint quiet about an
+  // unused parameter while preserving the prop for existing callers.
   taskRecordMap,
   onUploadFromRecord,
   isUploadConfigured = false
@@ -164,27 +170,14 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
   });
   const [activeId, setActiveId] = useState<string | null>(null);
 
-  // R-79b — collapsible log strip. Default *collapsed* so the modal
-  // body can give all 220-260px of bottom space to the TaskTable +
-  // UploadsSection (which the user actually wants to see). Persists
-  // the user's choice independently from the home view's logsVisible.
-  const [logsVisible, setLogsVisible] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return false;
-    try {
-      return window.localStorage.getItem(HIST_DETAIL_LOGS_VISIBLE_KEY) === '1';
-    } catch {
-      return false;
-    }
-  });
-  const toggleLogs = useCallback(() => {
-    setLogsVisible((prev) => {
-      const next = !prev;
-      try {
-        window.localStorage.setItem(HIST_DETAIL_LOGS_VISIBLE_KEY, next ? '1' : '0');
-      } catch { /* ignore */ }
-      return next;
-    });
-  }, []);
+  // R-X — In-memory LogStream toggle (the home view's "📋 日志 ▸"
+  // overlay) is intentionally NOT exposed here. The history detail
+  // already owns a richer log channel via SessionLogPanel pulling
+  // from session_log_entries in the DB, so a second toggle would
+  // either show a duplicate or — when the in-memory buffer is empty
+  // (which it usually is once the modal opens after the run) — open
+  // an empty overlay and look broken. The R-79b state and persisted
+  // `giftk.histDetail.logsVisible` key were removed with that toggle.
 
   // R-29 (P0-D): the embedded PreviewModal needs its own copy of the
   // options so per-item tweaks (cropRect, startSec/endSec, etc.) made
@@ -310,20 +303,10 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
     return out;
   }, [rec.items, rec.taskStatus, recordProgress]);
 
-  // Filter the global log buffer down to lines plausibly related to
-  // this record. We tag log entries from `onReprocessFromHistory`
-  // with the record id so a substring match is enough; everything
-  // else (resolve / sniff / generic batch) is kept too because it
-  // gives the user useful context (e.g. "yt-dlp 解析中…").
-  const recordLogs = useMemo<string[]>(() => {
-    const recIdMarker = `record ${rec.id}`;
-    return logs.filter((line) =>
-      line.includes(recIdMarker) ||
-      line.includes('[history]') ||
-      line.includes('[busy]') ||
-      line.includes('[error]')
-    );
-  }, [logs, rec.id]);
+  // R-X — `recordLogs` (filtered slice of the home view's in-memory
+  // LogStream) was removed along with the duplicate "📋 日志 ▸" dock
+  // toggle. The history detail's only log surface is now the
+  // SessionLogPanel which queries session_log_entries directly.
 
   // Live items for MediaGrid — re-derive `resolved` from the
   // snapshotted record, since these don't go through resolveEmbed
@@ -392,14 +375,14 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
         <div className="modal-body" style={{ overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
           <div className="layout" style={{ flex: 1, minHeight: 0 }}>
             <div className="left">
-              {/* R-83 — left column: scrollable cards on top, shared
-                  <ProgressDock /> at the bottom (replacing the old
-                  .hist-detail-bottom strip that lived under the layout).
-                  Mirrors the home view layout so the modal feels like
-                  the home page rather than a separate dialect. */}
+              {/* R-X — Mirror the home view layout: left column is a
+                  pure control panel (source + options) that scrolls
+                  as one column. ProgressDock + session log were moved
+                  to the bottom of the right column so the geometry
+                  matches what users see on the home page. */}
               <div className="hist-detail-modal-cards">
               <div className="card">
-                <h2>1. 来源</h2>
+                <h2>来源</h2>
                 <div style={{ fontSize: 12, color: 'var(--muted)', wordBreak: 'break-all' }}>
                   {rec.pageUrl}
                 </div>
@@ -410,7 +393,7 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
               </div>
 
               <div className="card">
-                <h2>2. 处理参数</h2>
+                <h2>处理参数</h2>
                 <OptionsForm value={options} onChange={setOptions} />
                 <div style={{ display: 'flex', gap: 8, marginTop: 12, alignItems: 'center', flexWrap: 'wrap' }}>
                   <button
@@ -428,23 +411,6 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
                 </div>
               </div>
               </div>
-              <ProgressDock
-                title="处理进度"
-                items={items}
-                progress={recordProgress}
-                onRetry={(m) => onProcessOneFromRecord(rec, m)}
-                onForceAllow={(m) => onProcessOneFromRecord(rec, m)}
-                logs={recordLogs}
-                logsVisible={logsVisible}
-                onToggleLogs={toggleLogs}
-                uploadsSlot={
-                  <UploadsSection
-                    rec={rec}
-                    onUpload={onUploadFromRecord}
-                    uploadConfigured={isUploadConfigured}
-                  />
-                }
-              />
             </div>
 
             <div className="right">
@@ -468,6 +434,46 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
                   />
                 </div>
               </div>
+              {/* R-X — ProgressDock + session log moved out of the left
+                  column so the modal mirrors the home page geometry
+                  (media grid on top, dock pinned at the bottom of the
+                  right column). The session log entry is folded into
+                  the dock toolbar via `headerExtras` so we don't grow
+                  a third visual stripe under the dock — keeps the
+                  layout flat and identical to home.
+
+                  R-X — Do NOT pass `logs / logsVisible / onToggleLogs`
+                  here. Those props would make ProgressDock auto-render
+                  its own home-style "📋 日志 ▸" toggle on the right
+                  side of the toolbar, in addition to our session log
+                  button injected via headerExtras. The home overlay is
+                  fed by an in-memory string buffer that the history
+                  detail does not maintain (its log channel is the
+                  session_log_entries table, queried by SessionLogPanel)
+                  so the home toggle would just open an empty overlay
+                  and look broken. One entry only: 📋 查看日志 (N). */}
+              <ProgressDock
+                title="处理进度"
+                items={items}
+                progress={recordProgress}
+                onRetry={(m) => onProcessOneFromRecord(rec, m)}
+                onForceAllow={(m) => onProcessOneFromRecord(rec, m)}
+                headerExtras={
+                  rec.sessionId ? (
+                    <SessionLogPanel
+                      sessionId={rec.sessionId}
+                      suggestedName={rec.title || rec.pageUrl || `session-${rec.sessionId}`}
+                    />
+                  ) : null
+                }
+                uploadsSlot={
+                  <UploadsSection
+                    rec={rec}
+                    onUpload={onUploadFromRecord}
+                    uploadConfigured={isUploadConfigured}
+                  />
+                }
+              />
             </div>
           </div>
         </div>
@@ -476,7 +482,39 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
       {activeMedia ? (
         <PreviewModal
           media={activeMedia}
-          options={previewOptions ?? options}
+          baseOptions={previewOptions ?? options}
+          // P1.2 — HistoryDetailModal already isolates the WHOLE ProcessOptions
+          // into `previewOptions`. To match PreviewModal's new contract we feed
+          // crop / start / end edits through a synthetic override that simply
+          // patches the same local copy. The home-page global options stay
+          // untouched (HistoryDetailModal never had write access to them).
+          previewOverride={{
+            cropRect: (previewOptions ?? options).cropRect,
+            startSec: (previewOptions ?? options).startSec,
+            endSec: (previewOptions ?? options).endSec,
+            // R-22 — surface selectedSegments from the local preview copy so
+            // the SegmentPicker chips reflect any pick the user already made
+            // for the active media in this session.
+            selectedSegments: (previewOptions ?? options).selectedSegments
+          }}
+          onChangeOverride={(next) => {
+            setPreviewOptions((cur) => {
+              const base = cur ?? { ...options };
+              return {
+                ...base,
+                cropRect: next.cropRect,
+                startSec: next.startSec,
+                endSec: next.endSec,
+                // R-22 — `undefined` means "no explicit pick": for short
+                // videos this leaves the option absent, for long videos
+                // the processor falls back to its own default. We
+                // intentionally write the value verbatim rather than
+                // collapsing empty arrays — PreviewModal already maps
+                // empty selections to undefined before calling us.
+                selectedSegments: next.selectedSegments
+              };
+            });
+          }}
           onChangeOptions={(updater) => {
             // R-29 (P0-D): write to the local preview copy ONLY.
             // Edits stay scoped to the preview session and never
@@ -708,5 +746,225 @@ const UploadsSection: React.FC<{
         })}
       </div>
     </div>
+  );
+};
+
+/**
+ * Session log panel — expandable card embedded in HistoryDetailModal.
+ *
+ * Renders the per-session operation trail (sniff → process → upload)
+ * pulled from the SQLite-backed `session_logs` family. The panel is
+ * passive (no mutation IPC of its own beyond export); the user can:
+ *   - 折叠 / 展开 the body to free vertical space.
+ *   - 导出 .log (per-line text) or .json (structured array) via a
+ *     native save dialog. The file is materialised inside the main
+ *     process; renderer only flips state on success.
+ *
+ * Empty state: when `sessionId` is missing (legacy records pre-log
+ * feature) we don't render the panel at all — there's nothing to
+ * show. The parent HistoryDetailModal already conditionalises on
+ * `rec.sessionId` so the JSX simply skips over us.
+ */
+const LEVEL_COLORS: Record<SessionLogEntry['level'], string> = {
+  debug: 'var(--muted)',
+  info: 'var(--text)',
+  warn: '#d39c1f',
+  error: '#d34b4b'
+};
+
+interface SessionLogPanelProps {
+  sessionId: string;
+  /** Suggested filename base (page title or url). Falls back to sid. */
+  suggestedName?: string;
+}
+
+const SessionLogPanel: React.FC<SessionLogPanelProps> = ({ sessionId, suggestedName }) => {
+  const { snapshot, loading, error, reload, exportLog } = useSessionLogs(sessionId);
+  // R-X — `expanded` now opens a floating modal instead of inflating the
+  // dock height. Same state, different presentation.
+  const [expanded, setExpanded] = useState<boolean>(false);
+  const [exporting, setExporting] = useState<'log' | 'json' | null>(null);
+
+  const onExport = useCallback(async (format: 'log' | 'json') => {
+    setExporting(format);
+    try {
+      await exportLog(format, suggestedName);
+    } finally {
+      setExporting(null);
+    }
+  }, [exportLog, suggestedName]);
+
+  // R-X — close on ESC when modal is open.
+  useEffect(() => {
+    if (!expanded) return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setExpanded(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [expanded]);
+
+  const entryCount = snapshot?.entries.length ?? 0;
+  const outcome = snapshot?.outcome;
+
+  return (
+    <>
+      {/* R-X — Compact toolbar group designed to be injected via the
+          ProgressDock `headerExtras` slot. We deliberately drop the
+          surrounding card / border / mt — the dock toolbar already
+          provides the chrome, and a second framed strip below it was
+          the very thing that made the modal look unlike the home
+          page. Only the primary "查看日志" button + a tiny count
+          chip stay visible inline; export buttons live inside the
+          modal pop-up below.
+
+          The wrapper span carries `marginLeft: auto` so this group is
+          pushed to the far right of the dock toolbar (matching the
+          home view's "📋 日志 ▸" button position). Without it the
+          group would sit immediately after the title because the
+          history detail does not also pass `logs/onToggleLogs` (which
+          would otherwise have its own marginLeft-auto button to the
+          right of headerExtras). */}
+      <span
+        style={{
+          marginLeft: 'auto',
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 8
+        }}
+      >
+        <button
+          type="button"
+          className="ghost"
+          onClick={() => setExpanded(true)}
+          disabled={!sessionId}
+          title="在弹窗中查看完整 session 日志"
+        >
+          📋 查看日志{entryCount > 0 ? ` (${entryCount})` : ''}
+        </button>
+        {error ? (
+          <span style={{ fontSize: 12, color: '#d34b4b' }}>
+            读取失败:{error}
+          </span>
+        ) : outcome ? (
+          <span style={{ fontSize: 11, color: 'var(--muted)' }}>
+            {outcome}
+          </span>
+        ) : null}
+      </span>
+      {expanded ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Session 日志详情"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setExpanded(false);
+          }}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.55)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 9999
+          }}
+        >
+          <div
+            onMouseDown={(e) => e.stopPropagation()}
+            style={{
+              width: 'min(960px, 92vw)',
+              height: 'min(640px, 82vh)',
+              background: 'var(--panel)',
+              border: '1px solid var(--border)',
+              borderRadius: 8,
+              display: 'flex',
+              flexDirection: 'column',
+              boxShadow: '0 20px 60px rgba(0,0,0,0.5)'
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '10px 12px',
+                borderBottom: '1px solid var(--border)'
+              }}
+            >
+              <strong style={{ fontSize: 13 }}>📋 Session 日志</strong>
+              <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+                {loading ? '加载中…' : `${entryCount} 条`}
+                {outcome ? ` · ${outcome}` : ''}
+              </span>
+              <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+                <button
+                  type="button"
+                  className="ghost"
+                  disabled={!!exporting || !sessionId}
+                  onClick={() => void onExport('log')}
+                  title="导出为 .log 纯文本"
+                >
+                  {exporting === 'log' ? '导出中…' : '⬇ .log'}
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  disabled={!!exporting || !sessionId}
+                  onClick={() => void onExport('json')}
+                  title="导出为 .json 结构化数据"
+                >
+                  {exporting === 'json' ? '导出中…' : '⬇ .json'}
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => void reload()}
+                  disabled={loading}
+                  title="重新读取"
+                >
+                  ↻
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => setExpanded(false)}
+                  title="关闭(ESC)"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+            <div
+              style={{
+                flex: 1,
+                overflow: 'auto',
+                padding: 10,
+                fontFamily: 'ui-monospace, Menlo, Consolas, monospace',
+                fontSize: 12,
+                lineHeight: 1.5,
+                background: 'var(--bg)'
+              }}
+            >
+              {snapshot && snapshot.entries.length > 0 ? (
+                snapshot.entries.map((e) => (
+                  <div
+                    key={`${e.sessionId}-${e.seq}`}
+                    style={{ color: LEVEL_COLORS[e.level], whiteSpace: 'pre-wrap' }}
+                  >
+                    [{new Date(e.ts).toISOString()}]
+                    {' '}[{e.level.toUpperCase()}]
+                    {' '}[{e.stage}{e.substep ? '/' + e.substep : ''}]
+                    {' '}{e.message}
+                  </div>
+                ))
+              ) : (
+                <div style={{ color: 'var(--muted)' }}>(暂无日志)</div>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </>
   );
 };

@@ -12,8 +12,10 @@ import {
   MAX_CONCURRENCY,
   SHRINK_FIRST_RATIO,
   adaptiveStartLossy,
+  chooseCompressionTargetMB,
   clampConcurrency,
   compressCacheKey,
+  derivePartialSourceName,
   enumerateSegments,
   extrapolateNextLossy,
   filterSelectedSegments,
@@ -112,6 +114,29 @@ describe('planPhase0', () => {
   it('handles degenerate softMB by falling back to "normal"', () => {
     expect(planPhase0(5, 0)).toBe('normal');
     expect(planPhase0(5, -1)).toBe('normal');
+  });
+});
+
+describe('chooseCompressionTargetMB', () => {
+  it('targets the hard fallback cap before any hard-fit result exists', () => {
+    expect(chooseCompressionTargetMB(false, 4, 2)).toEqual({
+      targetMB: 4,
+      tier: 'fallback'
+    });
+  });
+
+  it('targets the soft cap after the pipeline already has a hard-fit result', () => {
+    expect(chooseCompressionTargetMB(true, 4, 2)).toEqual({
+      targetMB: 2,
+      tier: 'soft'
+    });
+  });
+
+  it('falls back to soft when the hard cap is degenerate', () => {
+    expect(chooseCompressionTargetMB(false, 0, 2)).toEqual({
+      targetMB: 2,
+      tier: 'soft'
+    });
   });
 });
 
@@ -262,5 +287,91 @@ describe('filterSelectedSegments (R-22)', () => {
 
   it('dedupes selection without affecting output', () => {
     expect(filterSelectedSegments(all, [1, 1, 1])).toEqual([all[1]]);
+  });
+});
+
+/* ------------------------- P1.1 partial-fetch cache key ------------------------- */
+
+describe('derivePartialSourceName (P1.1 partial cache isolation)', () => {
+  it('produces a sibling filename with sections.<hash>.<ext>', () => {
+    const out = derivePartialSourceName('source.mp4', { selectedSegments: [0] });
+    expect(out).toMatch(/^source\.sections\.[0-9a-f]{8}\.mp4$/);
+  });
+
+  it('different segment selections yield different filenames (no cache poisoning)', () => {
+    const a = derivePartialSourceName('source.mp4', { selectedSegments: [0] });
+    const b = derivePartialSourceName('source.mp4', { selectedSegments: [1] });
+    const c = derivePartialSourceName('source.mp4', { selectedSegments: [0, 1] });
+    expect(a).not.toBe(b);
+    expect(a).not.toBe(c);
+    expect(b).not.toBe(c);
+  });
+
+  it('full-stream localName never collides with any partial filename', () => {
+    // The full-stream cache uses the original `localName` directly, while every
+    // partial run picks a sibling `*.sections.<hash>.*` path. They must never
+    // collide — that's the whole point of P1.1.
+    const fullName = 'source.mp4';
+    const partialNames = [
+      derivePartialSourceName(fullName, { selectedSegments: [0] }),
+      derivePartialSourceName(fullName, { selectedSegments: [0, 1] }),
+      derivePartialSourceName(fullName, { startSec: 5, endSec: 15 }),
+      derivePartialSourceName(fullName, {})
+    ];
+    for (const p of partialNames) {
+      expect(p).not.toBe(fullName);
+    }
+    // And the partials themselves should all be unique across distinct keys.
+    expect(new Set(partialNames).size).toBe(partialNames.length);
+  });
+
+  it('is deterministic for identical inputs (cache hit on re-run)', () => {
+    const a = derivePartialSourceName('clip.mp4', {
+      selectedSegments: [0, 2],
+      startSec: 0,
+      endSec: 30,
+      maxSegmentSec: 10
+    });
+    const b = derivePartialSourceName('clip.mp4', {
+      selectedSegments: [0, 2],
+      startSec: 0,
+      endSec: 30,
+      maxSegmentSec: 10
+    });
+    expect(a).toBe(b);
+  });
+
+  it('selection order does not affect the hash (set-equivalent inputs match)', () => {
+    const a = derivePartialSourceName('clip.mp4', { selectedSegments: [0, 2, 1] });
+    const b = derivePartialSourceName('clip.mp4', { selectedSegments: [2, 1, 0] });
+    expect(a).toBe(b);
+  });
+
+  it('preserves the original extension', () => {
+    expect(derivePartialSourceName('a.mp4', { selectedSegments: [0] })).toMatch(/\.mp4$/);
+    expect(derivePartialSourceName('a.webm', { selectedSegments: [0] })).toMatch(/\.webm$/);
+    expect(derivePartialSourceName('a.mkv', { selectedSegments: [0] })).toMatch(/\.mkv$/);
+  });
+
+  it('falls back to .mp4 when localName has no extension', () => {
+    expect(derivePartialSourceName('noext', { selectedSegments: [0] })).toMatch(/\.mp4$/);
+  });
+
+  it('startSec/endSec changes also change the hash (different time window = different cache)', () => {
+    const a = derivePartialSourceName('clip.mp4', { selectedSegments: [0], startSec: 0, endSec: 10 });
+    const b = derivePartialSourceName('clip.mp4', { selectedSegments: [0], startSec: 5, endSec: 15 });
+    expect(a).not.toBe(b);
+  });
+
+  it('regression: partial[0] then full produce DIFFERENT cache paths', () => {
+    // The bug being fixed: first run picks segment [0] and writes a stitched
+    // mp4 to `source.mp4`, then a second run with no selectedSegments sees
+    // that file and skips the full download. After the fix, partial[0] writes
+    // to `source.sections.<hash>.mp4` and the full run still targets
+    // `source.mp4` — distinct on-disk paths, no reuse.
+    const fullName = 'source.mp4';
+    const partialName = derivePartialSourceName(fullName, { selectedSegments: [0] });
+    expect(partialName).not.toBe(fullName);
+    expect(partialName).toMatch(/^source\.sections\..+\.mp4$/);
   });
 });

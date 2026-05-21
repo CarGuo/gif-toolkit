@@ -21,6 +21,46 @@ ezgif.com 的策略是"我替你后端把站点抓了再吐 URL",但要做到桌
 
 ---
 
+## 嗅探级联决策图
+
+![嗅探级联](./images/sniffer-cascade.png)
+
+```mermaid
+flowchart TD
+  Start(["输入 URL"]) --> Guard["ensurePublicHttp(url)<br/>拒 file:// / javascript: / 私有网段"]
+  Guard -- "❌ 拒绝" --> Reject(["throw, UI 红色 toast"])
+  Guard -- "✅ 通过" --> Pick{"split-button<br/>用户上次选择 / 手动切换"}
+
+  Pick -- "①" --> URL["纯 URL 嗅探<br/>axios + cheerio 主进程"]
+  Pick -- "②" --> WV["嵌入式 WebView<br/>WebContentsView + onBeforeRequest"]
+  Pick -- "③" --> SC["真 Chrome 嗅探<br/>spawn + chrome-remote-interface CDP"]
+  Pick -- "④" --> YT["yt-dlp 直接抓<br/>--dump-single-json"]
+  Pick -- "📂" --> OFF["离线导入<br/>.mhtml / .html+_files / 单文件"]
+
+  URL --> Out["SniffedMedia[]"]
+  WV --> Out
+  SC --> Out
+  YT --> Out
+  OFF --> Out
+
+  Out --> Sanitize["sanitizeMedia()<br/>RESOLVED_HEADER_ALLOWLIST<br/>SNIFFED_MEDIA_SOURCES 校验"]
+  Sanitize --> Render(["Renderer setItems<br/>+ 自动勾选(排除 image/iframe-embed)"])
+
+  Pick -. "切换或重试" .-> Abort{{"currentSniffCtrl.abort()<br/>R-53 single-flight"}}
+  Abort -.-> Pick
+
+  classDef ok fill:#e8f5e9,stroke:#2e7d32;
+  classDef bad fill:#ffebee,stroke:#c62828;
+  classDef path fill:#e3f2fd,stroke:#1976d2;
+  class Render ok;
+  class Reject bad;
+  class URL,WV,SC,YT,OFF path;
+```
+
+每档对应的具体工程要点见下面 5 节。
+
+---
+
 ## 通路 ①  纯 URL 嗅探(默认)
 
 - IPC: `sniff:url`
