@@ -22,6 +22,8 @@
  *   exposes the live app/page/outDir to every module via getHarness().
  */
 import { test, type ElectronApplication, type Page } from '@playwright/test';
+import { readdirSync, rmSync, statSync } from 'node:fs';
+import path from 'node:path';
 import {
   REPO_ROOT,
   MAIN_ENTRY,
@@ -29,6 +31,61 @@ import {
   unbindHarness,
   launchElectron
 } from './realPipeline/_harness';
+
+/**
+ * E2E SUITE leftover sweep
+ * ------------------------
+ * `g.startBatch(tasks, pageTitle, ...)` makes the main process emit a
+ * sub-directory `<defaultOutDir>/<safeName(pageTitle).slice(0,60)>-<ts>-<ms>-<random4>`
+ * (cf. src/main/index.ts SUITE batch path). When SUITEs pass synthetic
+ * pageTitles like 'suite-O-reoptimize' / 'suite-S-A' or fixture names
+ * like 'medium.mp4', those sub-dirs accumulate in the user's real
+ * Downloads/GifToolkit folder across runs because the harness has no
+ * sandbox redirect for getDefaultOutputDir().
+ *
+ * The sweep below runs in afterAll BEFORE app.close() so it can read
+ * the live `defaultOutDir` we already captured in beforeAll. It deletes
+ * only entries whose name STRICTLY matches the e2e shape — fixture-
+ * basename / `suite-` / `giftk-e2e-` / `SUITE_*_fixture_page-` prefix
+ * AND a `-<ts>-<ms>-<random4>` tail — to guarantee we never touch a
+ * legitimate user capture (those keep page-title prefixes outside this
+ * whitelist).
+ */
+const E2E_LEFTOVER_PREFIXES = [
+  /^suite-/,
+  /^giftk-e2e-/,
+  /^long\.mp4-/,
+  /^medium\.mp4-/,
+  /^tiny\.mp4-/,
+  /^tiny\.gif-/,
+  /^SUITE_[A-Z]_fixture_page-/
+];
+function isE2eLeftover(name: string): boolean {
+  return E2E_LEFTOVER_PREFIXES.some((re) => re.test(name));
+}
+function sweepE2eLeftovers(rootDir: string): { removed: number; errors: number } {
+  let removed = 0;
+  let errors = 0;
+  let entries: string[] = [];
+  try {
+    entries = readdirSync(rootDir);
+  } catch {
+    return { removed, errors };
+  }
+  for (const name of entries) {
+    if (!isE2eLeftover(name)) continue;
+    const full = path.join(rootDir, name);
+    try {
+      const s = statSync(full);
+      if (!s.isDirectory()) continue;
+      rmSync(full, { recursive: true, force: true });
+      removed += 1;
+    } catch {
+      errors += 1;
+    }
+  }
+  return { removed, errors };
+}
 
 // Side-effect SUITE imports — Playwright registers `test()` calls in
 // the order modules evaluate, so listing in textual SUITE order keeps
@@ -47,6 +104,7 @@ test.describe.configure({ timeout: 90_000 });
 
 let app: ElectronApplication;
 let page: Page;
+let capturedDefaultOutDir: string | null = null;
 
 test.beforeAll(async () => {
   app = await launchElectron({
@@ -67,6 +125,7 @@ test.beforeAll(async () => {
     return g.getDefaultOutputDir();
   });
   if (!defaultOutDir) throw new Error('default output directory unavailable');
+  capturedDefaultOutDir = defaultOutDir;
 
   // Bind the shared harness so per-suite modules see the live
   // app/page/outDir for the lifetime of this spec. unbindHarness() in
@@ -76,6 +135,22 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
+  // Sweep e2e SUITE leftovers BEFORE closing the app so the captured
+  // defaultOutDir is still authoritative. Failures are logged but never
+  // fail the suite — clean-up is best-effort, the assertions above are
+  // what gate the run.
+  if (capturedDefaultOutDir) {
+    try {
+      const { removed, errors } = sweepE2eLeftovers(capturedDefaultOutDir);
+      if (removed > 0 || errors > 0) {
+        // eslint-disable-next-line no-console
+        console.log(`[e2e cleanup] swept ${removed} leftover dir(s) under ${capturedDefaultOutDir} (errors=${errors})`);
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn('[e2e cleanup] sweep failed:', err);
+    }
+  }
   unbindHarness();
   if (app) await app.close();
 });

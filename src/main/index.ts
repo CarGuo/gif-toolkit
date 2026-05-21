@@ -1946,12 +1946,18 @@ if (!gotLock) {
     }
 
     // R-87 — Reap stale tmp dirs (giftk-mhtml-*, giftk-offline-test-*,
-    // giftk-e2e-*, giftk-in-*, giftk-out-*, giftk-fake-*) older than 24h.
-    // Pure best-effort, never blocks startup; whitelist + tmpdir-jail
-    // assertion lives in tmpCleanup.ts.
+    // giftk-e2e-*, giftk-in-*, giftk-out-*, giftk-fake-*) older than 1h.
+    // R-WS-90 P5i — was 24h, but the user reported tmp dirs piling up
+    // across days because the threshold was a full day. Single-instance
+    // is enforced (requestSingleInstanceLock above), and the live
+    // sessionTmpRegistry protects ANY dir we just created in this run,
+    // so a 1h cutoff is safe: it only ever reaps orphans from previous
+    // process lifetimes (crash, force-quit) that are at least an hour
+    // stale. Pure best-effort, never blocks startup; whitelist + tmpdir-
+    // jail assertion lives in tmpCleanup.ts.
     setTimeout(() => {
       try {
-        const r = sweepTmpDir({ tmpDir: os.tmpdir(), maxAgeMs: 24 * 60 * 60 * 1000, dryRun: false, logger: { info: log, warn: log, error: log } });
+        const r = sweepTmpDir({ tmpDir: os.tmpdir(), maxAgeMs: 60 * 60 * 1000, dryRun: false, logger: { info: log, warn: log, error: log } });
         log(`tmpCleanup: scanned=${r.scanned} deleted=${r.deleted.length} skipped=${r.skipped.length} errors=${r.errors.length}`);
       } catch (e) {
         log(`tmpCleanup: bootstrap reap failed: ${(e as Error).message}`);

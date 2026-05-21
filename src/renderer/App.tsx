@@ -1161,10 +1161,17 @@ const App: React.FC = () => {
         outputDirLabel={baseOutputDir ? '根目录' : '选择输出目录'}
         outputDirTitle={
           baseOutputDir
-            ? `当前根目录: ${baseOutputDir}\n点击修改`
+            ? `当前根目录: ${baseOutputDir}\n点击在 Finder/资源管理器中打开`
             : '点击选择批处理输出根目录'
         }
         onPickDir={onPickDir}
+        hasBaseOutputDir={!!baseOutputDir}
+        onOpenCurrentDir={baseOutputDir ? () => {
+          // R-WS-90 P5i — 直接在系统文件管理器中打开当前根目录;
+          // 复用已有 IPC `app:openDir` (giftk.openOutputDir),与历史
+          // 详情、history-card 行级「打开目录」语义一致。
+          giftk.openOutputDir(baseOutputDir).catch(() => { /* ignore */ });
+        } : undefined}
       />
 
       {view === 'home' ? (

@@ -137,6 +137,16 @@ input[type="text"]:focus { border-color: var(--accent); }
 .body-history {
   grid-template-columns: 1fr;
 }
+/* R-WS-90 P5i — 上传历史与历史一样:它过去意外继承了 .body 的
+   360px+1fr grid + overflow:hidden,所以列表只占了左 360px 一栏、
+   且无法滚动。改成单列 + overflow:auto 让 UploadHistoryPanel 内部
+   的 padding/cards 可以从顶到底铺满主区,长列表时主区出现纵向滚动
+   条(列表本身也应避免被父容器裁切)。 */
+.body-uploads {
+  grid-template-columns: 1fr;
+  overflow: auto;
+  min-height: 0;
+}
 .left {
   border-right: 1px solid var(--border);
   display: flex;

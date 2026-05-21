@@ -21,18 +21,20 @@
  *      capabilities.ts must NOT surface an issue, the binary may
  *      simply still be warming up.
  */
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { describe, expect, it, vi, beforeEach, afterAll } from 'vitest';
+import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
 // `binaries.ts` lazily reads `app.getPath('userData')` to locate the
 // warm-cache JSON. Stub it to a tmp dir so test runs don't pollute the
 // real Electron userData and remain hermetic across machines.
+const TEST_USERDATA = path.join(os.tmpdir(), 'gif-toolkit-test-userdata');
 vi.mock('electron', () => ({
   ipcMain: { handle: vi.fn(), on: vi.fn() },
   BrowserWindow: { getAllWindows: vi.fn(() => []) },
   app: {
-    getPath: vi.fn(() => path.join(os.tmpdir(), 'gif-toolkit-test-userdata')),
+    getPath: vi.fn(() => TEST_USERDATA),
     isPackaged: false
   }
 }));
@@ -41,6 +43,13 @@ const { probeBinaryWarmAware, _resetWarmCacheForTest } = await import('../../src
 
 beforeEach(() => {
   _resetWarmCacheForTest();
+});
+
+// R-WS-90 P5i — 之前每次 vitest run 后 `gif-toolkit-test-userdata`
+// 都会留在 os.tmpdir() 里(probeBinaryWarmAware 会写入 warm-cache JSON
+// 到 app.getPath('userData')),没人清。这里测试套结束后兜底清掉。
+afterAll(() => {
+  try { fs.rmSync(TEST_USERDATA, { recursive: true, force: true }); } catch { /* best-effort */ }
 });
 
 describe('probeBinaryWarmAware', () => {

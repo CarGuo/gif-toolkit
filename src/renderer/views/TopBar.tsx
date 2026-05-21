@@ -29,11 +29,24 @@ export interface TopBarProps {
      the picker button can still expose the absolute path on demand. */
   outputDirTitle?: string;
   onPickDir: () => void;
+  /**
+   * R-WS-90 P5i — 「根目录」按钮过去 click 即弹文件选择器,与历史里
+   * 行级「打开目录」语义不一致(用户期望:点根目录 = 直接在资源管理
+   * 器里打开当前已设的根目录,而不是再选一次)。这里拆成两个按钮:
+   *   - onOpenCurrentDir:在系统文件管理器里打开当前 baseOutputDir
+   *     (仅当 baseOutputDir 已设时启用)
+   *   - onPickDir:小一号的修改按钮,弹文件选择器换目录
+   * 当 baseOutputDir 尚未设置时(空文案 "选择输出目录")依旧只显示
+   * 一个按钮,click 即弹选择器。
+   */
+  onOpenCurrentDir?: () => void;
+  hasBaseOutputDir?: boolean;
 }
 
 export const TopBar: React.FC<TopBarProps> = ({
   view, setView, reloadHistory, historyCount, uploadHistoryCount,
-  outputDirLabel, outputDirTitle, onPickDir
+  outputDirLabel, outputDirTitle, onPickDir,
+  onOpenCurrentDir, hasBaseOutputDir
 }) => {
   return (
     <div className="titlebar">
@@ -95,9 +108,35 @@ export const TopBar: React.FC<TopBarProps> = ({
       </div>
       <div className="spacer" />
       <div className="actions">
-        <button onClick={onPickDir} title={outputDirTitle} aria-label={outputDirTitle ?? outputDirLabel}>
-          {outputDirLabel}
-        </button>
+        {hasBaseOutputDir && onOpenCurrentDir ? (
+          <>
+            {/* R-WS-90 P5i — 主按钮 = 在文件管理器里打开当前根目录;
+                修改按钮拆出来变成右侧小铅笔 chip,避免误触换目录。 */}
+            <button
+              type="button"
+              onClick={onOpenCurrentDir}
+              title={outputDirTitle}
+              aria-label={`打开 ${outputDirLabel}`}
+            >
+              📂 {outputDirLabel}
+            </button>
+            <button
+              type="button"
+              className="ghost"
+              onClick={onPickDir}
+              title="修改输出根目录"
+              aria-label="修改输出根目录"
+              data-tooltip="修改输出根目录"
+              style={{ padding: '0 8px' }}
+            >
+              ✎
+            </button>
+          </>
+        ) : (
+          <button onClick={onPickDir} title={outputDirTitle} aria-label={outputDirTitle ?? outputDirLabel}>
+            {outputDirLabel}
+          </button>
+        )}
         {/* R-30 #1 — the per-batch "打开目录" button used to live
             here in the global title bar. With the history tab in
             place that placement was confusing (looked like a
