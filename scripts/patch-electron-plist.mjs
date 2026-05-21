@@ -10,11 +10,24 @@
  *   原始三处都写死 "Electron",所以 dev 模式起的进程被 Dock 当成 "Electron"。
  *   `app.setName()` 对 dock tooltip 无效,只影响 menubar 第一项名称。
  *
- * Fix:
+ * Fix (part 1 — name):
  *   每次 npm install / electron-rebuild 后,patch 这份 Info.plist:
  *     CFBundleName        = Gif Toolkit (dev)
  *     CFBundleDisplayName = Gif Toolkit (dev)
  *   保留 (dev) 后缀以便和打包产物区分。
+ *
+ * Fix (part 2 — about-panel icon, R-88):
+ *   `app.setAboutPanelOptions({ iconPath })` 在 macOS 下被 AppKit
+ *   忽略 — About 面板的 icon 来源是 `.app` bundle 内
+ *   `Contents/Resources/<CFBundleIconFile>`,在 dev 模式下
+ *   `CFBundleIconFile = electron.icns`(原子图标),所以无论
+ *   主进程怎么配 iconPath,dev About 面板永远显示 Electron 原子。
+ *   解决方案:把项目自己的 `build/icon.icns` 物理覆盖到
+ *   `node_modules/electron/dist/Electron.app/Contents/Resources/electron.icns`,
+ *   这样 CFBundleIconFile 还指 electron.icns,但内容已经是品牌 logo,
+ *   AppKit 渲染 About 面板时拿到的就是我们的 logo。
+ *   打包产物不受影响:electron-builder 走 `mac.icon: build/icon.icns`
+ *   生成自己的 .app,不依赖 dev 软链。
  *
  *   只在 darwin 跑(其他平台 noop);
  *   幂等(已 patched 直接 skip);
@@ -26,7 +39,14 @@
  *   `touch` Electron.app 让 LaunchServices 重新扫描。
  */
 
-import { readFileSync, writeFileSync, statSync, utimesSync, existsSync } from 'node:fs';
+import {
+  readFileSync,
+  writeFileSync,
+  statSync,
+  utimesSync,
+  existsSync,
+  copyFileSync,
+} from 'node:fs';
 import { resolve } from 'node:path';
 
 const APP_NAME = 'Gif Toolkit (dev)';
@@ -35,6 +55,11 @@ const PLIST_PATH = resolve(
   'node_modules/electron/dist/Electron.app/Contents/Info.plist',
 );
 const APP_PATH = resolve(process.cwd(), 'node_modules/electron/dist/Electron.app');
+const PROJECT_ICNS = resolve(process.cwd(), 'build/icon.icns');
+const ELECTRON_ICNS = resolve(
+  process.cwd(),
+  'node_modules/electron/dist/Electron.app/Contents/Resources/electron.icns',
+);
 
 if (process.platform !== 'darwin') {
   process.exit(0);
@@ -62,22 +87,52 @@ const before = plist;
 plist = replaceTag('CFBundleName', APP_NAME);
 plist = replaceTag('CFBundleDisplayName', APP_NAME);
 
-if (plist === before) {
-  console.log(`[patch-electron-plist] already patched (CFBundleName=${APP_NAME}) — skip`);
-  process.exit(0);
+let plistChanged = plist !== before;
+if (plistChanged) {
+  try {
+    writeFileSync(PLIST_PATH, plist, 'utf8');
+    console.log(`[patch-electron-plist] patched plist: ${APP_NAME}`);
+  } catch (e) {
+    console.log(`[patch-electron-plist] write failed (${e.message}) — skip`);
+    process.exit(0);
+  }
+} else {
+  console.log(`[patch-electron-plist] plist already patched (CFBundleName=${APP_NAME}) — skip`);
 }
 
-try {
-  writeFileSync(PLIST_PATH, plist, 'utf8');
-  const now = new Date();
+// Part 2 — replace Electron's atom .icns with our brand .icns so the
+// dev About panel shows the right logo. We compare mtimes to keep
+// the operation idempotent: only re-copy if the project icns is
+// newer than the bundled one (or if the bundled file is missing).
+let icnsChanged = false;
+if (existsSync(PROJECT_ICNS) && existsSync(ELECTRON_ICNS)) {
   try {
-    const st = statSync(APP_PATH);
+    const projStat = statSync(PROJECT_ICNS);
+    const elecStat = statSync(ELECTRON_ICNS);
+    // size differing OR project mtime newer ⇒ replace.
+    if (projStat.size !== elecStat.size || projStat.mtimeMs > elecStat.mtimeMs) {
+      copyFileSync(PROJECT_ICNS, ELECTRON_ICNS);
+      icnsChanged = true;
+      console.log(
+        `[patch-electron-plist] replaced ${ELECTRON_ICNS} with project build/icon.icns`,
+      );
+    } else {
+      console.log('[patch-electron-plist] electron.icns already matches project icns — skip');
+    }
+  } catch (e) {
+    console.log(`[patch-electron-plist] icns copy failed (${e.message}) — skip`);
+  }
+} else if (!existsSync(PROJECT_ICNS)) {
+  console.log(`[patch-electron-plist] no project icns at ${PROJECT_ICNS} — skip icon swap`);
+}
+
+// touch the .app so LaunchServices rescans the (possibly) new metadata.
+if (plistChanged || icnsChanged) {
+  try {
+    statSync(APP_PATH);
+    const now = new Date();
     utimesSync(APP_PATH, now, now);
   } catch {
     // ignore
   }
-  console.log(`[patch-electron-plist] patched: ${APP_NAME}`);
-} catch (e) {
-  console.log(`[patch-electron-plist] write failed (${e.message}) — skip`);
-  process.exit(0);
 }
