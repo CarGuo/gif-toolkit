@@ -1647,9 +1647,16 @@ if (!gotLock) {
     // 让 menubar 一进入就是 "Gif Toolkit",和 dock tooltip(Gif Toolkit (dev))协同。
     try {
       app.setName('Gif Toolkit');
+      // setAboutPanelOptions without iconPath falls back to the
+      // Electron atom logo on macOS — clearly not our brand. We
+      // resolve the bundled build/icon.png (same file that drives
+      // dock.setIcon below) and pass it through, so the About
+      // panel shows the project mark instead of the Electron atom.
+      const aboutIcon = resolveAppIconPath();
       app.setAboutPanelOptions({
         applicationName: 'Gif Toolkit',
         applicationVersion: app.getVersion(),
+        ...(aboutIcon ? { iconPath: aboutIcon } : {}),
       });
     } catch (e) {
       log(`setName failed: ${(e as Error).message}`);

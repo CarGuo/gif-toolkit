@@ -30,10 +30,15 @@ function buildTrayImage(): Electron.NativeImage {
   const p = pickTrayIconPath();
   if (!p) return nativeImage.createEmpty();
   const img = nativeImage.createFromPath(p);
+  // We deliberately do NOT call setTemplateImage(true) on macOS:
+  // template images require a single-colour mask (black + alpha)
+  // and Electron will collapse our full-colour brand logo into a
+  // solid white/black blob in the menu bar. Without template mode
+  // the icon stays full-colour and is recognisable. The visual
+  // trade-off is that it won't auto-invert with menu bar dark mode,
+  // but a recognisable colour logo beats an unidentifiable blob.
   if (process.platform === 'darwin') {
-    const resized = img.resize({ width: 18, height: 18 });
-    resized.setTemplateImage(true);
-    return resized;
+    return img.resize({ width: 18, height: 18 });
   }
   return img.resize({ width: 16, height: 16 });
 }
@@ -130,7 +135,15 @@ function buildContextMenu(deps: TrayDeps): Menu {
     },
     {
       label: '退出',
-      role: 'quit',
+      // We use an explicit click + accelerator instead of `role: 'quit'`
+      // because on macOS Electron 31's tray-menu rendering of `role: 'quit'`
+      // injects a leading icon for the row, which forces the menu's
+      // icon column on for the entire menu and visibly mis-indents
+      // every other (icon-less) item. Going through app.quit() keeps
+      // the standard quit semantics + Cmd+Q accelerator without the
+      // decoration, so all rows align flush-left.
+      accelerator: process.platform === 'darwin' ? 'Command+Q' : 'Control+Q',
+      click: () => { app.quit(); },
     },
   ];
   return Menu.buildFromTemplate(items);
