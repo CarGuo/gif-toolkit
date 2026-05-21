@@ -642,11 +642,11 @@ details.advanced-gif > summary {
   display: flex;
   align-items: baseline;
   gap: 12px;
-  /* R-WS-90 P5c — 左 padding 与上方 .ws-tabs-strip 的 8px padding-left
-     对齐,让「已选媒体」标签的起点垂直对齐到第一个 tab 的左边缘
-     (= .right 容器内统一的 8px 内容左基线),视觉上形成一根连续的
-     纵向参考线,不再出现 16 vs 8 的错位感。 */
-  padding: 12px 16px 8px 8px;
+  /* R-WS-90 P5d — padding-top 12→24, padding-bottom 8→16,与
+     上方 .ws-tabs-strip 的 +10 配合,让右栏顶部块整体 ≈ 左栏
+     SniffSection 默认高度,两条 border-bottom 在屏幕上同 y。
+     左 padding 维持 8 与 .ws-tabs-strip 起点共线(P5c 决议)。 */
+  padding: 24px 16px 16px 8px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-2);
 }
@@ -3068,7 +3068,12 @@ details.advanced-gif > summary {
   display: flex;
   align-items: stretch;
   gap: 2px;
-  padding: 4px 8px 0 8px;
+  /* R-WS-90 P5d — 顶部留白从 4 加到 14,与 .grid-header 加厚配合,
+     让右栏 (tabs-strip + grid-header) 的总高在默认空状态下 ≈
+     左栏 SniffSection 的渲染高度,使两侧的 border-bottom 在屏幕
+     上同 y 对齐(用户 5/21 反馈:已选媒体底部分割线 ↔ 嗅探区底
+     部分割线)。 */
+  padding: 14px 8px 0 8px;
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: thin;
