@@ -1158,7 +1158,12 @@ const App: React.FC = () => {
         reloadHistory={reloadHistory}
         historyCount={history.length}
         uploadHistoryCount={uploadHistory.length}
-        outputDirLabel={baseOutputDir ? `根目录: ${shortDir(baseOutputDir)}` : '选择输出目录'}
+        outputDirLabel={baseOutputDir ? '根目录' : '选择输出目录'}
+        outputDirTitle={
+          baseOutputDir
+            ? `当前根目录: ${baseOutputDir}\n点击修改`
+            : '点击选择批处理输出根目录'
+        }
         onPickDir={onPickDir}
       />
 
@@ -1335,10 +1340,5 @@ const App: React.FC = () => {
     </div>
   );
 };
-
-function shortDir(p: string): string {
-  if (p.length <= 30) return p;
-  return '…' + p.slice(p.length - 28);
-}
 
 export default App;

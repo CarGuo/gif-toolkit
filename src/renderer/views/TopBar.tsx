@@ -24,12 +24,16 @@ export interface TopBarProps {
   historyCount: number;
   uploadHistoryCount: number;
   outputDirLabel: string;
+  /* R-WS-90 P5e — full path moved off the visible label (now just
+     "根目录") and into a hover tooltip; carry it as a typed prop so
+     the picker button can still expose the absolute path on demand. */
+  outputDirTitle?: string;
   onPickDir: () => void;
 }
 
 export const TopBar: React.FC<TopBarProps> = ({
   view, setView, reloadHistory, historyCount, uploadHistoryCount,
-  outputDirLabel, onPickDir
+  outputDirLabel, outputDirTitle, onPickDir
 }) => {
   return (
     <div className="titlebar">
@@ -91,7 +95,9 @@ export const TopBar: React.FC<TopBarProps> = ({
       </div>
       <div className="spacer" />
       <div className="actions">
-        <button onClick={onPickDir}>{outputDirLabel}</button>
+        <button onClick={onPickDir} title={outputDirTitle} aria-label={outputDirTitle ?? outputDirLabel}>
+          {outputDirLabel}
+        </button>
         {/* R-30 #1 — the per-batch "打开目录" button used to live
             here in the global title bar. With the history tab in
             place that placement was confusing (looked like a

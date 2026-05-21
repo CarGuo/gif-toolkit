@@ -134,17 +134,17 @@ export const MediaGridPane: React.FC<MediaGridPaneProps> = ({
               这三个按钮关心的是「全部输出已完成后干嘛」,放在媒体
               网格的标题栏更靠近用户的注意力轨迹。 */}
           <button
-            className="ghost"
+            className="ghost grid-force-all"
             onClick={() => void onForceAllowAllFailed()}
-            title={forceAllowAllTitle}
+            data-tooltip={forceAllowAllTitle}
             disabled={forceAllowFailedCount === 0}
             aria-disabled={forceAllowFailedCount === 0}
             style={{ marginLeft: 8 }}
           >
-            ⚡ 强制全部失败项{forceAllowFailedCount > 0 ? ` (${forceAllowFailedCount})` : ''}
+            ⚠️ 强制全部失败项{forceAllowFailedCount > 0 ? ` (${forceAllowFailedCount})` : ''}
           </button>
           <button
-            className="ghost"
+            className="ghost grid-upload-all"
             onClick={() => void onUploadAll()}
             title={uploadAllTitle}
             disabled={!uploadAllReady}

@@ -73,12 +73,36 @@ input[type="text"]:focus { border-color: var(--accent); }
   margin: 0;
   font-weight: 600;
   letter-spacing: 0.3px;
+  /* R-WS-90 P5e — 微动画:打开/重渲染时品牌标题用渐入 + 字距收紧
+     的过渡完成「品牌签名」动效;hover 时字距继续微微展开,提示这
+     一行是品牌而非按钮。整体不超过 0.6s,无 layout reflow。 */
+  background: linear-gradient(90deg, var(--text) 0%, var(--accent) 60%, var(--accent-2) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-size: 200% 100%;
+  background-position: 0% 50%;
+  animation: brand-shine 6s ease-in-out infinite;
+  transition: letter-spacing 0.4s ease;
+}
+.titlebar h1:hover {
+  letter-spacing: 0.6px;
+}
+@keyframes brand-shine {
+  0%, 100% { background-position: 0% 50%; }
+  50%      { background-position: 100% 50%; }
 }
 /* Brand cluster uses the packaged project icon, not a drawn surrogate. */
 .brand {
   display: flex;
   align-items: center;
   gap: 10px;
+  /* R-WS-90 P5e — 把 brand 占据「左栏 360 - titlebar 左 padding 16」
+     = 344px,使后续 .tabs 的左边缘正好坐落在 .body 左栏的右分割线
+     上(x=360),与下方嗅探区的右分割线在 y 轴上垂直延续成一条
+     连续基准线。 */
+  flex: 0 0 calc(360px - 16px);
+  min-width: calc(360px - 16px);
   -webkit-app-region: no-drag;
 }
 .brand-logo {
@@ -247,6 +271,64 @@ input[type="text"]:focus { border-color: var(--accent); }
   border: 1px solid rgba(91, 141, 239, 0.25);
   border-radius: 999px;
   vertical-align: middle;
+}
+
+/* R-WS-90 P5e — 「⚠️ 强制全部失败项」按钮的差异化 + 自定义 tooltip
+   动机:用户反馈「强制」与「上传所有产物」两个 ghost 按钮过于
+   相像(都是 ⚡ + 同色背景),区分度不足;并要求强制按钮 hover
+   时显示一个**真正的浮层 tooltip**,而非依赖原生 title 的滞后弹出。
+   做法:
+   - 给 ⚠️ 强制按钮换一个 warn 配色:暖色边 + 微微琥珀底,与
+     「⚡ 上传所有产物」的中性 ghost 形成对比。两者都基于 .ghost
+     基线,只在悬停/默认下覆盖 background+border。
+   - data-tooltip 渲染一个 ::after 浮层,鼠标 hover 即出,无延迟,
+     可承载多行说明。原生 title 仍保留(由具体组件按需附加),
+     但视觉首选这个自定义 tooltip。 */
+.ghost.grid-force-all {
+  border-color: rgba(255, 184, 77, 0.35);
+  color: rgba(255, 211, 138, 0.95);
+  background: rgba(255, 184, 77, 0.06);
+}
+.ghost.grid-force-all:hover:not(:disabled) {
+  border-color: rgba(255, 184, 77, 0.55);
+  background: rgba(255, 184, 77, 0.12);
+  color: #ffd58a;
+}
+.ghost.grid-force-all:disabled {
+  border-color: var(--border);
+  color: var(--muted);
+  background: transparent;
+}
+
+/* 通用 [data-tooltip] hover 浮层:无延迟出现于元素正下方,允许
+   多行 (white-space: pre-line)。disabled 时也允许 hover 显示,
+   方便解释「为什么按不动」。 */
+[data-tooltip] {
+  position: relative;
+}
+[data-tooltip]:hover::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 50;
+  max-width: 320px;
+  padding: 6px 10px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text);
+  background: rgba(20, 22, 28, 0.96);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.32);
+  white-space: pre-line;
+  pointer-events: none;
+  /* 入场过渡:opacity 由 0 → 1,无 transform 抖动。 */
+  animation: tooltip-pop 0.12s ease-out both;
+}
+@keyframes tooltip-pop {
+  from { opacity: 0; transform: translateY(-2px); }
+  to   { opacity: 1; transform: translateY(0);    }
 }
 
 /* R-47/R-48 — URL row. Input must stay the dominant element; on narrow
@@ -1933,7 +2015,11 @@ details.advanced-gif > summary {
 .tabs {
   display: flex;
   gap: 4px;
-  padding: 0 4px;
+  /* R-WS-90 P5e — 去掉左侧 4px 内边距,让第一个 tab-btn(主页)
+     的左边缘正好坐落在 x=360 = .left 右分割线上(.brand 的
+     flex-basis 已撑到 344px,加上 .titlebar padding-left 16px
+     = 360)。右侧仍保 4px 与上传历史 tab 的呼吸距离。 */
+  padding: 0 4px 0 0;
 }
 .tab-btn {
   padding: 6px 14px;
