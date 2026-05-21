@@ -153,15 +153,44 @@ function assertUnderTmpDir(tmpDir: string, target: string): void {
  */
 const liveSessions = new Set<string>();
 
+// R-87 — All paths in `liveSessions` are stored in their canonical
+// (realpath'd) form so set membership lookups against sweep targets
+// (which we also canonicalise via fs.realpathSync in sweepTmpDir)
+// can never miss due to /var ↔ /private/var symlink drift on macOS.
+// Falls back to path.resolve when realpath fails (path may have just
+// been deleted or never existed) — at that point set membership is
+// moot anyway.
+function canonPath(p: string): string {
+  if (typeof p !== 'string' || p.length === 0) return p;
+  // Try the path itself first.
+  try { return fs.realpathSync(p); } catch { /* fall through to parent walk */ }
+  // The path doesn't exist (yet) — walk up to the nearest existing
+  // ancestor, realpath that, and re-attach the trailing segments.
+  // This is what makes the macOS /var → /private/var fix actually
+  // hold for paths like `/var/folders/.../does-not-yet-exist`,
+  // which would otherwise stay in the non-canonical /var prefix and
+  // trip the jail check below against a /private/var sysTmp.
+  const resolved = path.resolve(p);
+  const parts = resolved.split(path.sep);
+  for (let i = parts.length - 1; i > 0; i--) {
+    const ancestor = parts.slice(0, i).join(path.sep) || path.sep;
+    try {
+      const canonAncestor = fs.realpathSync(ancestor);
+      return path.join(canonAncestor, ...parts.slice(i));
+    } catch { /* keep walking up */ }
+  }
+  return resolved;
+}
+
 export const sessionTmpRegistry = {
   registerSession(p: string): void {
     if (typeof p === 'string' && p.length > 0) {
-      liveSessions.add(path.resolve(p));
+      liveSessions.add(canonPath(p));
     }
   },
   forgetSession(p: string): void {
     if (typeof p === 'string' && p.length > 0) {
-      liveSessions.delete(path.resolve(p));
+      liveSessions.delete(canonPath(p));
     }
   },
   /**
@@ -170,7 +199,7 @@ export const sessionTmpRegistry = {
    * are swallowed because the process is exiting anyway.
    */
   cleanupSessionSync(): void {
-    const tmp = os.tmpdir();
+    const tmp = canonPath(os.tmpdir());
     for (const p of Array.from(liveSessions)) {
       liveSessions.delete(p);
       try {
@@ -185,7 +214,7 @@ export const sessionTmpRegistry = {
   },
   /** Test helper. Not exported as part of the public surface. */
   _has(p: string): boolean {
-    return liveSessions.has(path.resolve(p));
+    return liveSessions.has(canonPath(p));
   },
   _size(): number {
     return liveSessions.size;
@@ -204,15 +233,28 @@ export const sessionTmpRegistry = {
  * the desired post-condition holds.
  */
 export function sweepTmpDir(opts: SweepOptions): SweepReport {
+  // R-87 — jail must compare paths in the same canonical form.
+  // On macOS, `os.tmpdir()` returns `/var/folders/...` but the same
+  // dir resolves through the symlink to `/private/var/folders/...`.
+  // If a caller passes the realpath'd form (or any caller that
+  // does `fs.realpathSync(os.tmpdir())`), `path.relative` between
+  // the resolved-but-not-realpath'd `sysTmp` and the realpath'd
+  // `tmpDir` returns `../../private/var/...`, which then trips the
+  // `..` jail check and throws on perfectly legal input.
+  //
+  // Fix: keep `tmpDir` in the caller's original form so reports +
+  // readdir paths surface what they passed in (no surprise path
+  // rewriting), but compute jail check + liveSession set lookups
+  // against canonicalised forms so the symlink can never bite.
   const tmpDir = path.resolve(opts.tmpDir);
-  const sysTmp = path.resolve(os.tmpdir());
+  const tmpDirCanon = canonPath(opts.tmpDir);
+  const sysTmpCanon = canonPath(os.tmpdir());
   // Refuse to operate on anything outside the OS tmp root. This is
   // the single most important safety check: it prevents a misuse
   // like `sweepTmpDir({ tmpDir: '/' })` from ever touching real data.
-  if (path.relative(sysTmp, tmpDir).startsWith('..') || path.isAbsolute(path.relative(sysTmp, tmpDir))) {
-    if (tmpDir !== sysTmp) {
-      throw new Error(`tmpCleanup: tmpDir must be under os.tmpdir() (got ${tmpDir})`);
-    }
+  const rel = path.relative(sysTmpCanon, tmpDirCanon);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    throw new Error(`tmpCleanup: tmpDir must be under os.tmpdir() (got ${tmpDir})`);
   }
 
   const maxAgeMs = typeof opts.maxAgeMs === 'number' ? opts.maxAgeMs : DEFAULT_MAX_AGE_MS;
@@ -267,7 +309,7 @@ export function sweepTmpDir(opts: SweepOptions): SweepReport {
       report.errors.push({ path: target, message: (e as Error).message });
       continue;
     }
-    if (liveSessions.has(path.resolve(target))) {
+    if (liveSessions.has(canonPath(target))) {
       report.skipped.push(target);
       logger?.info?.(`tmpCleanup: skip live session ${target}`);
       continue;

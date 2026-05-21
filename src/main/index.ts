@@ -1600,15 +1600,32 @@ ipcMain.handle('resolve:embed', async (_e, media: unknown) => {
 
 /* ----------------------- App lifecycle ----------------------- */
 
+/**
+ * R-86 红线 #3 — single source of truth for "make the main window
+ * visible and focused, creating it if it's gone". Both
+ * `app.on('second-instance')` and the tray menu's "show main window"
+ * action go through this so the user sees identical behaviour:
+ * unminimise + show (in case it was hidden to tray on close) + focus,
+ * with `createWindow()` fallback when mainWindow has been destroyed.
+ * Without this, double-clicking the .app while the window is hidden
+ * to tray was a no-op.
+ */
+async function showOrCreateMainWindow(): Promise<void> {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    if (!mainWindow.isVisible()) mainWindow.show();
+    mainWindow.focus();
+    return;
+  }
+  await createWindow();
+}
+
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
   app.on('second-instance', () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-    }
+    void showOrCreateMainWindow();
   });
 
   app.whenReady().then(async () => {
@@ -1776,15 +1793,7 @@ if (!gotLock) {
     // the same accelerator).
     const trayDeps: TrayDeps = {
       getMainWindow: () => mainWindow,
-      showOrCreateMainWindow: async () => {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          if (mainWindow.isMinimized()) mainWindow.restore();
-          if (!mainWindow.isVisible()) mainWindow.show();
-          mainWindow.focus();
-          return;
-        }
-        await createWindow();
-      },
+      showOrCreateMainWindow,
       getDefaultOutDir: () => {
         const d = defaultOutDir();
         if (d) allowedOutputDirs.add(d);

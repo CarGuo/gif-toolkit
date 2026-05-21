@@ -500,6 +500,39 @@ const App: React.FC = () => {
     return () => { try { off(); } catch { /* best-effort */ } };
   }, [setLogs]);
 
+  // R-86 — wire the tray "上次任务回看" / "一键重传最近产物" menu items.
+  // Both bridges existed in preload + main since 6c521e1 but the
+  // renderer never subscribed, leaving the buttons as dead letters
+  // (Sub-C two-round audit: tray:navigate / tray:reupload-latest had
+  // zero subscribers). We translate them into setView() so the user
+  // lands on the right panel, and surface a log entry so they know
+  // the click registered even if the panel itself is empty.
+  useEffect(() => {
+    if (!giftk?.onTrayNavigate) return;
+    const off = giftk.onTrayNavigate(({ tab }) => {
+      if (tab === 'history' || tab === 'home' || tab === 'toolbox' || tab === 'uploads') {
+        setView(tab);
+        setLogs((prev) => [...prev, `[tray] 已切换到 ${tab} 面板`].slice(-300));
+      }
+    });
+    return () => { try { off(); } catch { /* best-effort */ } };
+  }, [setView, setLogs]);
+
+  useEffect(() => {
+    if (!giftk?.onTrayReuploadLatest) return;
+    const off = giftk.onTrayReuploadLatest(() => {
+      // Jump to the uploads panel where the user can trigger the
+      // batch re-upload. We don't auto-fire onUploadAll here because
+      // (a) it would silently consume an image-host quota with no
+      // confirmation, and (b) results may legitimately be empty after
+      // a fresh launch. The tray menu's job is to navigate; the user
+      // remains in control of the upload itself.
+      setView('uploads');
+      setLogs((prev) => [...prev, '[tray] 已切换到上传面板,请在 uploads 中点击批量上传以重传最近产物'].slice(-300));
+    });
+    return () => { try { off(); } catch { /* best-effort */ } };
+  }, [setView, setLogs]);
+
   // R-44 — webview-assisted sniff. Opens a real Chromium window in the
   // main process so the user can sign in to gated sites. Resolves with a
   // SniffResult, which we feed into the same downstream wiring as
