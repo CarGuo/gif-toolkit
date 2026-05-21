@@ -103,7 +103,10 @@ function buildContextMenu(deps: TrayDeps): Menu {
         void deps.showOrCreateMainWindow();
         const win = deps.getMainWindow();
         if (win && !win.isDestroyed()) {
+          deps.log('tray menu click: 上次任务回看 -> tray:navigate { tab: history }');
           win.webContents.send('tray:navigate', { tab: 'history' });
+        } else {
+          deps.log('tray menu click: 上次任务回看 -> mainWindow gone, IPC dropped');
         }
       },
     },
@@ -113,7 +116,10 @@ function buildContextMenu(deps: TrayDeps): Menu {
         void deps.showOrCreateMainWindow();
         const win = deps.getMainWindow();
         if (win && !win.isDestroyed()) {
+          deps.log('tray menu click: 一键重传最近产物 -> tray:reupload-latest');
           win.webContents.send('tray:reupload-latest');
+        } else {
+          deps.log('tray menu click: 一键重传最近产物 -> mainWindow gone, IPC dropped');
         }
       },
     },

@@ -196,6 +196,87 @@ describe('sweepTmpDir (IO)', () => {
   });
 });
 
+/**
+ * R-87 jail / canonicalisation regression — these used to fail before
+ * commit ea597ed because:
+ *   - On macOS, `os.tmpdir()` returns `/var/folders/...` but the same
+ *     directory resolves through a system symlink to
+ *     `/private/var/folders/...`. The jail check did
+ *     `path.relative(path.resolve(os.tmpdir()), path.resolve(opts.tmpDir))`
+ *     which, when the caller passed a realpath'd tmpdir, returned
+ *     `../../private/var/...` and threw on perfectly legal input.
+ *   - The same skew silently broke `liveSessions` skip-lookups: an
+ *     importer that `registerSession`-ed a `/var/...` path would NOT
+ *     be matched against a sweep target seen as `/private/var/...`,
+ *     so a daily sweep could reap a staged dir while the renderer
+ *     was still reading from it via `giftk-local://`.
+ *
+ * Each test below corresponds to one case from /tmp/giftk-r5-probe.mjs
+ * that was used to reproduce the bug by hand; we now keep them as
+ * automated regressions so CI catches any regression of the canonPath
+ * fix, including the macOS-specific symlink path.
+ */
+describe('sweepTmpDir — R-87 jail canonicalisation (regression)', () => {
+  let sandbox: string;
+  beforeEach(() => {
+    sessionTmpRegistry._clear();
+    sandbox = makeSandbox();
+  });
+  afterEach(() => {
+    sessionTmpRegistry._clear();
+    if (fs.existsSync(sandbox)) fs.rmSync(sandbox, { recursive: true, force: true });
+  });
+
+  it('accepts a tmpDir passed through fs.realpathSync (no false-positive jail throw)', () => {
+    // realpath the sandbox so on macOS we exercise the
+    // /var → /private/var symlink path. On linux this is a no-op
+    // because `os.tmpdir()` is usually already canonical, but the
+    // assertion that the call doesn't throw is platform-portable.
+    const realSandbox = fs.realpathSync(sandbox);
+    expect(() => sweepTmpDir({ tmpDir: realSandbox, dryRun: true, maxAgeMs: 24 * HOUR })).not.toThrow();
+  });
+
+  it('matches liveSessions across the /var ↔ /private/var symlink boundary', () => {
+    // Register the staged dir using the NON-canonical (sandbox / `/var/...`)
+    // form — this mirrors how offlineImport.ts:577 actually does it
+    // (mkdtempSync against os.tmpdir() returns the non-realpath form).
+    const live = seed(sandbox, 'giftk-mhtml-cross-symlink', 48 * HOUR);
+    sessionTmpRegistry.registerSession(live);
+
+    // But sweep against the REALPATH'd sandbox — this is the path
+    // form a daily sweep would see if a future caller ever realpath's
+    // os.tmpdir() before passing it in. Pre-fix: the live path would
+    // miss the lookup and the dir would be deleted. Post-fix: skip.
+    const realSandbox = fs.realpathSync(sandbox);
+    const r = sweepTmpDir({ tmpDir: realSandbox, maxAgeMs: 24 * HOUR });
+
+    expect(r.skipped.length).toBeGreaterThan(0);
+    // The reported path stays in the form sweep saw it (caller form).
+    // What matters is that the live entry was NOT deleted on disk.
+    expect(r.deleted.find((p) => path.basename(p) === path.basename(live))).toBeUndefined();
+    expect(fs.existsSync(live)).toBe(true);
+  });
+
+  it('handles non-existent tmpDir descendants gracefully (canonPath ancestor walk)', () => {
+    // A path under sandbox that doesn't exist yet. canonPath has to
+    // walk up to the nearest existing ancestor (sandbox), realpath
+    // that, and re-attach the trailing segment so the jail check
+    // doesn't trip on a /var ↔ /private/var skew.
+    const ghost = path.join(sandbox, 'does-not-yet-exist');
+    expect(() => sweepTmpDir({ tmpDir: ghost, dryRun: true })).not.toThrow();
+    const r = sweepTmpDir({ tmpDir: ghost, dryRun: true });
+    expect(r.scanned).toBe(0);
+    expect(r.deleted).toHaveLength(0);
+    expect(r.errors).toHaveLength(0);
+  });
+
+  it('still rejects paths that are genuinely outside os.tmpdir()', () => {
+    // Filesystem root is the canonical "this would wipe the system"
+    // call — must continue to throw post-fix.
+    expect(() => sweepTmpDir({ tmpDir: '/', dryRun: true })).toThrow(/under os\.tmpdir/);
+  });
+});
+
 describe('sessionTmpRegistry', () => {
   beforeEach(() => sessionTmpRegistry._clear());
   afterEach(() => sessionTmpRegistry._clear());

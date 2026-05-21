@@ -1612,11 +1612,15 @@ ipcMain.handle('resolve:embed', async (_e, media: unknown) => {
  */
 async function showOrCreateMainWindow(): Promise<void> {
   if (mainWindow && !mainWindow.isDestroyed()) {
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    if (!mainWindow.isVisible()) mainWindow.show();
+    const wasMin = mainWindow.isMinimized();
+    const wasHidden = !mainWindow.isVisible();
+    if (wasMin) mainWindow.restore();
+    if (wasHidden) mainWindow.show();
     mainWindow.focus();
+    log(`showOrCreateMainWindow: existing minimized=${wasMin} hidden=${wasHidden} -> visible+focused`);
     return;
   }
+  log('showOrCreateMainWindow: mainWindow gone -> createWindow()');
   await createWindow();
 }
 
@@ -1625,6 +1629,7 @@ if (!gotLock) {
   app.quit();
 } else {
   app.on('second-instance', () => {
+    log('second-instance: routing to showOrCreateMainWindow');
     void showOrCreateMainWindow();
   });
 
