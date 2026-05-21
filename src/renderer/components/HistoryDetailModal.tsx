@@ -63,6 +63,7 @@ import { PreviewModal } from './PreviewModal';
 import type { HistoryRecord } from './useHistory';
 import { backendLabel } from './useUploadHistory';
 import { useSessionLogs } from './useSessionLogs';
+import { copyToClipboard } from './copyToClipboard';
 import type { SessionLogEntry } from '../../shared/types';
 
 const giftk = (typeof window !== 'undefined' ? window.giftk : undefined);
@@ -663,10 +664,10 @@ const UploadsSection: React.FC<{
           const u = ups[row.filePath];
           const fileName = row.filePath.split(/[\\/]/).pop() || row.filePath;
           const onCopyUrl = (): void => {
-            if (u?.url) void navigator.clipboard.writeText(u.url);
+            if (u?.url) void copyToClipboard(u.url);
           };
           const onCopyMd = (): void => {
-            if (u?.markdown) void navigator.clipboard.writeText(u.markdown);
+            if (u?.markdown) void copyToClipboard(u.markdown);
           };
           const onUploadOne = (): void => {
             if (!onUpload) return;

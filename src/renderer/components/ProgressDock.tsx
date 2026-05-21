@@ -1,6 +1,7 @@
 import React, { useCallback } from 'react';
 import type { SniffedMedia, TaskProgress } from '../../shared/types';
 import { TaskTable } from './TaskTable';
+import { copyToClipboard } from './copyToClipboard';
 
 /**
  * R-83 — Reusable progress dock.
@@ -166,7 +167,7 @@ const LogOverlay: React.FC<LogOverlayProps> = ({ lines, onClose }) => {
 
   const onCopy = useCallback(async () => {
     try {
-      await navigator.clipboard.writeText(lines.join('\n'));
+      await copyToClipboard(lines.join('\n'));
     } catch {
       /* clipboard may be unavailable in some contexts; ignore */
     }

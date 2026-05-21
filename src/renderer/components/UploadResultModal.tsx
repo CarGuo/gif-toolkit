@@ -37,6 +37,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import type { UploadHistoryItem, UploadHistoryRecord, UploadStatus } from '../../shared/types';
 import { backendLabel } from './useUploadHistory';
+import { copyToClipboard } from './copyToClipboard';
+import { formatBytes } from './formatBytes';
 
 type CopyFormat = 'markdown' | 'html' | 'bbcode' | 'url';
 
@@ -135,9 +137,16 @@ export const UploadResultModal: React.FC<Props> = ({ record, onClose }) => {
 
   const copyAll = (): void => {
     if (!text) return;
-    void navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+    void (async () => {
+      const r = await copyToClipboard(text);
+      if (r.ok) {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      } else {
+        // eslint-disable-next-line no-console
+        console.warn('[UploadResultModal] copyAll failed:', r.reason);
+      }
+    })();
   };
 
   return (
@@ -205,6 +214,22 @@ export const UploadResultModal: React.FC<Props> = ({ record, onClose }) => {
                     {it.fileName}
                     {it.reused ? <span style={{ marginLeft: 6, color: '#7ce7c1' }}>♻️ 复用</span> : null}
                   </span>
+                  {/* R-WS-90 P5f — 文件大小 chip:bytesTotal 已端到端
+                      持久化,这里渲染人类可读尺寸,disabled-row 同样显
+                      示(便于上传前后估算用量)。 */}
+                  {typeof it.bytesTotal === 'number' && it.bytesTotal > 0 ? (
+                    <span style={{
+                      color: 'var(--muted)',
+                      fontVariantNumeric: 'tabular-nums',
+                      fontSize: 11,
+                      padding: '0 6px',
+                      borderRadius: 999,
+                      border: '1px solid var(--border)',
+                      whiteSpace: 'nowrap'
+                    }} title={`${it.bytesTotal} bytes`}>
+                      {formatBytes(it.bytesTotal)}
+                    </span>
+                  ) : null}
                   {showBar ? (
                     <span style={{ color: 'var(--muted)', fontVariantNumeric: 'tabular-nums' }}>{pct.toFixed(0)}%</span>
                   ) : null}

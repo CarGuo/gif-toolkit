@@ -20,6 +20,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import type { UploadHistoryRecord, UploadStatus } from '../../shared/types';
 import { backendLabel, paginateHistory, UPLOAD_HISTORY_PAGE_SIZE } from './useUploadHistory';
+import { copyToClipboard } from './copyToClipboard';
+import { formatBytes } from './formatBytes';
 import { UploadResultModal } from './UploadResultModal';
 
 interface Props {
@@ -170,15 +172,32 @@ const UploadBatchCard: React.FC<{ rec: UploadHistoryRecord; onOpen: () => void; 
 
 const UploadHistoryRow: React.FC<{ item: UploadHistoryRecord['items'][number] }> = ({ item }) => {
   const onCopyMd = (): void => {
-    if (item.markdown) void navigator.clipboard.writeText(item.markdown);
+    if (item.markdown) void copyToClipboard(item.markdown);
   };
   const onCopyUrl = (): void => {
-    if (item.url) void navigator.clipboard.writeText(item.url);
+    if (item.url) void copyToClipboard(item.url);
   };
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
       <span style={{ width: 14 }}>{statusIcon(item.status)}</span>
       <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.fileName}>{item.fileName}</span>
+      {/* R-WS-90 P5f — 文件大小 chip,与 UploadResultModal 风格一致。 */}
+      {typeof item.bytesTotal === 'number' && item.bytesTotal > 0 ? (
+        <span
+          title={`${item.bytesTotal} bytes`}
+          style={{
+            fontSize: 11,
+            color: 'var(--muted)',
+            padding: '0 6px',
+            borderRadius: 999,
+            border: '1px solid var(--border)',
+            whiteSpace: 'nowrap',
+            fontVariantNumeric: 'tabular-nums'
+          }}
+        >
+          {formatBytes(item.bytesTotal)}
+        </span>
+      ) : null}
       {item.reused ? (
         <span
           title={`hash 命中,复用了上次的远程地址 (sha256 ${item.fileHash ? item.fileHash.slice(0, 8) + '…' : ''})`}

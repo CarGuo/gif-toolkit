@@ -211,6 +211,17 @@ const api = {
   async getBuildInfo(): Promise<BuildInfo> {
     return ipcRenderer.invoke('app:buildInfo');
   },
+  /**
+   * R-WS-90 P5f — Reliable clipboard write through main-process
+   * Electron `clipboard`. Returns `{ ok: true, length }` on success,
+   * `{ ok: false, reason }` on failure(空 payload / 异常)。
+   * 渲染端**首选**这条通道,navigator.clipboard 仅做兜底。
+   */
+  async clipboardWriteText(
+    text: string
+  ): Promise<{ ok: true; length: number } | { ok: false; reason: string }> {
+    return ipcRenderer.invoke('app:clipboardWriteText', text);
+  },
   onProgress(cb: (p: TaskProgress) => void): () => void {
     const handler = (_: unknown, payload: TaskProgress) => {
       try { cb(payload); } catch { /* swallow */ }

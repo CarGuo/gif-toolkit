@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ProcessOptions, SniffedMedia, PreviewResult } from '../../shared/types';
 import { CropBox } from './CropBox';
+import { copyToClipboard } from './copyToClipboard';
 import { Timeline } from './Timeline';
 import { SegmentPicker, buildSegmentPreviews } from './SegmentPicker';
 
@@ -159,7 +160,7 @@ export const PreviewModal: React.FC<Props> = ({
 
   const copyUrl = useCallback(async () => {
     try {
-      await navigator.clipboard.writeText(media.url);
+      await copyToClipboard(media.url);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
     } catch {

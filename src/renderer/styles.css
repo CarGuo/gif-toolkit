@@ -724,11 +724,11 @@ details.advanced-gif > summary {
   display: flex;
   align-items: baseline;
   gap: 12px;
-  /* R-WS-90 P5d — padding-top 12→24, padding-bottom 8→16,与
-     上方 .ws-tabs-strip 的 +10 配合,让右栏顶部块整体 ≈ 左栏
-     SniffSection 默认高度,两条 border-bottom 在屏幕上同 y。
-     左 padding 维持 8 与 .ws-tabs-strip 起点共线(P5c 决议)。 */
-  padding: 24px 16px 16px 8px;
+  /* R-WS-90 P5f — padding-top 24 → 14(-10),与 .ws-tab 加高 +10
+     互补,保持 .grid-header.bottom 仍在 y=182.5 与左栏
+     .section-sniff-panel.bottom 对齐(P5d 决议)。padding-bottom
+     维持 16 不变,保留 h2 与底分割线之间的呼吸感。 */
+  padding: 14px 16px 16px 8px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-2);
 }
@@ -3169,10 +3169,12 @@ details.advanced-gif > summary {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  /* R-WS-90 P5c — 主页 tab 整体放大,与下方更大的工作区内容更协调。
-     高度 30→36,字号 12.5→13.5,左右 padding 略增,min-width 也
-     同步上调避免 ellipsis 提前介入。 */
-  height: 36px;
+  /* R-WS-90 P5f — 工作区 tab 再加高 36 → 46(+10),用户反馈 tab
+     需要更显眼;补偿空间从下方 .grid-header 的 padding-top 收回
+     (24 → 14,-10),保证 .grid-header 的底部 border-bottom 仍
+     与左栏 .section-sniff-panel 底部对齐(P5d 决议,y=182.5)。
+     字号、左右 padding、min/max-width 维持 P5c 设置。 */
+  height: 46px;
   padding: 0 10px 0 12px;
   min-width: 140px;
   max-width: 240px;

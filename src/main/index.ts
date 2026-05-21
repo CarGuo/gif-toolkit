@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, session, protocol, net } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell, session, protocol, net, clipboard } from 'electron';
 import path from 'path';
 import { promises as fsp, statSync, existsSync } from 'fs';
 import crypto from 'crypto';
@@ -1428,6 +1428,40 @@ ipcMain.handle('system:capabilities', async () => {
  */
 ipcMain.handle('app:buildInfo', async () => {
   return BUILD_INFO;
+});
+
+/**
+ * R-WS-90 P5f — Reliable clipboard write via main-process Electron
+ * `clipboard` module.
+ *
+ * Why: 多处复制按钮(尤其 [UploadResultModal](src/renderer/components/UploadResultModal.tsx)
+ * 「复制全部 (Markdown)」)历史上走 `navigator.clipboard.writeText`,
+ * 用户反馈"上传后好像复制所有 markdown 没用"。Renderer-side
+ * `navigator.clipboard` 在 Electron 里存在若干隐性失败模式:
+ *   1. modal 内部按 button 时,document focus 已转交给 modal,
+ *      若浏览器认为 doc 没有 user-activation,writeText 会
+ *      reject(被 `void` 吞掉,UI 看起来"按了没反应")。
+ *   2. 某些场景被 secure-context / permissions 守卫挡掉。
+ * Electron `clipboard.writeText` 走主进程 native API,无 focus /
+ * permission 限制,且我们能在主进程打日志做事后归因。
+ *
+ * 协议:`app:clipboardWriteText` 入参是 string,主进程做最小校验,
+ * 写入失败也只返回 { ok:false, reason }(不 throw,渲染端可以
+ * fallback 到 navigator.clipboard 做最后兜底)。 */
+ipcMain.handle('app:clipboardWriteText', async (_e, payload: unknown) => {
+  try {
+    if (typeof payload !== 'string') {
+      return { ok: false, reason: 'payload-not-string' as const };
+    }
+    if (payload.length === 0) {
+      return { ok: false, reason: 'empty-payload' as const };
+    }
+    clipboard.writeText(payload);
+    return { ok: true as const, length: payload.length };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return { ok: false as const, reason };
+  }
 });
 
 /**
