@@ -52,13 +52,11 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
 import type {
   ProcessOptions,
-  ResolvedMedia,
   SniffResult,
   SniffedMedia,
   TaskProgress
 } from '../../shared/types';
 import { DEFAULT_OPTIONS } from '../../shared/types';
-import type { PreviewOverride } from './PreviewModal';
 
 /**
  * The full per-tab state. Mirrors the fields that used to live as
@@ -96,10 +94,20 @@ export interface Workspace {
   options: ProcessOptions;
   progress: Record<string, TaskProgress>;
   processingOne: Set<string>;
-  previewOverrides: Record<string, PreviewOverride>;
-  resolvedMap: Record<string, ResolvedMedia>;
-  resolvingSet: Set<string>;
-  resolveErrorMap: Record<string, string>;
+  /**
+   * R-WS-90 P3 — `previewOverrides` / `resolvedMap` / `resolvingSet` /
+   * `resolveErrorMap` were declared on this interface in earlier R-WS
+   * iterations as a placeholder for "per-tab embed-resolve / preview
+   * overlay state", but **no code path ever read or wrote them**:
+   *   - `previewOverride` (singular) is owned by `usePreviewState`
+   *     (global, single-modal) — see [usePreviewState.ts]
+   *   - `resolvedMap` / `resolvingSet` / `resolveErrorMap` are owned
+   *     by `useEmbedResolve` (currently global; per-tab isolation
+   *     for these is its own follow-up, not part of R-WS-90).
+   * Removing the dead schema makes the Workspace interface match the
+   * actual per-tab state surface and prevents future shim bugs from
+   * silently writing into unused slots.
+   */
   /**
    * In-memory log lines. This is the SAME buffer that ProgressDock's
    * LogOverlay reads — kept per workspace so logs from sniff A don't
@@ -129,10 +137,6 @@ const blankWorkspace = (): Workspace => ({
   options: { ...DEFAULT_OPTIONS },
   progress: {},
   processingOne: new Set(),
-  previewOverrides: {},
-  resolvedMap: {},
-  resolvingSet: new Set(),
-  resolveErrorMap: {},
   logs: [],
   createdAt: Date.now()
 });
