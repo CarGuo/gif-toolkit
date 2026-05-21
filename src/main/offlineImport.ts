@@ -43,6 +43,7 @@ import { classifyByExt as _classifyByExt } from '../shared/mediaKind';
 import { log } from './logger';
 import { matchEmbedProvider } from './sniffer';
 import { probe } from './ffmpeg';
+import { sessionTmpRegistry } from './tmpCleanup';
 
 /**
  * R-56 — Convert an absolute on-disk path into the renderer-displayable
@@ -574,6 +575,30 @@ function importMhtmlFile(absPath: string, opts: OfflineImportOptions): SniffResu
   // Stage every part into a temp dir keyed by its Content-Location so
   // relative-href resolution (collectFromDom) sees real files on disk.
   const stagedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'giftk-mhtml-'));
+  // R-83 — On any throw between here and the successful `return`, remove
+  // the staged dir so a failed mhtml import does not leak the partial
+  // tree under `os.tmpdir()`. On success, register the dir with the
+  // session registry so the daily sweeper (sweepTmpDir) won't reap it
+  // while the renderer is still reading staged files via `giftk-local://`.
+  try {
+    const result = importMhtmlFileBody(absPath, opts, raw, partOffsets, delim, closing, stagedDir);
+    sessionTmpRegistry.registerSession(stagedDir);
+    return result;
+  } catch (err) {
+    try { fs.rmSync(stagedDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+    throw err;
+  }
+}
+
+function importMhtmlFileBody(
+  absPath: string,
+  opts: OfflineImportOptions,
+  raw: Buffer,
+  partOffsets: number[],
+  delim: Buffer,
+  closing: Buffer,
+  stagedDir: string
+): SniffResult {
   let primaryHtmlPath: string | null = null;
   let primaryHtmlOrigin: string | undefined;
   const locToFile = new Map<string, string>();

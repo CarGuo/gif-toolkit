@@ -46,6 +46,10 @@ import {
   checkYtdlp,
   YtDlpNotInstalledError
 } from './resolver';
+import { setupTray, destroyTray, sniffClipboardURL, type TrayDeps } from './tray';
+import { registerShortcuts, unregisterAllShortcuts } from './globalShortcut';
+import { sweepTmpDir, sessionTmpRegistry } from './tmpCleanup';
+import os from 'node:os';
 
 // Some networks block UDP/QUIC which makes Chromium's TLS over QUIC fall back
 // to a hard ERR_CONNECTION_RESET on the headless sniffer fallback. Disabling
@@ -1762,6 +1766,56 @@ if (!gotLock) {
     void printPathsAsync().catch((e) => {
       log(`binaries probe failed: ${(e as Error).message}`);
     });
+
+    // R-86 — Background tray + global shortcut for cross-platform
+    // background access. The tray menu (show / sniff clipboard / open
+    // out dir / history / re-upload / quit) and the global shortcut
+    // (Cmd+Shift+G or Ctrl+Shift+G to show the window, Cmd+Shift+V or
+    // Ctrl+Shift+V to sniff the clipboard URL) both fall back gracefully
+    // if the OS denies registration (e.g. another app already grabbed
+    // the same accelerator).
+    const trayDeps: TrayDeps = {
+      getMainWindow: () => mainWindow,
+      showOrCreateMainWindow: async () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          if (mainWindow.isMinimized()) mainWindow.restore();
+          if (!mainWindow.isVisible()) mainWindow.show();
+          mainWindow.focus();
+          return;
+        }
+        await createWindow();
+      },
+      getDefaultOutDir: () => {
+        const d = defaultOutDir();
+        if (d) allowedOutputDirs.add(d);
+        return d || null;
+      },
+      log,
+    };
+    try {
+      setupTray(trayDeps);
+      const report = registerShortcuts({
+        showOrCreateMainWindow: trayDeps.showOrCreateMainWindow,
+        sniffClipboard: () => sniffClipboardURL(trayDeps),
+        log,
+      });
+      log(`globalShortcut: show=${report.show.accelerator}/${report.show.ok} sniff=${report.sniffClipboard.accelerator}/${report.sniffClipboard.ok}`);
+    } catch (e) {
+      log(`tray/shortcut bootstrap failed: ${(e as Error).message}`);
+    }
+
+    // R-87 — Reap stale tmp dirs (giftk-mhtml-*, giftk-offline-test-*,
+    // giftk-e2e-*, giftk-in-*, giftk-out-*, giftk-fake-*) older than 24h.
+    // Pure best-effort, never blocks startup; whitelist + tmpdir-jail
+    // assertion lives in tmpCleanup.ts.
+    setTimeout(() => {
+      try {
+        const r = sweepTmpDir({ tmpDir: os.tmpdir(), maxAgeMs: 24 * 60 * 60 * 1000, dryRun: false, logger: { info: log, warn: log, error: log } });
+        log(`tmpCleanup: scanned=${r.scanned} deleted=${r.deleted.length} skipped=${r.skipped.length} errors=${r.errors.length}`);
+      } catch (e) {
+        log(`tmpCleanup: bootstrap reap failed: ${(e as Error).message}`);
+      }
+    }, 5000);
   });
 }
 
@@ -1778,6 +1832,15 @@ app.on('window-all-closed', () => {
 let flushedBeforeQuit = false;
 
 app.on('before-quit', (event) => {
+  // R-86 — Always-run teardown for the background entry points:
+  // unregister global shortcuts, destroy the tray, and synchronously
+  // wipe any tmp dirs registered during this session (mhtml stagedDirs
+  // etc. — see [src/main/tmpCleanup.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/tmpCleanup.ts)).
+  // These are best-effort and must never throw past this hook.
+  try { unregisterAllShortcuts(); } catch { /* best-effort */ }
+  try { destroyTray(); } catch { /* best-effort */ }
+  try { sessionTmpRegistry.cleanupSessionSync(); } catch { /* best-effort */ }
+
   // Synchronous side-effects we always want to run regardless of the
   // flush-before-quit path: cancel in-flight ffmpeg jobs and kill
   // spawned children. closeDb() is intentionally MOVED inside the

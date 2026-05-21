@@ -49,6 +49,8 @@
 | **R-80** | 本地历史迁 better-sqlite3 + WAL + 外键;native ABI 自愈 + `before-quit` 两阶段 flush + dbErrorBus 单 toast | [R-80](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-80-sqlite-and-native-abi.md) |
 | **R-81** | gifsicle 4 旋钮全链路:`lossyCeiling` / `colorsFloor` / `optimizeLevel` / `dither` ceiling vs lock 语义 | [R-81](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-81-gif-optimize-knobs.md) |
 | **R-82** | 双保险 import 绕过 barrel + build 前清 dist + sanitize 抽纯模块单测 + NumField defaultValue 防御 | [R-82](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-82-stale-dist-shadow.md) |
+| **R-86** | 跨平台后台托盘 + 全局快捷键(mac=Cmd+Shift+G/V,win+linux=Ctrl+Shift+G/V);冲突降级 + before-quit 必须 unregister + destroyTray | [R-86](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-86-tray-and-shortcuts.md) |
+| **R-87** | Tmp 清理三道护栏:ALLOWED_PREFIXES 白名单 + tmpdir-jail + dryRun 默认;sessionTmpRegistry 防误删本会话资源 | [R-87](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-87-tmp-cleanup-guardrails.md) |
 
 ---
 

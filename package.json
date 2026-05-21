@@ -39,7 +39,9 @@
     "docs:screenshots": "npm run build && node scripts/capture-screenshots.mjs",
     "docs:all": "npm run docs:render && npm run docs:screenshots",
     "postinstall": "npm rebuild sharp ffmpeg-static ffprobe-static @343dev/gifsicle ytdlp-nodejs && electron-rebuild -f -w better-sqlite3 && node scripts/patch-electron-plist.mjs",
-    "lockfile:lint": "lockfile-lint --path package-lock.json --type npm --validate-https --allowed-hosts npm --validate-integrity --validate-package-names"
+    "lockfile:lint": "lockfile-lint --path package-lock.json --type npm --validate-https --allowed-hosts npm --validate-integrity --validate-package-names",
+    "clean:tmp": "node scripts/clean-tmp.mjs",
+    "clean:tmp:apply": "node scripts/clean-tmp.mjs --apply"
   },
   "engines": {
     "node": ">=20.0.0",

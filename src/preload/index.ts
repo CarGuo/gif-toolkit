@@ -232,6 +232,35 @@ const api = {
     ipcRenderer.on('sniff:progress', handler);
     return () => ipcRenderer.removeListener('sniff:progress', handler);
   },
+  /* ---------------- Tray / global shortcut bridge ---------------- */
+  onTrayToast(cb: (p: { level: 'info' | 'warn' | 'error'; message: string }) => void): () => void {
+    const handler = (_: unknown, payload: { level: 'info' | 'warn' | 'error'; message: string }) => {
+      try { cb(payload); } catch { /* swallow */ }
+    };
+    ipcRenderer.on('tray:toast', handler);
+    return () => ipcRenderer.removeListener('tray:toast', handler);
+  },
+  onTraySniffUrl(cb: (p: { url: string }) => void): () => void {
+    const handler = (_: unknown, payload: { url: string }) => {
+      try { cb(payload); } catch { /* swallow */ }
+    };
+    ipcRenderer.on('tray:sniff-url', handler);
+    return () => ipcRenderer.removeListener('tray:sniff-url', handler);
+  },
+  onTrayNavigate(cb: (p: { tab: string }) => void): () => void {
+    const handler = (_: unknown, payload: { tab: string }) => {
+      try { cb(payload); } catch { /* swallow */ }
+    };
+    ipcRenderer.on('tray:navigate', handler);
+    return () => ipcRenderer.removeListener('tray:navigate', handler);
+  },
+  onTrayReuploadLatest(cb: () => void): () => void {
+    const handler = () => {
+      try { cb(); } catch { /* swallow */ }
+    };
+    ipcRenderer.on('tray:reupload-latest', handler);
+    return () => ipcRenderer.removeListener('tray:reupload-latest', handler);
+  },
   /* ---------------- Embed resolver (yt-dlp, bundled) ---------------- */
   async checkYtdlp(): Promise<YtdlpStatus> {
     return ipcRenderer.invoke('resolve:checkYtdlp');
