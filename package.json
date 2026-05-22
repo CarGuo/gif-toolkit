@@ -35,6 +35,7 @@
     "test:db:run": "cross-env GIFTK_DB_TESTS=1 vitest run tests/main/db",
     "test:db": "node scripts/test-db.mjs",
     "test:e2e": "npm run build && playwright test",
+    "test:e2e:lineage-ui": "npm run build && playwright test tests/e2e/realPipeline.spec.ts -g \"TB-LINEAGE-UI-ALL\"",
     "docs:render": "node scripts/render-mermaid.mjs",
     "docs:screenshots": "npm run build && node scripts/capture-screenshots.mjs",
     "docs:all": "npm run docs:render && npm run docs:screenshots",

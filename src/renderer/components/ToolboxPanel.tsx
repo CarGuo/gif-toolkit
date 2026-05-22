@@ -1701,7 +1701,19 @@ export function ToolboxPanel(props: ToolboxPanelProps = {}): JSX.Element {
         open={showLineageSection}
         lineage={lineage}
         draftKind={lineageDraftKind}
-        setDraftKind={setLineageDraftKind}
+        // R-LIN-CHIP-RESET-V1 — when the user picks a different chip
+        // we MUST also re-seed draftParams from defaultParamsFor(k),
+        // otherwise the previous chip's params (e.g. gif-resize's
+        // empty object) leak into kinds that demand specific keys
+        // like gif-webp-convert's `targetFormat`. Without this the
+        // run button enables, the user clicks 「继续 →」, and the
+        // main-process validator rejects the step with
+        // "targetFormat is required". Caught by SUITE
+        // TB-LINEAGE-UI-ALL UI-LIN-8.
+        setDraftKind={(k: ToolboxKind | null) => {
+          setLineageDraftKind(k);
+          setLineageDraftParams(k ? defaultParamsFor(k) : {});
+        }}
         draftParams={lineageDraftParams}
         setDraftParams={setLineageDraftParams}
         focusMedia={lineageFocus ? (jobMedia[lineageFocus.path] ?? null) : null}
