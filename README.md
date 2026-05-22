@@ -145,6 +145,36 @@ App 启动后约 5 秒会静默查询一次 GitHub Releases；发现严格更高
 
 每一步实际上是单步 1-step `startToolboxChain` IPC，复用既有的链路运行器 / 取消传播 / 历史记录契约（详见 [docs/ipc-contract.md](./docs/ipc-contract.md) 与 SUITE TB-CHAIN A/B/C/D/E）。Crop 在链路模式下直接复用批量的 CropForm 把矩形写进 draft params，不再走 awaiting-input 暂停模型。
 
+### 体验加速包（R-COMPRESS-V1 — 6 件 P0 体验项）
+
+针对真实使用里"参数命名工程化但用户不知道该选什么"的反馈，工具箱与历史卡上集中落地了 6 处零回归的体验加速：
+
+1. **GIF Optimize 顶部一行「目标体积」chip 条**：`< 2 MB / < 5 MB / < 10 MB / 自定义`，点一下即把 `method='budget'` + `maxBytes` 设到对应阈值。原有 `Optimization method` 下拉与 `Lossy 强度` 数字框不动，仅多出一个"先想清楚目标"的入口。
+
+   ![GIF Optimize 顶部目标体积快捷条](./docs/images/screenshots/06-toolbox-target-bytes-chip.png)
+
+2. **Video → GIF / WebP 的 smart fps 默认**：拖入视频后默认值改为 `min(srcFps, 24)` 而非固定 12，避免高帧率源被偷偷降到电影级帧率。
+
+3. **Video → GIF 编码引擎切换**：参数表新增「编码引擎」segmented control，可在 `Fast (ffmpeg)` 和 `High quality (gifski)` 之间切。`gifski` 引擎走「ffmpeg 抽 PNG 序列 → gifski --fps --quality --repeat 编码」，色彩更细但更慢；默认仍为 ffmpeg 单遍调色板，零行为变更。`gifski-static` 已挂在 `optionalDependencies` 里，不存在时按钮禁用并降级为提示。
+
+   ![Video → GIF 编码引擎切换](./docs/images/screenshots/07-toolbox-engine-toggle.png)
+
+4. **Lineage modal 「试跑 0.5s」预览按钮**：footer 上原本只有 `取消 / 继续 →`，现在中间多了一个`试跑 0.5s`，用当前参数处理前 0.5 秒生成预览（不入历史、不发 progress 事件、不抢 p-queue 槽位）。配套独立 IPC `toolbox:trialRun` / `toolbox:trialCleanup`，临时产物落在 `os.tmpdir()/giftk-trial-*`，由 R-87 sweep 兜底清理。
+
+   ![试跑 0.5s 预览按钮](./docs/images/screenshots/08-lineage-trial-preview.png)
+
+5. **历史卡推荐预设 chip 行**：每张含 done 产物的历史卡，在状态条上方多一行`推荐预设：…`：
+   - 视频产物（`.mp4/.mov/.webm/.mkv/.m4v`）→ `转 GIF · 快速` / `转 GIF · 高质量`
+   - GIF / WebP 产物 → `压到 <5MB` / `压到 <2MB`
+
+   点 chip 自动切到「工具箱」并原子地清空当前队列、整体替换 `kind+params`、把这条产物作为唯一输入入队，免去手动设 kind / 调参 / 选文件的来回跳。
+
+   ![历史卡推荐预设 chip 行](./docs/images/screenshots/09-history-preset-strip.png)
+
+6. **嗅探卡 → 上传历史一键跳转**（加速项）：嗅探卡顶部的「☁ 已上传 N」胶囊从纯展示改为可点击，跳到「上传历史」并定位到对应 record。
+
+每件功能都跟有真实 UI-driven Playwright e2e（SUITE RCV1-A/B/C/D/E/F），不 mock `window.giftk`、走完整 preload bridge + 主进程 IPC + sqlite 链路，确保渲染端到主进程的 wiring 整体生效。
+
 ---
 
 ## 自适应压缩管线(为什么压得稳)

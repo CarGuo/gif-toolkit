@@ -172,3 +172,63 @@ flowchart TD
 
 只要任一 high 或 mid finding 命中,就必须走 wechat-safe 子管线;low finding 用户决定。
 
+---
+
+## 9. R-COMPRESS-V1 体验加速包(工具箱 / 历史卡 6 件 P0)
+
+> 详细规则文件:[harness/rules/R-COMPRESS-V1-six-quick-wins.md](../harness/rules/R-COMPRESS-V1-six-quick-wins.md)
+
+四阶段压缩管线本身没改;这一版改的是"用户能不能找到正确的入口设对参数"。六处零回归改动:
+
+### 9.1 #1 GIF Optimize 顶部目标体积 chip 条
+- ParamForm 顶部 `< 2 MB / < 5 MB / < 10 MB / 自定义` chip,点一下即设 `method='budget'` + `maxBytes`。
+- "自定义" chip 是非破坏性的:`prev.method='budget' && maxBytes=5MB` 时点自定义 → 5MB chip **仍然点亮**(语义是"已经是 5MB 自定义,你想再调"),只把光标聚焦到自定义输入框。
+
+### 9.2 #2 smart fps 默认值
+- Video → GIF / WebP 拖入文件后,默认 fps 从固定 12 改为 `min(srcFps, 24)`。
+- ffprobe 拿到的源 fps 通过 useToolbox.applyFile 写入 paramsByKind[kind].fps,**不**强行 clamp 用户已显式输入的值。
+
+### 9.3 #3 video → gif engine 切换 (fast↔gifski)
+- `ToolboxParams.engine?: 'ffmpeg' | 'gifski'`,默认 `'ffmpeg'`(零行为变更)。
+- main 通过 `getGifskiPath()` 解析 `node_modules/gifski/bin/{macos|windows|debian}/gifski`(per platform),`videoToGifGifski()` 构造与 palette 同 `setpts/fps/crop/scale` 链 + tmp PNG seq + finally 清理 + AbortSignal:
+  ```
+  ffmpeg -i src ... -filter:v "fps=8,scale=480:-2,..." -f image2 \
+      $tmp/giftk-gifski-<stamp>/frame-%06d.png
+  gifski --fps 8 --quality 90 --repeat 0 -o out.gif $tmp/.../*.png
+  ```
+- 选择是 per-kind 隔离的:`video-to-gif` paramsByKind 切完后切到 `gif-optimize` 再切回来,`engine` 会回到 default `'ffmpeg'`(防 gifski 泄漏到下个 batch)。
+- gifski 不在系统时按钮 disabled + tooltip 解释,**不许**静默 fallback 到 ffmpeg。
+
+### 9.4 #4 lineage modal 「试跑 0.5s」预览
+- 不入历史 / 不发 progress / 不抢 p-queue,三隔离写在 R-COMPRESS-V1.2。
+- IPC 走独立通道 `toolbox:trialRun` / `toolbox:trialCleanup`(与 batch 的 `startToolboxChain` / `cancelToolboxChain` 完全分离)。
+- 输入剥离:lineage 可能带 `startSec / endSec`,trial 必须先 `stripTimeRangeForTrial` 再用 `toolboxTrim -ss 0 -t 0.5` 截前 0.5s,否则 trim clamp 会抛错。
+- 输出 basename 必须 `giftk-trial-` 前缀 + `os.tmpdir()` 子树;`toolbox:trialCleanup` 严格白名单校验;R-87 sweep 兜底。
+- preload 走 `window.giftk.toolbox.{trialRun,trialCleanup}` 子命名空间,与现有 `window.giftk.toolbox.startChain` 同源。
+
+### 9.5 #5 历史卡推荐预设 chip 行
+- 按 first-done-output 扩展名挑 chip(逻辑在 `pickPresetChipsForPath`):
+  - `.mp4/.mov/.webm/.mkv/.m4v` → `转 GIF · 快速` (kind=video-to-gif, engine=ffmpeg) / `转 GIF · 高质量` (kind=video-to-gif, engine=gifski)
+  - `.gif/.webp` → `压到 <5MB` / `压到 <2MB` (kind=gif-optimize, method=budget, maxBytes=5/2 MB)
+- 点 chip 走 useToolbox.applyPreset,**原子**地:`setJobs([])` + `setProgressByJobId({})` + `setLastOutputDir(null)` + `setKind(nextKind)` + `setParamsByKind(prev → prev with [nextKind] entirely replaced)` + `enqueueFile(inputPath)`。
+- 跨 5 文件 wiring:HistoryPanel → SecondaryViews → App.tsx → ToolboxPanel(`pendingPreset` prop + key-effect) → useToolbox.applyPreset。
+
+### 9.6 #6 嗅探卡 → 上传历史一键跳转(加速项)
+- HistoryPanel 嗅探卡顶部 `☁ 已上传 N` 胶囊从展示改为可点击;App.tsx setView('uploads') + 让 UploadHistoryPanel 滚到对应 record。
+
+---
+
+每件功能都跟有真实 UI-driven Playwright e2e:
+
+| SUITE | 验证点 | 文件 |
+|---|---|---|
+| RCV1-A | #6 上传胶囊跳转 | [tests/e2e/realPipeline/suite-r-compress-v1-ui.ts](../tests/e2e/realPipeline/suite-r-compress-v1-ui.ts) |
+| RCV1-B | #1 目标体积 chip | 同上 |
+| RCV1-C | #2 smart fps | 同上 |
+| RCV1-D | #3 engine segmented(同 kind toggle 而非跨 kind round-trip) | 同上 |
+| RCV1-E | #4 trial-run 真实 ffmpeg + 真实 gif on disk + cleanup | 同上 |
+| RCV1-F | #5 推荐预设 chip 全链路 | 同上 |
+
+测试范式:**绝不 mock window.giftk** —— 全部走真实 preload bridge + 真实 main IPC + 真实 ffmpeg/sqlite。
+
+

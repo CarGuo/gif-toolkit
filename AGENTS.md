@@ -52,6 +52,7 @@
 | **R-86** | 跨平台后台托盘 + 全局快捷键(mac=Cmd+Shift+G/V,win+linux=Ctrl+Shift+G/V);冲突降级 + before-quit 必须 unregister + destroyTray | [R-86](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-86-tray-and-shortcuts.md) |
 | **R-87** | Tmp 清理三道护栏:ALLOWED_PREFIXES 白名单 + tmpdir-jail + dryRun 默认;sessionTmpRegistry 防误删本会话资源 | [R-87](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-87-tmp-cleanup-guardrails.md) |
 | **R-TB-CHAIN** | 工具箱渐进式链路:每步 1-step `startToolboxChain`、taskId 精确等值匹配、cancel-first 三入口、nextKindOptions 按产物扩展名过滤、Crop 复用 CropForm 而非 awaiting-input;**V2.6 起 lineage UI 弹窗化**(modal overlay + 视频/GIF 自动播放预览)、历史行 4-列 grid + 悬停自播缩略图 | [R-TB-CHAIN](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-TB-CHAIN-toolbox-progressive-lineage.md) |
+| **R-COMPRESS-V1** | 工具箱 / 历史卡 6 件 P0 体验加速:目标体积 chip / smart fps / engine 切换 / 试跑 0.5s / 推荐预设 chip / 嗅探卡上传胶囊跳转。paramsByKind 隔离不许打破;trial 三隔离(不入 queue/history/progress);applyPreset 必须原子(整体替换非 merge);gifski 不存在禁用而非静默 fallback;每件配真实 e2e SUITE RCV1-A..F | [R-COMPRESS-V1](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-COMPRESS-V1-six-quick-wins.md) |
 
 ---
 
@@ -123,6 +124,9 @@
 5. **任务"卡住" → 大概率是 [TaskProgress](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types) 没带 substep**,先补 substep 再看代码层。
 6. **打包后 ffmpeg 找不到** → 看 [package.json `asarUnpack`](file:///Users/guoshuyu/workspace/gif-toolkit/package.json) 是否覆盖了新引入的二进制依赖。
 7. **新加 `GIF_*` / 任何 enum 常量后只走 barrel re-export** → 违反 R-82 双保险,生产可能走 stale dist;直接 `import { X } from '../shared/types/process'`。
+8. **想让 engine / target-bytes 等 Toolbox 字段跨 kind 持久化** → 违反 R-COMPRESS-V1.1。useToolbox 的 paramsByKind 是**有意**隔离;round-trip kind 必然回到 kind-default。要持久化必须显式过 SQLite per-kind 存,**不要**引入"全局 sticky params"。
+9. **Lineage modal 试跑 0.5s 没剥 startSec/endSec** → 违反 R-COMPRESS-V1.3。trim clamp 会内部 throw;调用前 stripTimeRangeForTrial。
+10. **gifski 不在系统时静默 fallback 到 ffmpeg** → 违反 R-COMPRESS-V1.5。用户会以为他点了 hq;必须显式 disable + tooltip 解释。
 
 ---
 

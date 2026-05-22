@@ -141,6 +141,36 @@ History rows have been upgraded to a 4-col grid: a 56×56 thumbnail on the left 
 
 Each step is a single-step `startToolboxChain` IPC, reusing the existing chain runner, cancellation propagation, and history contract (see [docs/ipc-contract.md](./docs/ipc-contract.md) and SUITE TB-CHAIN A/B/C/D/E). Crop in lineage mode reuses the batch CropForm and writes the rect directly into draft params; the legacy `awaiting-input` pause model is no longer triggered from the renderer.
 
+### UX accelerator pack (R-COMPRESS-V1 — six P0 quick wins)
+
+Real-world feedback boiled down to "the parameter names are correct but I do not know what to set". Six zero-regression UX wins ship across the toolbox panel and the history cards:
+
+1. **GIF Optimize "target size" chip strip at the top** — `< 2 MB / < 5 MB / < 10 MB / Custom`. One click sets `method='budget'` + the matching `maxBytes`. The original `Optimization method` dropdown and `Lossy 强度` field are untouched; this is purely a "decide the target first" entry point.
+
+   ![GIF Optimize target-size chip strip](./docs/images/screenshots/06-toolbox-target-bytes-chip.png)
+
+2. **Smart-fps default for Video → GIF / WebP** — when you drop a video the default fps is now `min(srcFps, 24)` instead of a fixed 12, so a high-fps source is not silently downsampled to film cadence.
+
+3. **Video → GIF encoding-engine toggle** — a new "encoding engine" segmented control flips between `Fast (ffmpeg)` and `High quality (gifski)`. The gifski path runs "ffmpeg → PNG sequence → gifski --fps --quality --repeat". Colour fidelity is noticeably better, encoding is slower; the default is still ffmpeg single-pass palette, so behaviour is unchanged unless you opt in. `gifski-static` is wired through `optionalDependencies`; if missing the button disables and explains why.
+
+   ![Video → GIF encoding-engine toggle](./docs/images/screenshots/07-toolbox-engine-toggle.png)
+
+4. **Lineage modal "Trial 0.5 s" preview button** — the footer used to be just `Cancel / Continue →`; there is now a `试跑 0.5s` (Trial 0.5 s) button between them. It runs the current params on the first 0.5 seconds only — no history row, no progress event, no p-queue slot. Backed by dedicated IPC `toolbox:trialRun` / `toolbox:trialCleanup`; temp output lands at `os.tmpdir()/giftk-trial-*` and is also covered by R-87 sweep as a belt-and-suspenders.
+
+   ![Trial 0.5 s preview button](./docs/images/screenshots/08-lineage-trial-preview.png)
+
+5. **Recommended-preset chip row on history cards** — every card with a done output now has a `推荐预设: …` (Recommended presets) row above the stage stepper:
+   - Video output (`.mp4/.mov/.webm/.mkv/.m4v`) → `转 GIF · 快速` (Convert · Fast) / `转 GIF · 高质量` (Convert · HQ)
+   - GIF / WebP output → `压到 <5MB` (Compress to <5 MB) / `压到 <2MB` (Compress to <2 MB)
+
+   Clicking a chip switches the active tab to the toolbox and atomically clears the queue, replaces `kind+params`, and enqueues that single output as the lone job — no more manually setting kind, tweaking params, and re-selecting the file.
+
+   ![History card recommended-preset chip row](./docs/images/screenshots/09-history-preset-strip.png)
+
+6. **Sniff card → uploads-tab one-click jump** (acceleration item) — the `☁ uploaded N` chip on top of every sniff card was display-only; it is now clickable and jumps to the `Uploads` tab with that record focused.
+
+Every one of the six is gated by a real UI-driven Playwright e2e (SUITE RCV1-A/B/C/D/E/F) that never mocks `window.giftk` — full preload bridge + main IPC + sqlite — so the wiring from renderer to main is verified end-to-end.
+
 ---
 
 ## Adaptive compression pipeline (why outputs are stable)
