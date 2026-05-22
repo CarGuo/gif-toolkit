@@ -3,42 +3,21 @@ import type { ToolboxKind, ToolboxParams } from '../../shared/types';
 import type { LineageNode, UseToolboxLineageResult } from './useToolboxLineage';
 import type { MediaInfo } from './ToolboxPanel';
 import { LineageProgressRow } from './ToolboxLineageProgress';
+import { formatBytes } from './formatBytes';
 
 /**
  * R-TB-CHAIN-V2.6 — ToolboxLineageModal.
  *
- * Why a dedicated modal:
- *   Earlier (V2.2-V2.5) the lineage UI was rendered inline as
- *   `<section class="tb-lineage">` directly under the dropzone, which
- *   visually competed with the always-present batch queue + history
- *   list on the same panel. Per user feedback ("二次处理的链路做成
- *   独立弹出框流程，结果预览自动播放") we lift the entire lineage UI —
- *   breadcrumb, current-node preview (with autoplay), next-step chips,
- *   ParamForm, CropForm, footer (取消 / 继续 →) — into a Modal that
- *   overlays the panel. ToolboxPanel main area now stays in batch mode
- *   regardless of lineage state.
+ * The lineage UI (breadcrumb, focus preview, next-step chips, param
+ * form, footer) is hoisted into a modal that overlays the panel; the
+ * panel itself stays in batch mode regardless of lineage state.
  *
- * Autoplay strategy:
- *   - .gif / .webp animated → <img src=giftk-local://...> (browser auto
- *     decodes & loops static-image animations).
- *   - .mp4 / .mov / .webm  → <video muted autoplay loop playsInline>
- *     (Chromium policy allows muted autoplay without user gesture).
- *   - other (.jpg / .png) → <img>, static.
+ * Preview: GIF/WebP via <img>, video via muted-autoplay-loop <video>.
+ * The giftk-local:// protocol (R-56) serves absolute paths under the
+ * same CSP allowance as offline imports.
  *
- *   We deliberately do NOT pull thumbnail dataUrl here — the modal has
- *   the screen real estate for a real-size preview and we already have
- *   the giftk-local:// custom protocol registered (R-56) for serving
- *   absolute paths through Electron with the same CSP allowance as
- *   offline-imported assets.
- *
- * Lifecycle:
- *   - `open` is driven by ToolboxPanel's `lineageDormant` flag plus
- *     `lineage.nodes.length > 0`. ESC and the 关闭 button BOTH exit the
- *     lineage (await cancel + setLineageDormant(true)).
- *   - The modal does NOT own lineage state — that still lives in the
- *     `useToolboxLineage` hook returned to the panel. The modal is a
- *     pure projection over (lineage, draftKind, draftParams) so the
- *     panel can remount it freely without losing any state.
+ * The modal is a pure projection over (lineage, draftKind, draftParams)
+ * so the panel can remount it freely without losing any state.
  */
 
 // Keep KIND_LABELS / accept-extension knowledge in one place. We
@@ -82,6 +61,16 @@ function detectKind(p: string | null | undefined): 'gif' | 'webp' | 'video' | 'i
   return 'other';
 }
 
+/** Render the focus's size, optionally with a "root → focus" delta. */
+function fmtSizeCell(focusSize: number, rootSize: number | undefined, isRootFocus: boolean): string {
+  if (!isRootFocus && rootSize && rootSize > 0) {
+    const deltaPct = ((focusSize - rootSize) / rootSize) * 100;
+    const sign = deltaPct >= 0 ? '+' : '';
+    return `${formatBytes(rootSize)} → ${formatBytes(focusSize)} (${sign}${deltaPct.toFixed(1)}%)`;
+  }
+  return formatBytes(focusSize);
+}
+
 /**
  * Auto-playing preview of the current focus node.
  * GIF/animated WebP via <img>, video via muted autoplay loop.
@@ -107,15 +96,21 @@ function FocusPreview({
   // the user sees the would-be next-step output, not the input.
   const renderPath = trialPath || path || null;
   const kind = detectKind(renderPath);
-  const url = renderPath ? pathToLocalUrl(renderPath) : '';
+  const baseUrl = renderPath ? pathToLocalUrl(renderPath) : '';
+  // Cache-buster — Chromium reuses decoded GIFs by URL; appending a
+  // per-mount counter forces a fresh decoder every focus change. The
+  // protocol handler ignores query strings.
+  const mountSeqRef = useRef(0);
+  const url = useMemo(() => {
+    if (!baseUrl) return '';
+    mountSeqRef.current += 1;
+    return `${baseUrl}?_=${mountSeqRef.current}`;
+  }, [baseUrl]);
   const [errored, setErrored] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   useEffect(() => { setErrored(false); }, [url]);
-  // R-COMPRESS-V1 #4 follow-up — focus-change between video nodes
-  // reuses the same <video> DOM element; setting `src` alone leaves
-  // Chromium on the previous decoder. Explicitly call load()+play()
-  // to restart playback. play() rejection is silenced — element is
-  // muted+autoplay+playsInline so only transient decoder issues fail.
+  // <video> reuses the DOM element on src change; explicit load+play
+  // avoids freezing on the previous decoder. play() rejection is OK.
   useEffect(() => {
     if (kind !== 'video') return;
     const el = videoRef.current;
@@ -156,11 +151,8 @@ function FocusPreview({
   if (kind === 'video') {
     return (
       <video
-        // key={url} forces React to remount the <video> element when
-        // the focus moves to a different file; combined with the
-        // imperative load()+play() in the effect above this guarantees
-        // the new src actually starts playing instead of staying paused
-        // on the previous decoder's last frame.
+        // key={url} remounts the element on focus change so the new
+        // src + load()/play() effect actually restarts playback.
         key={url}
         ref={videoRef}
         className="tb-lineage-preview-media"
@@ -174,15 +166,10 @@ function FocusPreview({
       />
     );
   }
-  // gif / webp / image — all served via <img>; animated formats loop
-  // natively in the browser. The key={url} forces a fresh DOM node on
-  // every focus change — this is the canonical workaround for the
-  // Chromium quirk where reusing an <img> element to load the same or
-  // a different GIF leaves the animation paused on the last decoded
-  // frame (a behaviour we observed when the user navigates the lineage
-  // breadcrumb and the current preview "freezes"). Remounting forces
-  // the renderer to re-run the GIF decoder from frame 0 with full
-  // animation enabled.
+  // gif / webp / image — animated formats loop natively. key={url} +
+  // the cache-buster query string force a brand new DOM node and a
+  // fresh image-pipeline entry, working around the Chromium quirk
+  // where a reused <img> can stay frozen on the last decoded frame.
   return (
     <img
       key={url}
@@ -210,10 +197,11 @@ export interface ToolboxLineageModalProps {
   setDraftParams: (p: ToolboxParams | ((prev: ToolboxParams) => ToolboxParams)) => void;
   /** Probed media info for the current focus path, if any. */
   focusMedia: MediaInfo | null;
-  /** First-frame poster (data URL) for the focus path, if cached by the
-   *  panel. Used as a fallback when the live giftk-local:// render
-   *  fails (e.g. file moved). Optional — without it the FocusPreview
-   *  falls through to an explicit "预览不可用" message. */
+  /** Probed media info for the chain root — used to render a
+   *  "before → after" size delta in the meta row. */
+  rootMedia?: MediaInfo | null;
+  /** First-frame poster (data URL) for the focus path, used as a
+   *  fallback when the live giftk-local:// render fails. */
   focusPosterDataUrl?: string | null;
   /** ParamForm renderer injected by the panel (lives in ToolboxPanel.tsx). */
   renderParamForm: (args: {
@@ -252,6 +240,7 @@ export function ToolboxLineageModal(props: ToolboxLineageModalProps): JSX.Elemen
     draftParams,
     setDraftParams,
     focusMedia,
+    rootMedia,
     focusPosterDataUrl,
     renderParamForm,
     renderCropForm,
@@ -469,6 +458,9 @@ export function ToolboxLineageModal(props: ToolboxLineageModalProps): JSX.Elemen
                     const parts: string[] = [];
                     if (focusMedia?.width && focusMedia?.height) parts.push(`${focusMedia.width}×${focusMedia.height}`);
                     if (focusMedia?.durationSec) parts.push(`${focusMedia.durationSec.toFixed(2)}s`);
+                    if (focusMedia?.sizeBytes) {
+                      parts.push(fmtSizeCell(focusMedia.sizeBytes, rootMedia?.sizeBytes, lineage.focusIndex === 0));
+                    }
                     return parts.join(' · ');
                   })()}
                 </div>

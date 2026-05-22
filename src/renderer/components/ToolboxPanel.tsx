@@ -290,6 +290,11 @@ export interface MediaInfo {
    *  get a sane "follow source up to 24" instead of an over-aggressive
    *  drop or an under-sampled motion. */
   frameRate?: number;
+  /** R-COMPRESS-V1 #4 follow-up — source byte size from `statSync`
+   *  (set by the panel's probe pipeline, see [JobMedia](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/ToolboxPanel.tsx#L909-L918)).
+   *  Surfacing this on the public MediaInfo lets the lineage modal show
+   *  a "before vs after" size delta in the focus meta row. */
+  sizeBytes?: number;
 }
 
 /** R-38 — Crop sub-form. Lifted out of ParamForm so we can use refs +
@@ -1670,6 +1675,7 @@ export function ToolboxPanel(props: ToolboxPanelProps = {}): JSX.Element {
         draftParams={lineageDraftParams}
         setDraftParams={setLineageDraftParams}
         focusMedia={lineageFocus ? (jobMedia[lineageFocus.path] ?? null) : null}
+        rootMedia={lineage.nodes[0] ? (jobMedia[lineage.nodes[0].path] ?? null) : null}
         focusPosterDataUrl={lineageFocus ? (jobMedia[lineageFocus.path]?.previewDataUrl ?? null) : null}
         renderParamForm={({ kind, params, setParams, mediaInfo }) => (
           <ParamForm kind={kind} params={params} setParams={setParams} mediaInfo={mediaInfo} />
