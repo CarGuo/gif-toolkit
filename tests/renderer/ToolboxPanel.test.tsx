@@ -13,8 +13,8 @@
  *   4. The Start button is disabled when the queue is empty.
  */
 import React from 'react';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { ToolboxPanel } from '../../src/renderer/components/ToolboxPanel';
 
 interface FakeGiftk {
@@ -504,6 +504,17 @@ describe('ToolboxPanel', () => {
 // Coverage target: ≥ 8 tests, mirroring the V2.2 user-spec.
 // ============================================================================
 describe('ToolboxPanel — lineage (R-TB-CHAIN-V2)', () => {
+  // Issue R9 — explicit unmount + mock reset between tests. Without
+  // this, a previously-rendered ToolboxPanel keeps its onProgress
+  // listener registered against the *previous* installLineageGiftk's
+  // listeners array, and the next test's emitProgress can fire stale
+  // setStates against an unmounted tree (act warnings + flake).
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+    delete (window as unknown as { giftk?: unknown }).giftk;
+  });
+
   // Bridge fake augmented with the chain IPC pair + a hook to push
   // progress events back into the panel.
   function installLineageGiftk(): {

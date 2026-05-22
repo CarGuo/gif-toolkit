@@ -131,6 +131,12 @@ npm run package:linux   # Linux:AppImage / deb / tar.gz
 | Crop | 可视化框选裁剪 |
 | GIF ↔ WebP | 两种动画格式互转 |
 
+### 渐进式链路（R-TB-CHAIN-V2）
+
+工具箱右侧的历史结果区，每条 done 行都带「继续处理 →」按钮：点一下，工具箱面板会从批量模式切到独立的 **链路区**，把刚才的产物作为根节点；上方一条线性面包屑记录每一步（`原始输入 → GIF Resize → GIF Optimize ...`）。点击下方按产物扩展名过滤的下一步 chip（`.gif` 焦点不会出现 `Video → GIF`），填好参数点「继续 →」，结果会自动追加为新尾节点并把焦点跟过去；点中间面包屑可回到历史节点再分叉。「退出链路」回到批量模式，链路本身不丢——再点任意历史「继续处理 →」即重新进入。
+
+每一步实际上是单步 1-step `startToolboxChain` IPC，复用既有的链路运行器 / 取消传播 / 历史记录契约（详见 [docs/ipc-contract.md](./docs/ipc-contract.md) 与 SUITE TB-CHAIN A/B/C/D/E）。Crop 在链路模式下直接复用批量的 CropForm 把矩形写进 draft params，不再走 awaiting-input 暂停模型。
+
 ---
 
 ## 自适应压缩管线(为什么压得稳)

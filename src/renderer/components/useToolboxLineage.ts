@@ -190,18 +190,27 @@ export function useToolboxLineage(): UseToolboxLineageResult {
   const pendingRef = useRef<PendingStep | null>(null);
 
   const reset = useCallback((inputPath: string): void => {
+    // Issue R1/R6 — if a step is still in-flight (caller violated the
+    // "cancel first" contract), fire-and-forget cancelToolboxChain so
+    // the main process doesn't keep churning out an orphaned artifact.
+    const stragglerChainId = inflightChainIdRef.current;
+    const stragglerPending = pendingRef.current;
+    inflightChainIdRef.current = null;
+    pendingRef.current = null;
+    if (stragglerChainId) {
+      try {
+        const bridge = getBridge();
+        void bridge.cancelToolboxChain(stragglerChainId).catch(() => { /* best-effort */ });
+      } catch { /* no bridge — test env */ }
+    }
+    if (stragglerPending) {
+      stragglerPending.reject(new Error('lineage reset: in-flight step abandoned'));
+    }
     setNodes([{ nodeId: 'root', path: inputPath, kind: null, params: {}, chainId: null }]);
     setFocusIndex(0);
     setIsRunning(false);
     setError(null);
     nextIdCounterRef.current = 0;
-    inflightChainIdRef.current = null;
-    if (pendingRef.current) {
-      // Caller must have cancelled first; defensively reject any
-      // straggler so the prior promise doesn't leak.
-      pendingRef.current.reject(new Error('lineage reset: in-flight step abandoned'));
-      pendingRef.current = null;
-    }
   }, []);
 
   const focusNode = useCallback((nodeId: string): void => {
@@ -214,20 +223,25 @@ export function useToolboxLineage(): UseToolboxLineageResult {
   }, []);
 
   const cancel = useCallback(async (): Promise<void> => {
+    // Issue R6 — snapshot and clear refs synchronously BEFORE awaiting
+    // the IPC. This way any progress emit that arrives during the
+    // await is filtered out at the listener's `if (!pending) return`
+    // gate, so the chain can't append a node we've decided to abandon.
     const id = inflightChainIdRef.current;
+    const pending = pendingRef.current;
     if (!id) return;
+    inflightChainIdRef.current = null;
+    pendingRef.current = null;
+    setIsRunning(false);
     try {
       const bridge = getBridge();
       await bridge.cancelToolboxChain(id);
     } catch {
       // best-effort
     }
-    if (pendingRef.current) {
-      pendingRef.current.reject(new Error('cancelled'));
-      pendingRef.current = null;
+    if (pending) {
+      pending.reject(new Error('cancelled'));
     }
-    inflightChainIdRef.current = null;
-    setIsRunning(false);
   }, []);
 
   // Single global subscription — one listener per hook instance,
@@ -245,9 +259,11 @@ export function useToolboxLineage(): UseToolboxLineageResult {
     const off = bridge.onProgress((p: TaskProgress) => {
       const pending = pendingRef.current;
       if (!pending) return;
-      // The chain runner emits taskId === stepId === `${chainId}-s1`.
+      // Issue R7 — chain runner emits taskId === stepId === `${chainId}-s1`
+      // exactly. Use strict equality instead of startsWith so a longer
+      // chainId that happens to share a prefix can't ever be misrouted.
       if (typeof p.taskId !== 'string') return;
-      if (!p.taskId.startsWith(`${pending.chainId}-`)) return;
+      if (p.taskId !== `${pending.chainId}-s1`) return;
       const status = p.status;
       if (status === 'done') {
         const out = (p.outputs ?? [])[0];
@@ -312,10 +328,13 @@ export function useToolboxLineage(): UseToolboxLineageResult {
       setError(null);
       setIsRunning(true);
       inflightChainIdRef.current = chainId;
-      // Pre-register the pending entry so a fast-arriving progress
-      // emit (synchronous failure that already fired before we await
-      // the IPC) is never missed.
+      // Issue R5 — keep local references to the promise reject + the
+      // pending entry so the synchronous-IPC-failure path doesn't have
+      // to re-read pendingRef (which the listener might have already
+      // cleared) and doesn't need the unsound `as unknown as` cast.
+      let localReject: ((e: Error) => void) | null = null;
       const promise = new Promise<LineageNode>((resolve, reject) => {
+        localReject = reject;
         pendingRef.current = {
           chainId,
           kind,
@@ -335,18 +354,19 @@ export function useToolboxLineage(): UseToolboxLineageResult {
       } catch (err) {
         // Synchronous IPC rejection (e.g. compatibility veto).
         const e = err instanceof Error ? err : new Error(String(err));
-        // Cast through unknown to defeat the control-flow narrowing
-        // from the early `if (pendingRef.current) throw` guard above
-        // (TS can't see the mutation that happens inside the Promise
-        // executor on line ~318).
-        const cur = pendingRef.current as unknown as PendingStep | null;
-        if (cur && cur.chainId === chainId) {
-          cur.reject(e);
+        // Only clear the pending entry if it's still ours — the listener
+        // may have raced and already settled the same chainId for some
+        // reason; in that case we just bubble the error out without
+        // double-rejecting.
+        if (pendingRef.current && pendingRef.current.chainId === chainId) {
           pendingRef.current = null;
         }
-        inflightChainIdRef.current = null;
+        if (inflightChainIdRef.current === chainId) {
+          inflightChainIdRef.current = null;
+        }
         setIsRunning(false);
         setError(e.message);
+        if (localReject) localReject(e);
         throw e;
       }
       return promise;

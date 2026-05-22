@@ -1013,29 +1013,68 @@ export function ToolboxPanel(): JSX.Element {
   // first compatible chip and seed the params with that kind's defaults.
   // This avoids the "click a chip and stare at empty form" friction —
   // the user always lands on a fillable form straight after focus.
+  //
+  // Issue R3 — depend on the focus *path* (a stable string) rather than
+  // the `nextKindOptions` array reference. The array is recomputed via
+  // useMemo([focus]) inside the hook, so a new identity arrives every
+  // time the focus object changes — even when the underlying kinds
+  // haven't. Without this, the effect re-runs on innocuous re-renders
+  // and clobbers params the user typed into the ParamForm. Also stop
+  // calling setLineageDraftParams from inside the setLineageDraftKind
+  // updater (anti-pattern + double-invocation in StrictMode).
+  const lineageFocusPath = lineageFocus?.path ?? null;
   useEffect(() => {
     if (!isLineageActive) {
-      // Lineage exited — drop the draft so a future re-entry starts fresh.
       setLineageDraftKind(null);
       setLineageDraftParams({});
       return;
     }
+    const opts = lineage.nextKindOptions;
     setLineageDraftKind((prev) => {
-      // If the previous draft kind is still a valid option keep it,
-      // otherwise pick the first option (or null when none).
-      const opts = lineage.nextKindOptions;
       if (prev && opts.includes(prev)) return prev;
-      const next = opts[0] ?? null;
-      if (next) setLineageDraftParams(defaultParamsFor(next));
-      return next;
+      return opts[0] ?? null;
     });
-  }, [isLineageActive, lineage.nextKindOptions]);
+    setLineageDraftParams((prevParams) => {
+      const next = opts[0] ?? null;
+      if (!next) return {};
+      // Only re-seed defaults when the previously-selected kind became
+      // invalid (i.e. the focus path's compatible kinds changed). When
+      // prev kind survives, keep whatever the user already typed.
+      const prevKind = lineageDraftKindRef.current;
+      if (prevKind && opts.includes(prevKind)) return prevParams;
+      return defaultParamsFor(next);
+    });
+    // intentional: focus path is the canonical signal; we read
+    // nextKindOptions/lineageDraftKindRef lazily inside the effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLineageActive, lineageFocusPath]);
+
+  // Stable ref mirroring the latest draft kind so the focus-default
+  // effect can compare against the previous kind without re-subscribing.
+  const lineageDraftKindRef = useRef<ToolboxKind | null>(null);
+  useEffect(() => { lineageDraftKindRef.current = lineageDraftKind; }, [lineageDraftKind]);
+
+  // Issue R4 — exit-lineage epoch token. Each enter/exit cycle bumps
+  // this; handleExitLineage captures the epoch before await and aborts
+  // the post-await setLineageDormant(true) when a fresh enter has bumped
+  // it (i.e. the user re-entered a different lineage during the await).
+  const lineageExitEpochRef = useRef<number>(0);
 
   // R-TB-CHAIN-V2 — entry point #1: 「继续处理 →」 on a done history row.
   // Seeds the lineage with that row's primary output and clears any
   // prior dormancy flag so a previously-dismissed lineage re-enters.
-  const handleEnterLineageFromHistory = useCallback((entryOutput: string) => {
+  //
+  // Issue R1 — if a step is still in-flight when the user enters from
+  // history, cancel it first so we don't orphan the underlying chain.
+  // (lineage.reset itself ALSO fires a cancel as a defensive net, but
+  //  awaiting cancel here gives the IPC time to settle before we
+  //  rewrite the focus.)
+  const handleEnterLineageFromHistory = useCallback(async (entryOutput: string) => {
     if (!entryOutput) return;
+    if (lineage.isRunning) {
+      try { await lineage.cancel(); } catch { /* best-effort */ }
+    }
+    lineageExitEpochRef.current += 1;
     setLineageDormant(false);
     lineage.reset(entryOutput);
     setPickError(null);
@@ -1047,10 +1086,6 @@ export function ToolboxPanel(): JSX.Element {
   // the user can navigate forward again without having to re-run.
   const handleFocusLineageNode = useCallback((nodeId: string) => {
     lineage.focusNode(nodeId);
-    // Reset draft because the new focus may have different compatible
-    // kinds. The default-on-focus effect above will pick a chip.
-    setLineageDraftKind(null);
-    setLineageDraftParams({});
   }, [lineage]);
 
   const handleSelectLineageKind = useCallback((k: ToolboxKind) => {
@@ -1059,11 +1094,17 @@ export function ToolboxPanel(): JSX.Element {
   }, []);
 
   const handleExitLineage = useCallback(async () => {
-    // If a step is mid-flight cancel it first so the IPC promise
-    // settles cleanly before the section unmounts.
+    // Issue R4 — capture the epoch before awaiting cancel(). If the
+    // user re-enters via "继续处理 →" during the await, that handler
+    // bumps the epoch; on resume here we detect the mismatch and
+    // bail out of setLineageDormant(true) so the freshly-entered
+    // lineage stays visible.
+    const epochAtEntry = lineageExitEpochRef.current;
     if (lineage.isRunning) {
       try { await lineage.cancel(); } catch { /* ignore */ }
     }
+    if (lineageExitEpochRef.current !== epochAtEntry) return;
+    lineageExitEpochRef.current += 1;
     setLineageDormant(true);
   }, [lineage]);
 
@@ -1491,8 +1532,9 @@ export function ToolboxPanel(): JSX.Element {
                     <button
                       type="button"
                       className="tb-history-continue"
-                      title="基于此结果继续链式处理"
-                      onClick={() => handleEnterLineageFromHistory(out)}
+                      title={lineage.isRunning ? '当前链路有步骤进行中，请先取消或等待' : '基于此结果继续链式处理'}
+                      onClick={() => { void handleEnterLineageFromHistory(out); }}
+                      disabled={lineage.isRunning}
                     >
                       继续处理 →
                     </button>

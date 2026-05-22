@@ -131,6 +131,12 @@ The **Toolbox** tab exposes 10 standalone tools, each accepting drag-and-dropped
 | Crop | Visual rectangular crop |
 | GIF ↔ WebP | Convert between the two animation formats |
 
+### Progressive lineage chain (R-TB-CHAIN-V2)
+
+Every done row in the toolbox history sidebar shows a **「继续处理 →」(Continue →)** button. Clicking it switches the panel from batch mode into a dedicated **lineage section** seeded with that artifact as the root node. A linear breadcrumb at the top tracks every step (`Original input → GIF Resize → GIF Optimize ...`). Below it, only chips compatible with the focused artifact's extension are shown (a `.gif` focus hides `Video → GIF`); pick one, fill the params, click **「继续 →」(Run next)** and the result is appended as a new tail node with focus auto-advancing. Clicking an earlier breadcrumb segment walks focus back so you can branch from a historical step. **「退出链路」(Exit chain)** returns to batch mode without dropping the lineage — re-entering through any history row picks up where you left off.
+
+Each step is a single-step `startToolboxChain` IPC, reusing the existing chain runner, cancellation propagation, and history contract (see [docs/ipc-contract.md](./docs/ipc-contract.md) and SUITE TB-CHAIN A/B/C/D/E). Crop in lineage mode reuses the batch CropForm and writes the rect directly into draft params; the legacy `awaiting-input` pause model is no longer triggered from the renderer.
+
 ---
 
 ## Adaptive compression pipeline (why outputs are stable)

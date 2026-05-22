@@ -647,9 +647,22 @@ test('SUITE TB-CHAIN-E — UI lineage: history → 继续处理 → GIF Resize �
   );
 
   // The panel reads db.toolboxHistory on mount, so we have to nudge a
-  // re-read by bouncing tabs.
+  // re-read by bouncing tabs. Issue R8a — instead of a fixed sleep,
+  // poll until the seeded row is actually present in the DB before
+  // re-mounting the panel; this kills CI flake on slow IO.
   await page.locator('button.tab-btn', { hasText: '主页' }).click().catch(() => undefined);
-  await page.waitForTimeout(150);
+  await expect.poll(
+    async () => {
+      const rows = (await page.evaluate(async () => {
+        const w = window as unknown as {
+          giftk: { db: { toolboxHistory: { readAll(): Promise<unknown[]> } } };
+        };
+        return await w.giftk.db.toolboxHistory.readAll();
+      })) as Array<{ id: string }>;
+      return rows.some((r) => r.id === seedId);
+    },
+    { timeout: 10_000, intervals: [50, 100, 200] }
+  ).toBe(true);
   await toolboxTab.click();
 
   // The seeded row should now be visible.
@@ -690,26 +703,45 @@ test('SUITE TB-CHAIN-E — UI lineage: history → 继续处理 → GIF Resize �
     const continueStepBtn = lineageSection.locator('button.btn.primary', { hasText: /^继续 →/ });
     await expect(continueStepBtn).toBeEnabled();
     await continueStepBtn.click();
-    // The hook generates its own chainId — we don't know it up front.
-    // Wait for ANY single-step chain terminal emit emitted after our
-    // baseline. Single-step chains emit stepIndex===1, totalSteps===1.
+
+    // Issue R8b — bind to the chainId emitted by THIS step. The hook
+    // generates a fresh `tblineage-<ts>-<rand>` per call, and lineage
+    // step IDs are exactly `${chainId}-s1`. We discover the chainId
+    // from the first post-baseline emit whose taskId matches that
+    // prefix, then require terminal-emit matching to come from the
+    // SAME chainId. This stops a stale TB-CHAIN-A..D residual single-
+    // step emit from being mistaken for our lineage step.
+    let boundChainId: string | null = null;
     let final: ChainTerminalProgress | null = null;
     const startWait = Date.now();
     while (Date.now() - startWait < 60_000) {
       const snap = await snapshotRecorder();
       const candidates = snap.progress.slice(baselineProgress);
-      const last = [...candidates].reverse().find((p) => {
-        const cp = p as unknown as ChainTerminalProgress;
-        if (cp.totalSteps !== 1 || cp.stepIndex !== 1) return false;
-        return cp.status === 'done' || cp.status === 'failed' || cp.status === 'cancelled';
-      });
-      if (last) {
-        final = last as unknown as ChainTerminalProgress;
-        break;
+      if (!boundChainId) {
+        for (const p of candidates) {
+          const tid = (p as { taskId?: unknown }).taskId;
+          if (typeof tid !== 'string') continue;
+          const m = /^(tblineage-[a-z0-9-]+)-s1$/i.exec(tid);
+          if (m) { boundChainId = m[1]; break; }
+        }
+      }
+      if (boundChainId) {
+        const expectedTaskId = `${boundChainId}-s1`;
+        const last = [...candidates].reverse().find((p) => {
+          const cp = p as unknown as ChainTerminalProgress & { taskId?: string };
+          if (cp.taskId !== expectedTaskId) return false;
+          if (cp.totalSteps !== 1 || cp.stepIndex !== 1) return false;
+          return cp.status === 'done' || cp.status === 'failed' || cp.status === 'cancelled';
+        });
+        if (last) {
+          final = last as unknown as ChainTerminalProgress;
+          break;
+        }
       }
       await page.waitForTimeout(200);
     }
-    if (!final) throw new Error('SUITE TB-CHAIN-E: lineage step did not emit a terminal status within 60s');
+    if (!boundChainId) throw new Error('SUITE TB-CHAIN-E: no tblineage-* taskId observed within 60s');
+    if (!final) throw new Error(`SUITE TB-CHAIN-E: lineage step ${boundChainId} did not emit a terminal status within 60s`);
     expect(final.status).toBe('done');
     const outs = final.outputs ?? [];
     expect(outs.length).toBeGreaterThanOrEqual(1);
@@ -719,9 +751,8 @@ test('SUITE TB-CHAIN-E — UI lineage: history → 继续处理 → GIF Resize �
     expect(/\.gif$/i.test(lineageOutputPath)).toBe(true);
 
     // === Step 5 — breadcrumb now has 2 nodes, focus on the new tail ===
-    // The hook calls setNodes synchronously inside its progress
-    // listener, but React batches. Allow a small flush window.
-    await page.waitForTimeout(300);
+    // Issue R8d — Playwright's retrying `toHaveCount` already covers the
+    // React flush window; no need for a fixed sleep.
     crumbs = lineageSection.locator('.tb-lineage-crumb');
     await expect(crumbs).toHaveCount(2, { timeout: 5_000 });
     await expect(crumbs.nth(1)).toHaveClass(/is-focus/);
@@ -754,11 +785,20 @@ test('SUITE TB-CHAIN-E — UI lineage: history → 继续处理 → GIF Resize �
       } catch { /* ignore */ }
     }
     await clearChainHistory().catch(() => undefined);
+    // Issue R8c — the lineage step writes a real row into toolbox_chain_history
+    // via the chain runner's terminal hook. Sibling SUITES (B/C) that assume an
+    // empty chain history would be polluted otherwise.
     await page.evaluate(async () => {
       const w = window as unknown as {
-        giftk: { db: { toolboxHistory: { clear(): Promise<void> } } };
+        giftk: {
+          db: {
+            toolboxHistory: { clear(): Promise<void> };
+            toolboxChainHistory: { clear(): Promise<void> };
+          };
+        };
       };
       await w.giftk.db.toolboxHistory.clear();
+      await w.giftk.db.toolboxChainHistory.clear();
     }).catch(() => undefined);
   }
 });
