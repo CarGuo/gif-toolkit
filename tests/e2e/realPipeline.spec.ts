@@ -99,6 +99,7 @@ import './realPipeline/suite-network-sniff';            // SUITE F, G, H (networ
 import './realPipeline/suite-segment-trim-reoptimize';  // SUITE I, J, L
 import './realPipeline/suite-format-contracts';         // SUITE M, N
 import './realPipeline/suite-compression-isolation-oracles'; // SUITE O, P, Q, R, S
+import './realPipeline/suite-toolbox-chain';            // SUITE TB-CHAIN A/B/C (R-TB-CHAIN)
 
 test.describe.configure({ timeout: 90_000 });
 
