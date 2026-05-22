@@ -51,13 +51,52 @@ export function isPrivateHost(rawHost: string): boolean {
 
 const WIN_RESERVED = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
 
+/**
+ * Best-effort percent-decoder used as the FIRST step of safeName.
+ *
+ * Why: filenames frequently arrive already percent-encoded — either
+ * because they came from a URL pathname (e.g. yt-dlp / browser-saved
+ * `%E7%8C%B4%E5%93%A5.mp4`) or because an upstream stage URL-encoded
+ * them. The legacy implementation kept these strings as-is and the
+ * sanitiser below would happily flatten the `%` to `_`, leaving a
+ * disk file named `E7_8C_B4_E5_93_A5.mp4` which is exactly what the
+ * user reported (visible in the toolbox history row, lineage modal
+ * title, and source pill, all sourced from the same on-disk path).
+ *
+ * The decoder is intentionally conservative:
+ *   - only attempts decoding when the input contains a `%XX` escape;
+ *   - returns the original string on any throw (malformed UTF-8 etc);
+ *   - rejects the decoded form if it didn't actually shrink (which
+ *     would mean nothing was decoded and only "%" was misread).
+ */
+function tryDecodePercent(input: string): string {
+  if (!input || input.indexOf('%') === -1) return input;
+  try {
+    const decoded = decodeURIComponent(input);
+    return decoded.length < input.length ? decoded : input;
+  } catch {
+    return input;
+  }
+}
+
 export function safeName(input: string, batchTaken?: Set<string>): string {
-  let s = (input || '').normalize('NFKC');
+  // (1) Decode percent-encoded bytes BEFORE sanitising — otherwise the
+  //     `%` chars get rewritten to `_` and the file ends up named
+  //     `E7_8C_B4_...` instead of `猴哥_...`.
+  let s = tryDecodePercent(input || '').normalize('NFKC');
+  // (2) Strip control chars and zero-width / bidi codepoints.
   // eslint-disable-next-line no-control-regex
   s = s.replace(/[\u0000-\u001f\u007f-\u009f\u200B-\u200F\u2028-\u202F\u2060-\u206F\uFEFF]/g, '');
+  // (3) Replace path separators and shell metacharacters with `_`.
   s = s.replace(/[\\/:*?"<>|]+/g, '_');
+  // (4) Collapse whitespace runs to a single underscore.
   s = s.replace(/\s+/g, '_');
-  s = s.replace(/[^a-zA-Z0-9._-]+/g, '_');
+  // (5) Allow Unicode letters / numbers / marks (covers CJK, hiragana,
+  //     katakana, hangul, accented latin, etc.) plus a small ASCII
+  //     punctuation subset (`. _ -`). Anything else (emoji, smart
+  //     quotes, math symbols, ...) collapses to `_`.
+  s = s.replace(/[^\p{L}\p{N}\p{M}._-]+/gu, '_');
+  // (6) Trim leading/trailing punctuation runs.
   s = s.replace(/^[._\s-]+|[._\s-]+$/g, '');
   if (s.length > 120) s = s.slice(0, 120);
   const stem = s.replace(/\.[^.]+$/, '');

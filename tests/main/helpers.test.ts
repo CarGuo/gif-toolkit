@@ -97,6 +97,53 @@ describe('safeName', () => {
     expect(taken.has(a)).toBe(true);
     expect(taken.has(b)).toBe(true);
   });
+
+  // R-FN-1 — Regression for the "E7_8C_B4_E5_93_A5..." disk filename
+  // bug. Percent-encoded inputs were being routed through the sanitiser
+  // unchanged, so the `%` was rewritten to `_` and the filename became
+  // a long underscore-separated UTF-8 byte string. The fix decodes the
+  // percent-escaping FIRST and widens the allowed-char set to Unicode
+  // letters/numbers so the decoded CJK survives the sanitiser.
+  it('decodes percent-encoded bytes before sanitising', () => {
+    // %E7%8C%B4%E5%93%A5 = "猴哥"
+    expect(safeName('%E7%8C%B4%E5%93%A5.mp4')).toBe('猴哥.mp4');
+  });
+
+  it('preserves CJK characters in already-decoded inputs', () => {
+    expect(safeName('猴哥_解析_81式自动步枪.mp4')).toBe('猴哥_解析_81式自动步枪.mp4');
+  });
+
+  it('preserves accented latin characters', () => {
+    expect(safeName('café-déjà-vu.gif')).toBe('café-déjà-vu.gif');
+  });
+
+  it('preserves hiragana / katakana / hangul', () => {
+    expect(safeName('こんにちは.gif')).toBe('こんにちは.gif');
+    expect(safeName('カタカナ.gif')).toBe('カタカナ.gif');
+    expect(safeName('한글.gif')).toBe('한글.gif');
+  });
+
+  it('still scrubs path separators inside CJK names', () => {
+    // Defence-in-depth: unicode letters allowed, but `/` and `\` still
+    // collapse to `_` so a malicious "猴/../etc/passwd" can't escape.
+    // `/` collapses to `_`; `..` survives because `.` is in the allow-list,
+    // but the leading directory escape is now harmless once flattened.
+    expect(safeName('猴哥/../恶意.gif')).toBe('猴哥_.._恶意.gif');
+  });
+
+  it('treats malformed percent-escapes as literal (no throw)', () => {
+    // Lone `%` with non-hex follow-up — decodeURIComponent throws,
+    // tryDecodePercent should fall through to keep the literal which
+    // then gets sanitised normally.
+    expect(safeName('foo%ZZbar.gif')).toBe('foo_ZZbar.gif');
+  });
+
+  it('flattens emoji / pictographs to `_` (not allowed in disk names)', () => {
+    // Emoji are technically `\p{So}` (Other Symbol), not `\p{L}`, so
+    // they're sanitised. We accept this — emoji-named files are an
+    // edge case not worth the cross-platform rendering risk.
+    expect(safeName('hello🎉world.gif')).toBe('hello_world.gif');
+  });
 });
 
 describe('fileNameFor', () => {
