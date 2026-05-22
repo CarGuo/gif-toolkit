@@ -65,6 +65,14 @@ export interface HistoryPanelProps {
   /** Override the page size (defaults to {@link HISTORY_PAGE_SIZE}).
    *  Exposed for tests so they can render with a deterministic page size. */
   pageSize?: number;
+  /** R-COMPRESS-V1 — 点击卡片上的「☁ 上传」胶囊时跳转到上传历史
+   *  tab 并打开此 record 关联的最新上传批次。当 record 还没有任何
+   *  成功上传时不会被触发（CSS 把胶囊渲染成 inactive 不可点）。
+   *  反查逻辑由 caller (App.tsx → ModalsHost) 实现并复用现有
+   *  `rec.uploadsByOutputPath[*].url ∩ uploadHistory[*].items[*].url`
+   *  集合相交策略；HistoryPanel 不直接读 uploadHistory，依旧保持
+   *  单向数据流。可选 prop — 旧 caller 不传则胶囊回退为纯展示。 */
+  onJumpToUploadHistory?: (rec: HistoryRecord) => void;
 }
 
 function fmtTime(ts: number): string {
@@ -104,8 +112,9 @@ function HistoryCard(props: {
   onOpenDetail: HistoryPanelProps['onOpenDetail'];
   onOpenOutputDir: HistoryPanelProps['onOpenOutputDir'];
   onRemove: HistoryPanelProps['onRemove'];
+  onJumpToUploadHistory?: HistoryPanelProps['onJumpToUploadHistory'];
 }): React.ReactElement {
-  const { rec, onOpenDetail, onOpenOutputDir, onRemove } = props;
+  const { rec, onOpenDetail, onOpenOutputDir, onRemove, onJumpToUploadHistory } = props;
   // R-27 (post-review): single-pass tally so big histories stay snappy.
   let totalDone = 0;
   let totalFailed = 0;
@@ -235,27 +244,66 @@ function HistoryCard(props: {
             {totalDone === 0 && totalFailed === 0 ? <span className="muted">未处理</span> : null}
           </span>
         </div>
-        {/* R-WS-90 P5g — 3-stage stepper. 用户一眼可读最远阶段。 */}
+        {/* R-WS-90 P5g — 3-stage stepper. 用户一眼可读最远阶段。
+            R-COMPRESS-V1 — 上传段在「已成功上传 ≥1 项 且 caller 提供
+            onJumpToUploadHistory」时升级为可点 button,直接跳转到上传
+            历史 tab 并打开匹配批次。其他阶段保持纯展示。 */}
         <div className="hist-card-stages" role="group" aria-label="处理阶段">
-          {stages.map((s, i) => (
-            <React.Fragment key={s.key}>
-              <span
-                className={`hist-stage hist-stage-${s.key} ${s.active ? 'is-active' : 'is-inactive'}`}
-                title={s.title}
-                aria-label={s.title}
-              >
+          {stages.map((s, i) => {
+            const isClickableUpload =
+              s.key === 'upload' && uploadedDone > 0 && !!onJumpToUploadHistory;
+            const stageClassName = `hist-stage hist-stage-${s.key} ${s.active ? 'is-active' : 'is-inactive'}${isClickableUpload ? ' is-clickable' : ''}`;
+            const stageTitle = isClickableUpload
+              ? `${s.title} — 点击跳转到上传历史`
+              : s.title;
+            const stageContent = (
+              <>
                 <span className="hist-stage-icon" aria-hidden="true">{s.icon}</span>
                 <span className="hist-stage-label">{s.label}</span>
                 <span className="hist-stage-detail">{s.detail}</span>
-              </span>
-              {i < stages.length - 1 ? (
-                <span
-                  className={`hist-stage-connector ${stages[i + 1].active ? 'is-active' : 'is-inactive'}`}
-                  aria-hidden="true"
-                />
-              ) : null}
-            </React.Fragment>
-          ))}
+              </>
+            );
+            return (
+              <React.Fragment key={s.key}>
+                {isClickableUpload ? (
+                  <button
+                    type="button"
+                    className={stageClassName}
+                    title={stageTitle}
+                    aria-label={stageTitle}
+                    onClick={(e) => {
+                      // Prevent the surrounding card's onClick (open detail
+                      // modal) from firing — clicking the upload pill is a
+                      // dedicated jump action and should NOT also open detail.
+                      e.stopPropagation();
+                      onJumpToUploadHistory!(rec);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.stopPropagation();
+                      }
+                    }}
+                  >
+                    {stageContent}
+                  </button>
+                ) : (
+                  <span
+                    className={stageClassName}
+                    title={stageTitle}
+                    aria-label={stageTitle}
+                  >
+                    {stageContent}
+                  </span>
+                )}
+                {i < stages.length - 1 ? (
+                  <span
+                    className={`hist-stage-connector ${stages[i + 1].active ? 'is-active' : 'is-inactive'}`}
+                    aria-hidden="true"
+                  />
+                ) : null}
+              </React.Fragment>
+            );
+          })}
         </div>
       </div>
       <div className="hist-card-actions" onClick={(e) => e.stopPropagation()}>
@@ -298,7 +346,8 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
   onRemove,
   onClear,
   isLoading,
-  pageSize = HISTORY_PAGE_SIZE
+  pageSize = HISTORY_PAGE_SIZE,
+  onJumpToUploadHistory
 }) => {
   // R-84 — pagination state.
   // Local-only (resets on remount) — when the user reopens the
@@ -363,6 +412,7 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
             onOpenDetail={onOpenDetail}
             onOpenOutputDir={onOpenOutputDir}
             onRemove={onRemove}
+            onJumpToUploadHistory={onJumpToUploadHistory}
           />
         ))}
       </div>

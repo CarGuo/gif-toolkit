@@ -1369,6 +1369,8 @@ const App: React.FC = () => {
           removeUploadHistory={removeUploadHistory}
           clearUploadHistory={clearUploadHistory}
           isUploadHistoryLoading={isUploadHistoryLoading}
+          setView={setView}
+          setUploadResult={setUploadResult}
         />
       )}
 

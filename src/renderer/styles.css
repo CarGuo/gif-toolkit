@@ -1848,6 +1848,29 @@ details.advanced-gif > summary {
   border-color: rgba(124, 91, 239, 0.55); /* --accent-2 @55% */
   background: rgba(124, 91, 239, 0.10);
 }
+/* R-COMPRESS-V1 — 「☁ 上传 N」胶囊在已上传成功后升级为 button:
+   1) 重置 button 默认样式让它和 <span> 视觉一致
+   2) 加 hover/focus/active 反馈让用户察觉它可点
+   3) cursor:pointer 配合 title 做发现性提示 */
+button.hist-stage {
+  font: inherit;
+  cursor: default;
+  appearance: none;
+}
+button.hist-stage.is-clickable {
+  cursor: pointer;
+}
+button.hist-stage.is-clickable:hover {
+  border-color: rgba(124, 91, 239, 0.85);
+  background: rgba(124, 91, 239, 0.18);
+}
+button.hist-stage.is-clickable:focus-visible {
+  outline: 2px solid rgba(124, 91, 239, 0.85);
+  outline-offset: 2px;
+}
+button.hist-stage.is-clickable:active {
+  transform: translateY(0.5px);
+}
 .hist-stage-connector {
   flex: 0 0 14px;
   height: 1px;
