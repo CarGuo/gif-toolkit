@@ -95,7 +95,7 @@ async function flushLoad(): Promise<void> {
 
 describe('defaultParamsFor', () => {
   it('returns sensible defaults per kind', () => {
-    expect(defaultParamsFor('video-to-gif')).toEqual({ fps: 12, width: 800 });
+    expect(defaultParamsFor('video-to-gif')).toEqual({ fps: 12, width: 800, engine: 'ffmpeg' });
     expect(defaultParamsFor('video-to-webp')).toMatchObject({ quality: 75, loop: 0 });
     expect(defaultParamsFor('gif-resize')).toEqual({ targetWidth: 480 });
     expect(defaultParamsFor('gif-optimize')).toEqual({
@@ -181,7 +181,7 @@ describe('useToolbox', () => {
     const { result } = renderHook(() => useToolbox());
     await flushLoad();
     expect(result.current.kind).toBe('video-to-gif');
-    expect(result.current.params).toEqual({ fps: 12, width: 800 });
+    expect(result.current.params).toEqual({ fps: 12, width: 800, engine: 'ffmpeg' });
 
     act(() => {
       result.current.setKind('gif-resize');

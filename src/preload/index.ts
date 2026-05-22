@@ -338,6 +338,47 @@ const api = {
     ensureString(p, 'path');
     return ipcRenderer.invoke('toolbox:firstFrame', p);
   },
+  /* R-COMPRESS-V1 #4 — Lineage modal "试跑 0.5s" preview bridge.
+   *
+   * Exposed as a sub-namespace `window.giftk.toolbox.{trialRun,
+   * trialCleanup}` rather than a flat top-level method to leave room
+   * for future toolbox-only ephemeral helpers (e.g. trialProbe) without
+   * polluting the root `giftk` API surface. The flat methods above
+   * (`startToolbox`, `toolboxProbeMedia`, ...) stay where they are for
+   * backwards compatibility — this is purely additive. */
+  toolbox: {
+    /**
+     * Run a single toolbox kind on the first 0.5s of `inputPath` and
+     * return the path to a tmp output file. The renderer plays this
+     * file back inline in the lineage modal preview pane and MUST call
+     * `trialCleanup(tmpRoot)` once the preview is no longer visible
+     * (modal close, focus change, panel re-trial) so the tmp dir does
+     * not leak. Trial outputs NEVER enter history.
+     */
+    trialRun(req: {
+      kind: ToolboxKind;
+      params: ToolboxParams;
+      inputPath: string;
+    }): Promise<{ ok: boolean; outputPath: string; tmpRoot: string }> {
+      ensureObject(req, 'req');
+      ensureString(req.kind, 'req.kind');
+      ensureString(req.inputPath, 'req.inputPath');
+      ensureObject(req.params, 'req.params');
+      return ipcRenderer.invoke('toolbox:trialRun', req);
+    },
+    /**
+     * rm -rf a previously-returned trial tmpRoot. Best-effort: returns
+     * `{ ok: false }` for paths outside `os.tmpdir()` or that don't
+     * start with `giftk-trial-`. The renderer should call this from
+     * cleanup paths (modal close / step finalised / unmount) without
+     * awaiting the response — failures are non-fatal because the
+     * daily tmp sweep (R-87) will reap leaks.
+     */
+    trialCleanup(tmpRoot: string): Promise<{ ok: boolean }> {
+      ensureString(tmpRoot, 'tmpRoot');
+      return ipcRenderer.invoke('toolbox:trialCleanup', tmpRoot);
+    }
+  },
   /* ---------------- R-45 Image-host upload (PicGo-style) ---------------- */
   /**
    * Get the persisted upload configs. Secrets (PAT / SK / accessKeySecret

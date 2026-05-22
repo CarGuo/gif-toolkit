@@ -7,8 +7,8 @@ import { sniffPage } from './sniffer';
 import { openWebviewSniff } from './webviewSniff';
 import { sniffViaSystemChrome, findInstalledBrowsers } from './systemChromeSniff';
 import { sniffViaYtdlp } from './ytdlpDirectSniff';
-import { previewMedia, startBatch, cancelAllTasks, cancelTask, prefetchThumbnail, startToolbox, startToolboxChain, validateChainCompatibility, resumeToolboxChain, cancelToolboxChain } from './processor';
-import { killAllProcs, probe as probeMedia, extractFrameDataUrl } from './ffmpeg';
+import { previewMedia, startBatch, cancelAllTasks, cancelTask, prefetchThumbnail, startToolbox, startToolboxChain, validateChainCompatibility, resumeToolboxChain, cancelToolboxChain, runToolboxTrialJob } from './processor';
+import { killAllProcs, probe as probeMedia, extractFrameDataUrl, toolboxTrim } from './ffmpeg';
 import { log } from './logger';
 import {
   openSession as openLogSession,
@@ -527,6 +527,14 @@ function sanitizeToolboxParams(p: unknown): ToolboxParams {
   const targetFormat = obj.targetFormat;
   if (targetFormat === 'gif' || targetFormat === 'webp') {
     result.targetFormat = targetFormat;
+  }
+  // R-COMPRESS-V1 #3 — video-to-gif engine switch. Closed enum
+  // ('ffmpeg' | 'gifski'); anything else is silently dropped so the
+  // processor falls back to the default ('ffmpeg') instead of
+  // surfacing a tampered string downstream.
+  const engine = obj.engine;
+  if (engine === 'ffmpeg' || engine === 'gifski') {
+    result.engine = engine;
   }
   return result;
 }
@@ -1873,6 +1881,136 @@ ipcMain.handle('toolbox:cancelChain', async (_e, chainId: unknown) => {
   if (!id) throw new Error('toolbox:cancelChain: invalid chainId');
   const ok = cancelToolboxChain(id);
   return { ok };
+});
+
+/* ----------------------- R-COMPRESS-V1 #4: lineage trial run ----------------------- */
+
+/**
+ * R-COMPRESS-V1 #4 — Validate a trial-run inputPath.
+ *
+ * Looser than `sanitizeToolboxJob`: the trial-run input is the live
+ * focus of the lineage modal, which itself sources from the real
+ * batch / chain pipeline (already path-validated). We still enforce:
+ *   - absolute, no null bytes, length <= 4096
+ *   - file exists, non-empty
+ *   - extension is in the union of every TOOLBOX_INPUT_EXTENSIONS list
+ * The trial output ALWAYS lands inside a freshly-minted
+ * `os.tmpdir()/giftk-trial-*` dir so the input doesn't have to be in
+ * the allowed-output whitelist.
+ */
+function sanitizeTrialInputPath(p: unknown): string {
+  if (typeof p !== 'string' || !p) throw new Error('trial inputPath required');
+  if (p.length > 4096) throw new Error('trial inputPath too long');
+  const norm = path.resolve(p);
+  if (norm.indexOf('\u0000') !== -1) throw new Error('trial inputPath contains null byte');
+  let st;
+  try { st = statSync(norm); } catch { throw new Error('trial inputPath does not exist'); }
+  if (!st.isFile()) throw new Error('trial inputPath is not a file');
+  if (st.size <= 0) throw new Error('trial inputPath is empty');
+  const ext = path.extname(norm).toLowerCase();
+  const allAllowed = new Set<string>();
+  for (const list of Object.values(TOOLBOX_INPUT_EXTENSIONS)) {
+    for (const x of list) allAllowed.add(x);
+  }
+  if (!allAllowed.has(ext)) {
+    throw new Error(`trial inputPath: extension ${ext || '(none)'} not allowed`);
+  }
+  return norm;
+}
+
+/**
+ * R-COMPRESS-V1 #4 — Strip startSec / endSec from trial-run params.
+ *
+ * The 0.5s pre-clip already constrains the working window, so the
+ * user's start/end (relative to the original full-length input) would
+ * either no-op or fall outside the clip and trip
+ * `range <= 0.05` checks in processToolboxJob. Dropping them lets
+ * every kind operate on the entire 0.5s sample uniformly.
+ */
+function stripTimeRangeForTrial(p: ToolboxParams): ToolboxParams {
+  const out: ToolboxParams = { ...p };
+  delete out.startSec;
+  delete out.endSec;
+  return out;
+}
+
+ipcMain.handle('toolbox:trialRun', async (_e, payload: unknown) => {
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('toolbox:trialRun: invalid payload');
+  }
+  const obj = payload as Record<string, unknown>;
+  if (!isToolboxKind(obj.kind)) throw new Error('toolbox:trialRun: invalid kind');
+  const kind: ToolboxKind = obj.kind;
+  const inputPath = sanitizeTrialInputPath(obj.inputPath);
+  // Re-check ext is on THIS kind's accepted list (above only checked the
+  // union). Otherwise a tampered IPC could ask "video-to-gif" on a .gif.
+  const ext = path.extname(inputPath).toLowerCase();
+  if (!TOOLBOX_INPUT_EXTENSIONS[kind].includes(ext)) {
+    throw new Error(`toolbox:trialRun: extension ${ext} not allowed for ${kind}`);
+  }
+  const params = stripTimeRangeForTrial(sanitizeToolboxParams(obj.params));
+
+  // Stage tmp root: `<os.tmpdir()>/giftk-trial-<rand>/{clip.<ext>, out/}`.
+  const tmpRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'giftk-trial-'));
+  const outDir = path.join(tmpRoot, 'out');
+  await fsp.mkdir(outDir, { recursive: true });
+  // Whitelist the tmp out dir so any helper that re-validates output
+  // paths (none today, but defence-in-depth) doesn't reject it.
+  allowedOutputDirs.add(outDir);
+
+  const clipPath = path.join(tmpRoot, `clip${ext}`);
+  try {
+    // Clip the first 0.5s. toolboxTrim handles gif/webp/video uniformly.
+    await toolboxTrim(inputPath, clipPath, 0, 0.5);
+  } catch (err) {
+    // Best-effort: nuke the tmp root so we don't leak on failure.
+    try { await fsp.rm(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+    throw new Error(`trial run: clip failed: ${(err as Error).message}`);
+  }
+
+  const job: ToolboxJob = {
+    id: `trial-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`,
+    kind,
+    inputPath: clipPath,
+    params
+  };
+
+  try {
+    const result = await runToolboxTrialJob({ job, outputBaseDir: outDir });
+    const outputPath = result.outputs[0];
+    return { ok: true, outputPath, tmpRoot };
+  } catch (err) {
+    // Failure cleanup: delete the entire tmp root so nothing leaks.
+    try { await fsp.rm(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+    throw err;
+  }
+});
+
+/**
+ * R-COMPRESS-V1 #4 — explicit cleanup for a trial-run tmp root.
+ *
+ * The renderer calls this when the lineage modal closes (or when the
+ * user re-runs the trial, replacing the previous artifact). We refuse
+ * any path that is not (a) under `os.tmpdir()` and (b) basename starts
+ * with `giftk-trial-`, so a tampered renderer can never trick us into
+ * `rm -rf`'ing arbitrary directories.
+ */
+ipcMain.handle('toolbox:trialCleanup', async (_e, tmpRoot: unknown) => {
+  if (typeof tmpRoot !== 'string' || !tmpRoot) return { ok: false };
+  const norm = path.resolve(tmpRoot);
+  if (norm.indexOf('\u0000') !== -1) return { ok: false };
+  const sysTmp = path.resolve(os.tmpdir());
+  const rel = path.relative(sysTmp, norm);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return { ok: false };
+  const base = path.basename(norm);
+  if (!base.startsWith('giftk-trial-')) return { ok: false };
+  try {
+    await fsp.rm(norm, { recursive: true, force: true });
+    return { ok: true };
+  } catch (err) {
+    log(`toolbox:trialCleanup failed for ${norm}: ${(err as Error).message}`);
+    return { ok: false };
+  }
 });
 
 /* ----------------------- Resolver IPC (yt-dlp) ----------------------- */

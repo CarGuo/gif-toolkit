@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ToolboxKind, ToolboxParams } from '../../shared/types';
 import type { LineageNode, UseToolboxLineageResult } from './useToolboxLineage';
 import type { MediaInfo } from './ToolboxPanel';
@@ -97,18 +97,30 @@ function detectKind(p: string | null | undefined): 'gif' | 'webp' | 'video' | 'i
  *     than misreading it as "loading forever".
  * The metadata row beneath (W×H · duration · 在文件管理器中显示) is
  * unchanged so the user still has a path to inspect the file.
+ *
+ * R-COMPRESS-V1 #4 — When `trialPath` is set, FocusPreview renders the
+ * trial-run output (a 0.5s tmp clip living under
+ * `os.tmpdir()/giftk-trial-*`) instead of the focus node's path. The
+ * media element is otherwise identical, so the user sees a 1:1 preview
+ * of what the next step would produce. The parent owns trialPath
+ * lifecycle (clear on focus change / kind change / modal close).
  */
 function FocusPreview({
   path,
-  posterDataUrl
+  posterDataUrl,
+  trialPath
 }: {
   path: string | null | undefined;
   posterDataUrl?: string | null;
+  trialPath?: string | null;
 }): JSX.Element {
-  const kind = detectKind(path);
-  const url = path ? pathToLocalUrl(path) : '';
+  // Trial output (when present) takes precedence over the focus path so
+  // the user sees the would-be next-step output, not the input.
+  const renderPath = trialPath || path || null;
+  const kind = detectKind(renderPath);
+  const url = renderPath ? pathToLocalUrl(renderPath) : '';
   const [errored, setErrored] = useState(false);
-  // Reset the error flag whenever the focus path changes — the previous
+  // Reset the error flag whenever the render path changes — the previous
   // failure shouldn't poison subsequent navigation.
   useEffect(() => { setErrored(false); }, [url]);
   if (!url) {
@@ -271,6 +283,101 @@ export function ToolboxLineageModal(props: ToolboxLineageModalProps): JSX.Elemen
     }
   }, [onRunStep, running]);
 
+  // R-COMPRESS-V1 #4 — Trial-run state.
+  // `trialOutput` is the most recent { outputPath, tmpRoot } returned by
+  // `window.giftk.toolbox.trialRun`. When non-null, FocusPreview swaps
+  // its src to outputPath so the user sees the would-be next-step
+  // result; tmpRoot is what we hand to `trialCleanup` on tear-down.
+  const [trialOutput, setTrialOutput] = useState<{ outputPath: string; tmpRoot: string } | null>(null);
+  const [trialRunning, setTrialRunning] = useState(false);
+  const [trialError, setTrialError] = useState<string | null>(null);
+  // Stable ref so cleanup paths can read the latest tmpRoot without
+  // capturing it in stale closures.
+  const trialOutputRef = useRef(trialOutput);
+  useEffect(() => { trialOutputRef.current = trialOutput; }, [trialOutput]);
+
+  // Best-effort tmp dir cleanup. Awaiting the IPC is intentionally
+  // optional — the daily R-87 sweep reaps any leak whose prefix matches
+  // `giftk-trial-` so we never block the UI on a slow disk.
+  const cleanupTrial = useCallback((tmpRoot: string | null | undefined): void => {
+    if (!tmpRoot) return;
+    try {
+      const w = window as unknown as {
+        giftk?: { toolbox?: { trialCleanup?: (p: string) => Promise<unknown> } };
+      };
+      void w.giftk?.toolbox?.trialCleanup?.(tmpRoot);
+    } catch {
+      /* ignore — bridge may be missing in tests */
+    }
+  }, []);
+
+  const handleTrial = useCallback(async (): Promise<void> => {
+    if (!draftKind || !focus) return;
+    if (trialRunning) return;
+    if (cropBlocked) return;
+    // Clear the previous trial artifact (if any) before launching a new
+    // run so the user never accidentally sees stale output during the
+    // network-of-IPC round trip.
+    const prev = trialOutputRef.current;
+    setTrialOutput(null);
+    setTrialError(null);
+    setTrialRunning(true);
+    cleanupTrial(prev?.tmpRoot);
+    try {
+      const w = window as unknown as {
+        giftk?: {
+          toolbox?: {
+            trialRun?: (req: {
+              kind: ToolboxKind;
+              params: ToolboxParams;
+              inputPath: string;
+            }) => Promise<{ ok: boolean; outputPath: string; tmpRoot: string }>;
+          };
+        };
+      };
+      const fn = w.giftk?.toolbox?.trialRun;
+      if (!fn) throw new Error('trialRun bridge missing');
+      const result = await fn({ kind: draftKind, params: draftParams, inputPath: focus.path });
+      if (!result.ok || !result.outputPath || !result.tmpRoot) {
+        throw new Error('trialRun: invalid response');
+      }
+      setTrialOutput({ outputPath: result.outputPath, tmpRoot: result.tmpRoot });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setTrialError(msg);
+    } finally {
+      setTrialRunning(false);
+    }
+  }, [draftKind, draftParams, focus, trialRunning, cropBlocked, cleanupTrial]);
+
+  // Reset the trial preview whenever the focus node changes — the
+  // existing artifact was produced from a different input and would
+  // mislead the user.
+  useEffect(() => {
+    const prev = trialOutputRef.current;
+    if (!prev) return;
+    setTrialOutput(null);
+    setTrialError(null);
+    cleanupTrial(prev.tmpRoot);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusPath, cleanupTrial]);
+
+  // Modal close (open=false) and unmount: rm the lingering trial dir.
+  useEffect(() => {
+    if (open) return;
+    const prev = trialOutputRef.current;
+    if (!prev) return;
+    setTrialOutput(null);
+    setTrialError(null);
+    cleanupTrial(prev.tmpRoot);
+  }, [open, cleanupTrial]);
+  useEffect(() => {
+    return () => {
+      const prev = trialOutputRef.current;
+      if (prev) cleanupTrial(prev.tmpRoot);
+    };
+  }, [cleanupTrial]);
+
   if (!open) return null;
 
   return (
@@ -324,7 +431,11 @@ export function ToolboxLineageModal(props: ToolboxLineageModalProps): JSX.Elemen
             </ol>
 
             <div className="tb-lineage-preview" aria-label="当前产物预览">
-              <FocusPreview path={focusPath} posterDataUrl={focusPosterDataUrl} />
+              <FocusPreview
+                path={focusPath}
+                posterDataUrl={focusPosterDataUrl}
+                trialPath={trialOutput?.outputPath ?? null}
+              />
             </div>
 
             {focus ? (
@@ -394,6 +505,9 @@ export function ToolboxLineageModal(props: ToolboxLineageModalProps): JSX.Elemen
             {lineage.error ? (
               <div className="tb-notice tb-notice-error" role="alert">{lineage.error}</div>
             ) : null}
+            {trialError ? (
+              <div className="tb-notice tb-notice-error" role="alert">试跑失败：{trialError}</div>
+            ) : null}
           </aside>
         </div>
 
@@ -415,6 +529,23 @@ export function ToolboxLineageModal(props: ToolboxLineageModalProps): JSX.Elemen
               disabled={!lineage.isRunning}
             >
               取消
+            </button>
+            {/* R-COMPRESS-V1 #4 — Trial-run button. Sits next to the
+                primary "继续 →" so the user can sanity-check what the
+                next step will produce on a 0.5s clip BEFORE committing
+                the full pipeline (which can take seconds-to-minutes on
+                large videos and pollutes history on retry). The button
+                is disabled under the same conditions as primary run
+                (no kind / lineage running / crop incomplete) plus its
+                own `trialRunning` mutex. */}
+            <button
+              type="button"
+              className="btn"
+              onClick={() => { void handleTrial(); }}
+              disabled={!draftKind || lineage.isRunning || cropBlocked || trialRunning}
+              title="用当前参数处理前 0.5 秒，用于快速预览效果（不入历史）"
+            >
+              {trialRunning ? '试跑中…' : '试跑 0.5s'}
             </button>
             <button
               type="button"

@@ -108,7 +108,11 @@ export interface UseToolboxResult {
 export function defaultParamsFor(kind: ToolboxKind): ToolboxParams {
   switch (kind) {
     case 'video-to-gif':
-      return { fps: 12, width: 800 };
+      // R-COMPRESS-V1 #3 — default to the fast ffmpeg engine so
+      // existing users get the same single-pass palettegen path. The
+      // ToolboxPanel exposes a segmented picker to flip to 'gifski'
+      // for higher visual quality.
+      return { fps: 12, width: 800, engine: 'ffmpeg' };
     case 'video-to-webp':
       return { fps: 15, width: 800, quality: 75, loop: 0 };
     case 'gif-resize':

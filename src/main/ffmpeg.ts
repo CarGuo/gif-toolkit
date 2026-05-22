@@ -3,7 +3,7 @@ import path from 'path';
 import { promises as fsp } from 'fs';
 import { tmpdir as osTmpdir } from 'os';
 import sharp from 'sharp';
-import { getFfmpegPath, getFfprobePath, getGifsiclePath, gifsicleSupportsLossy } from './binaries';
+import { getFfmpegPath, getFfprobePath, getGifsiclePath, gifsicleSupportsLossy, getGifskiPath } from './binaries';
 import type { GifOptimizeLevel, GifDither } from '../shared/types/process';
 
 export interface ProbeInfo {
@@ -491,6 +491,144 @@ export async function videoToAnimatedWebP(
     ],
     { onStderr: (s) => onLog?.(s.trim()), signal }
   );
+}
+
+/**
+ * R-COMPRESS-V1 #3 — high-quality video → GIF via gifski.
+ *
+ * Pipeline (two ffmpeg/gifski sub-processes, no shared filtergraph
+ * because gifski refuses to read from stdin pipes — it scans a glob of
+ * PNG files on disk):
+ *
+ *   ① ffmpeg extracts the requested clip as a numbered PNG sequence
+ *      (frame-%06d.png) into a per-job tmp dir. The same setpts/fps/
+ *      crop/scale chain used by the palette path is reused so the two
+ *      engines produce frame-for-frame equivalent inputs and only the
+ *      encoder differs. PNG is lossless so we don't introduce any
+ *      pre-encode quantisation.
+ *
+ *   ② gifski reads the PNG sequence and writes the final .gif. We pass
+ *      the explicit fps the user picked (gifski defaults to 20 fps and
+ *      keeps every supplied frame, so we MUST tell it the real cadence
+ *      to avoid timing skew). `--quality` defaults to 90 which is the
+ *      gifski-recommended sweet spot — high enough that pngquant's
+ *      cross-frame palette is interesting, low enough that file sizes
+ *      stay reasonable.
+ *
+ * Why a separate function instead of a flag on `videoToGifPalette`:
+ *   - The two encoders have completely different argv shapes; merging
+ *     them would need a runtime branch on every line.
+ *   - gifski isn't bundled by default (the npm `gifski` package is an
+ *     optional dependency added for R-COMPRESS-V1 #3). When the binary
+ *     is missing we want a clear, throw-once-at-start failure rather
+ *     than silently degrading mid-encode.
+ *
+ * Cleanup contract: the tmp PNG dir is ALWAYS removed in `finally`
+ * (success or cancel or throw). The caller-supplied `output` path is
+ * the only artefact left on disk after this function returns.
+ */
+export async function videoToGifGifski(
+  p: GifConvertParams & { quality?: number; loop?: number },
+  onLog?: (s: string) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  const ffmpeg = getFfmpegPath();
+  const gifski = getGifskiPath();
+  if (!gifski) {
+    throw new Error('gifski binary not available — install the optional `gifski` npm package, or switch the engine back to ffmpeg');
+  }
+
+  // Same filter chain shape as videoToGifPalette so frame-for-frame
+  // output matches the ffmpeg path before encoding.
+  const cropFilter = p.cropRect
+    ? `crop=${Math.max(2, Math.round(p.cropRect.w))}:${Math.max(2, Math.round(p.cropRect.h))}:${Math.max(
+        0,
+        Math.round(p.cropRect.x)
+      )}:${Math.max(0, Math.round(p.cropRect.y))}`
+    : '';
+  const scaleFilter = p.width > 0 ? `scale=${p.width}:-2:flags=lanczos` : '';
+  const speed = p.speed && p.speed > 0 && p.speed !== 1 ? p.speed : 1;
+  const setptsFilter = speed !== 1 ? `setpts=PTS/${speed}` : '';
+  const baseChain = [setptsFilter, `fps=${p.fps}`, cropFilter, scaleFilter]
+    .filter((s) => s.length > 0)
+    .join(',');
+  const sourceDuration = String(Math.max(0.05, p.durationSec * speed));
+  const httpHeaderArgs = buildHttpInputArgs(p.input, p.headers);
+
+  // Per-job scratch dir; unique stamp avoids collisions when the user
+  // queues multiple gifski jobs in parallel (PQueue concurrency = 3).
+  const stamp = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  const framesDir = path.join(osTmpdir(), `giftk-gifski-${stamp}`);
+  await fsp.mkdir(framesDir, { recursive: true });
+  const framePattern = path.join(framesDir, 'frame-%06d.png');
+
+  try {
+    if (signal?.aborted) throw makeCancelledError();
+
+    // ① ffmpeg → PNG sequence. The %06d zero-padded counter is what
+    // gifski expects so its --no-sort flag isn't required.
+    await run(
+      ffmpeg,
+      [
+        '-hide_banner',
+        '-loglevel', 'error',
+        '-y',
+        '-ss', String(p.startSec),
+        '-t', sourceDuration,
+        ...httpHeaderArgs,
+        '-i', p.input,
+        '-an', '-sn',
+        '-vf', baseChain,
+        framePattern
+      ],
+      { onStderr: (s) => onLog?.(`ffmpeg(gifski-extract): ${s.trim()}`), signal }
+    );
+    if (signal?.aborted) throw makeCancelledError();
+
+    // gifski refuses to overwrite, so make sure the destination is gone.
+    try { await fsp.unlink(p.output); } catch { /* ENOENT is fine */ }
+
+    // ② gifski → .gif. We pass --fps explicitly so the output cadence
+    // matches the source; --quality clamped to gifski's accepted 1-100
+    // range. --quiet keeps the stderr stream from drowning the IPC log.
+    const quality = Math.max(1, Math.min(100, Math.round(p.quality ?? 90)));
+    const repeat = (() => {
+      // Mirror gifski's --repeat semantics: 0 = forever (matches the
+      // ffmpeg path's default), positive N = play N times. We don't
+      // expose -1 (no loop) here because the GifConvertParams loop
+      // field has 0=forever which would collide with gifski's 0.
+      const n = p.loop;
+      if (typeof n !== 'number' || !Number.isFinite(n)) return 0;
+      return Math.max(0, Math.min(65535, Math.round(n)));
+    })();
+
+    // Read the actual produced frames so gifski sees them in order
+    // even if ffmpeg dropped a numbered slot mid-sequence.
+    const entries = (await fsp.readdir(framesDir))
+      .filter((f) => f.endsWith('.png'))
+      .sort();
+    if (entries.length === 0) {
+      throw new Error('gifski: ffmpeg produced no PNG frames');
+    }
+    const args = [
+      '--fps', String(p.fps),
+      '--quality', String(quality),
+      '--repeat', String(repeat),
+      '--quiet',
+      '-o', p.output,
+      ...entries.map((f) => path.join(framesDir, f))
+    ];
+    await run(gifski, args, { onStderr: (s) => onLog?.(`gifski: ${s.trim()}`), signal });
+    if (signal?.aborted) throw makeCancelledError();
+  } finally {
+    // Always-on cleanup. Failure to rm is non-fatal (we logged it once
+    // and a future tmp-cleanup sweep will mop up).
+    try {
+      await fsp.rm(framesDir, { recursive: true, force: true });
+    } catch (e) {
+      onLog?.(`gifski cleanup: ${(e as Error).message}`);
+    }
+  }
 }
 
 export interface GifsicleOptimizeOpts {

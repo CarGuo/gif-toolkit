@@ -458,8 +458,37 @@ export function ParamForm({ kind, params, setParams, mediaInfo, onTargetFormatTo
     const fpsHint = srcFps && srcFps > 0
       ? `1–60 · 源视频 ${srcFps.toFixed(srcFps % 1 === 0 ? 0 : 2)}fps,默认取 min(源,24)`
       : '1–60';
+    // R-COMPRESS-V1 #3 — engine segmented picker. Default 'ffmpeg' so
+    // existing users get the same fast path; switching to 'gifski'
+    // routes the encode through pngquant for higher colour fidelity.
+    const engine: 'ffmpeg' | 'gifski' = params.engine === 'gifski' ? 'gifski' : 'ffmpeg';
+    const ENGINE_OPTIONS: ReadonlyArray<{ value: 'ffmpeg' | 'gifski'; label: string; hint: string }> = [
+      { value: 'ffmpeg', label: 'Fast (ffmpeg)', hint: '调色板单遍编码,速度优先 (默认)' },
+      { value: 'gifski', label: 'High quality (gifski)', hint: 'PNG 帧序列 + pngquant,色彩更好但更慢' }
+    ];
     return (
       <div className="tb-params">
+        <div className="tb-field tb-field-segmented" data-testid="video-to-gif-engine">
+          <span className="tb-field-label">编码引擎</span>
+          <div className="tb-segmented" role="radiogroup" aria-label="video-to-gif engine">
+            {ENGINE_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                type="button"
+                role="radio"
+                aria-checked={engine === opt.value}
+                title={opt.hint}
+                className={`tb-segmented-btn${engine === opt.value ? ' is-active' : ''}`}
+                onClick={() => patchAny('engine', opt.value)}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          <span className="tb-field-hint">
+            {ENGINE_OPTIONS.find((o) => o.value === engine)?.hint}
+          </span>
+        </div>
         <NumField label="FPS" value={params.fps} onChange={(v) => patch('fps', v)} min={1} max={60} hint={fpsHint} />
         <NumField label="宽度 (px)" value={params.width} onChange={(v) => patch('width', v)} min={16} max={4096} hint="保持比例,留空则不缩放" />
         <NumField label="开始 (秒)" value={params.startSec} onChange={(v) => patch('startSec', v)} min={0} step={0.1} placeholder="0" />

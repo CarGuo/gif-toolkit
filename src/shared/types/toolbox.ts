@@ -159,6 +159,23 @@ export interface ToolboxParams {
   cropY?: number;
   cropW?: number;
   cropH?: number;
+  /* ----------- R-COMPRESS-V1 #3 video→gif engine switch ----------- */
+  /** Encoder engine for the `video-to-gif` tool. Two paths supported:
+   *
+   *   - 'ffmpeg' (default) — single-pass split → palettegen →
+   *     paletteuse via the bundled ffmpeg-static. Fast, palette
+   *     limited to 256 colours per frame, low memory.
+   *   - 'gifski'           — extract source frames as PNG via ffmpeg,
+   *     then encode with gifski (pngquant-based). Much higher visual
+   *     quality on full-colour clips (thousands of effective colours
+   *     per frame via temporal dithering) at the cost of disk I/O
+   *     for the PNG sequence and a slower encode.
+   *
+   * Only consulted by the 'video-to-gif' branch in processor.ts; the
+   * field is ignored for every other tool kind. sanitizeToolboxParams
+   * clamps unknown values to undefined (the renderer + processor
+   * fall back to 'ffmpeg' when absent). */
+  engine?: 'ffmpeg' | 'gifski';
   /* ----------- R-42 GIF ↔ WebP convert ----------- */
   /** Target output container for the gif-webp-convert tool. The
    *  renderer initialises this to the *opposite* of the input

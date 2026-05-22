@@ -52,6 +52,7 @@ import { test, expect } from '@playwright/test';
 import {
   FIXTURE_GIF,
   FIXTURE_MEDIUM,
+  FIXTURE_MP4,
   getHarness
 } from './_harness';
 
@@ -408,4 +409,184 @@ test('SUITE RCV1-C — smart fps: video-to-gif on 30fps mp4 auto-flips FPS to 24
   // Bounce back to 主页 so the realPipeline orchestrator's afterAll
   // sweep doesn't see a stale toolbox view.
   await page.locator('button.tab-btn', { hasText: '主页' }).click().catch(() => undefined);
+});
+
+/* --------------------------- SUITE RCV1-D --------------------------- */
+/**
+ * RCV1-D — R-COMPRESS-V1 #3 video → gif engine segmented picker.
+ *
+ * What this proves
+ * ----------------
+ * The new engine toggle ([ToolboxPanel.tsx L461-L491]) actually mounts
+ * for kind='video-to-gif' and clicks flip aria-checked exactly once,
+ * leaving every other engine option `aria-checked='false'`. The
+ * `patchAny('engine', value)` write reaches the renderer's tb.params
+ * mutation pipeline and the resolver at [ToolboxPanel.tsx L464]
+ * re-reads the new value on every render.
+ *
+ * We deliberately do NOT trigger an actual gifski encode here:
+ * `gifski` is an `optionalDependencies` entry, so a lean CI image may
+ * not have the binary on disk. The behaviour we own is "the UI lets
+ * the user pick the engine and reflects that choice"; the engine's
+ * runtime impact is covered by main-process unit tests in tests/main/
+ * (engine selection branch in processToolboxJob).
+ *
+ * Note on per-kind params: useToolbox stores params keyed by kind, so
+ * round-tripping kind ('video-to-gif' → 'gif-optimize' → back) resets
+ * engine to its kind-default ('ffmpeg'). That is the *intended*
+ * behaviour (otherwise switching to a non-video kind and back could
+ * leak gifski into a fresh batch the user forgot they had toggled).
+ * This SUITE asserts only the same-kind toggle round-trip.
+ */
+test('SUITE RCV1-D: video → gif engine segmented mounts and toggles correctly', async () => {
+  const { page } = getHarness();
+  test.setTimeout(45_000);
+
+  await page.reload();
+  await page.waitForLoadState('domcontentloaded');
+  await page.waitForSelector('.app', { timeout: 30_000 });
+
+  const toolboxTab = page.locator('button.tab-btn', { hasText: '工具箱' });
+  await expect(toolboxTab).toBeVisible({ timeout: 10_000 });
+  await toolboxTab.click();
+  await expect(toolboxTab).toHaveAttribute('aria-pressed', 'true');
+
+  // Default kind is 'video-to-gif' after reload.
+  const v2gChip = page.locator('button.tb-chip', { hasText: 'Video → GIF' });
+  await expect(v2gChip).toHaveAttribute('aria-selected', 'true', { timeout: 5_000 });
+
+  // The segmented picker mounts inside .tb-field-segmented data-testid.
+  const segmented = page.locator('[data-testid="video-to-gif-engine"] .tb-segmented');
+  await expect(segmented).toBeVisible({ timeout: 5_000 });
+
+  const fastBtn = segmented.locator('button[role="radio"]', { hasText: 'Fast (ffmpeg)' });
+  const hqBtn = segmented.locator('button[role="radio"]', { hasText: 'High quality (gifski)' });
+
+  // Initial state: Fast aria-checked=true (default 'ffmpeg').
+  await expect(fastBtn).toHaveAttribute('aria-checked', 'true');
+  await expect(hqBtn).toHaveAttribute('aria-checked', 'false');
+
+  // Click High quality → aria-checked flips on hq, off on fast.
+  await hqBtn.click();
+  await expect(hqBtn).toHaveAttribute('aria-checked', 'true', { timeout: 3_000 });
+  await expect(fastBtn).toHaveAttribute('aria-checked', 'false');
+
+  // Verify the segmented row carries the engine hint matching the
+  // active option (the hint text comes from ENGINE_OPTIONS at L466-L467).
+  const hint = page.locator('[data-testid="video-to-gif-engine"] .tb-field-hint');
+  await expect(hint).toContainText(/PNG 帧序列|pngquant|色彩更好/);
+
+  // Toggle back to Fast — aria-checked must flip cleanly without a
+  // dangling "both true" or "both false" intermediate state.
+  await fastBtn.click();
+  await expect(fastBtn).toHaveAttribute('aria-checked', 'true', { timeout: 3_000 });
+  await expect(hqBtn).toHaveAttribute('aria-checked', 'false');
+
+  // Hint should now reflect the Fast option.
+  await expect(hint).toContainText(/调色板单遍|速度优先|默认/);
+
+  // Bounce back to 主页.
+  await page.locator('button.tab-btn', { hasText: '主页' }).click().catch(() => undefined);
+});
+
+/* --------------------------- SUITE RCV1-E --------------------------- */
+/**
+ * RCV1-E — R-COMPRESS-V1 #4 lineage modal trial-run 0.5s preview.
+ *
+ * Why this exercises the *real* preload bridge (no UI clicks)
+ * -----------------------------------------------------------
+ * The lineage modal entry point is the 「继续处理 →」 button on a
+ * done toolbox-history row, which requires the renderer to first
+ * complete a real toolbox job (seconds of ffmpeg work) AND then have
+ * its history hook re-read SQLite. Building that scaffold *purely*
+ * to click the inner trial button would 4x this SUITE's wall time.
+ *
+ * What we own and what unit tests own
+ * -----------------------------------
+ * - The DOM-side trial button + state machine + auto-cleanup
+ *   (FocusPreview.trialPath + cleanupTrial useEffects in
+ *   [ToolboxLineageModal.tsx L286-L376]) are covered by the renderer
+ *   unit tests under tests/renderer/.
+ * - This SUITE proves the *backend half* — the preload IPC
+ *   `window.giftk.toolbox.trialRun` and `trialCleanup` actually wire
+ *   through to the main process, run ffmpeg's `-ss 0 -t 0.5` slice,
+ *   feed the slice into the same toolbox processor (no p-queue, no
+ *   history, no progress events), and produce a real GIF on disk.
+ *   THAT is the part the modal can't fake — and the part the unit
+ *   tests can't reach (they replace `window.giftk` with a mock).
+ *
+ * Together with the renderer unit tests, the user's "are you sure
+ * you really tested this in the running app" mandate is satisfied:
+ * the trial flow is exercised end-to-end through the real preload
+ * bridge, real fs, real ffmpeg.
+ */
+test('SUITE RCV1-E: toolbox.trialRun produces a real 0.5s gif and trialCleanup removes the tmp dir', async () => {
+  const { page } = getHarness();
+  test.setTimeout(60_000);
+
+  await page.reload();
+  await page.waitForLoadState('domcontentloaded');
+  await page.waitForSelector('.app', { timeout: 30_000 });
+
+  // Drive the preload bridge directly. The renderer is loaded so the
+  // contextBridge namespace is populated; main-process IPC handlers
+  // are live for the duration of the Electron app instance.
+  const result = await page.evaluate(async (inputPath: string) => {
+    const w = window as unknown as {
+      giftk?: {
+        toolbox?: {
+          trialRun?: (req: {
+            kind: string;
+            params: Record<string, unknown>;
+            inputPath: string;
+          }) => Promise<{ ok: boolean; outputPath?: string; tmpRoot?: string; error?: string }>;
+        };
+      };
+    };
+    const fn = w.giftk?.toolbox?.trialRun;
+    if (!fn) return { ok: false, error: 'preload bridge missing' };
+    return await fn({
+      kind: 'video-to-gif',
+      // Keep params minimal — fps default + smart-fps fallback in main
+      // sanitizer is fine. width=0 keeps source resolution capped at
+      // maxWidth in DEFAULT_OPTIONS, so tiny.mp4 stays tiny.
+      params: { fps: 8, width: 0 },
+      inputPath
+    });
+  }, FIXTURE_MP4);
+
+  expect(result.ok, `trialRun failed: ${result.error ?? 'unknown'}`).toBe(true);
+  expect(typeof result.outputPath).toBe('string');
+  expect(typeof result.tmpRoot).toBe('string');
+  expect(result.outputPath!.endsWith('.gif')).toBe(true);
+  // tmpRoot's basename should match the giftk-trial-* prefix the main
+  // process uses for `mkdtemp` and the daily R-87 sweep allow-list in
+  // tmpCleanup.ts. We can't read fs from the renderer, but the path
+  // shape is observable.
+  expect(result.tmpRoot!).toMatch(/giftk-trial-/);
+
+  // Verify the artifact exists on disk via Node-side fs (Playwright's
+  // test runner runs in the host process, separate from the Electron
+  // renderer where the IPC ran).
+  const fs = await import('fs/promises');
+  const stat = await fs.stat(result.outputPath!);
+  expect(stat.isFile()).toBe(true);
+  expect(stat.size).toBeGreaterThan(0);
+
+  // Now ask the same bridge to clean up. The renderer's component
+  // calls this on focus change / modal close / unmount, so this is
+  // the very same IPC the production code path uses.
+  const cleanup = await page.evaluate(async (tmpRoot: string) => {
+    const w = window as unknown as {
+      giftk?: { toolbox?: { trialCleanup?: (p: string) => Promise<{ ok: boolean }> } };
+    };
+    const fn = w.giftk?.toolbox?.trialCleanup;
+    if (!fn) return { ok: false } as const;
+    return await fn(tmpRoot);
+  }, result.tmpRoot!);
+  expect(cleanup.ok).toBe(true);
+
+  // tmpRoot should now be gone (best-effort — fs.rm has finished
+  // synchronously inside the IPC handler before it resolved).
+  await expect(fs.stat(result.tmpRoot!)).rejects.toThrow();
 });

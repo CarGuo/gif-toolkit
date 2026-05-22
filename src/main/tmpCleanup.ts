@@ -45,7 +45,13 @@ export const ALLOWED_PREFIXES: readonly string[] = [
   'giftk-e2e-',
   'giftk-in-',
   'giftk-out-',
-  'giftk-fake-'
+  'giftk-fake-',
+  // R-COMPRESS-V1 #4 — Lineage modal "试跑 0.5s" produces an isolated
+  // tmp dir per click (clip + trial output). The renderer rm -rf's it
+  // on modal close, but if the renderer crashes mid-preview the dir
+  // would otherwise leak — so we list its prefix here so the daily
+  // sweep can reap it as a backstop.
+  'giftk-trial-'
 ];
 
 const DEFAULT_MAX_AGE_MS = 24 * 60 * 60 * 1000;

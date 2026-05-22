@@ -160,6 +160,9 @@ export function findPackageDir(pkgName: string, startFrom: string = __dirname): 
 let cachedFfmpeg: string | null = null;
 let cachedFfprobe: string | null = null;
 let cachedGifsicle: string | null = null;
+/** Cached `gifski` binary path. `null` = unprobed; absolute string = found;
+ *  empty string = probed and not present (cached negative). */
+let cachedGifski: string | null = null;
 
 export function getFfmpegPath(): string {
   if (cachedFfmpeg) return cachedFfmpeg;
@@ -265,6 +268,57 @@ export function gifsicleSupportsLossy(): boolean {
     cachedGifsicleHasLossy = false;
   }
   return cachedGifsicleHasLossy;
+}
+
+/**
+ * R-COMPRESS-V1 #3 — locate the optional `gifski` CLI binary.
+ *
+ * The npm `gifski` package (https://www.npmjs.com/package/gifski) is
+ * a thin binary wrapper that ships pre-built executables under:
+ *
+ *   node_modules/gifski/bin/macos/gifski
+ *   node_modules/gifski/bin/windows/gifski.exe
+ *   node_modules/gifski/bin/debian/gifski   (linux)
+ *
+ * We add it as an optional dependency so installs on platforms / mirror
+ * setups where the package can't be fetched still succeed — the
+ * video-to-gif feature simply hides the "high-quality" engine option
+ * when this returns null. Mirrors the negative-cache pattern used by
+ * gifsicleSupportsLossy so we only walk the FS once.
+ *
+ * Returns the absolute binary path (after asar.unpacked rewriting in
+ * packaged builds) when present, or `null` when the package isn't
+ * installed / the binary isn't on disk for the current platform.
+ */
+export function getGifskiPath(): string | null {
+  if (cachedGifski !== null) return cachedGifski === '' ? null : cachedGifski;
+  try {
+    const pkgDir = findPackageDir('gifski');
+    if (!pkgDir) {
+      log('gifski: npm package not found in node_modules tree (optional dep)');
+      cachedGifski = '';
+      return null;
+    }
+    const subdir = process.platform === 'win32'
+      ? 'windows'
+      : process.platform === 'darwin'
+      ? 'macos'
+      : 'debian';
+    const binName = process.platform === 'win32' ? 'gifski.exe' : 'gifski';
+    const binPath = path.join(pkgDir, 'bin', subdir, binName);
+    if (!existsSync(binPath)) {
+      log(`gifski: binary not present at ${binPath} (platform=${process.platform})`);
+      cachedGifski = '';
+      return null;
+    }
+    cachedGifski = resolveBin(binPath, 'gifski');
+    log(`gifski: using ${cachedGifski}`);
+    return cachedGifski;
+  } catch (e) {
+    log(`gifski: lookup failed: ${(e as Error).message}`);
+    cachedGifski = '';
+    return null;
+  }
 }
 
 export function getCacheDir(): string {

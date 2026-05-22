@@ -29,6 +29,7 @@ import { downloadToFile } from './downloader';
 import {
   probe,
   videoToGifPalette,
+  videoToGifGifski,
   videoToAnimatedWebP,
   gifsicleOptimize,
   gifsicleMethod,
@@ -2039,28 +2040,53 @@ async function processToolboxJob({ job, outputBaseDir, emit, signal, batchTaken 
     const finalOut = path.join(outputBaseDir, fileNameFor(fakeMedia, ext, batchTaken));
 
     if (job.kind === 'video-to-gif') {
+      // R-COMPRESS-V1 #3 — engine switch.
+      //   - 'ffmpeg' (default): single-pass palettegen → paletteuse,
+      //     fast and bundled.
+      //   - 'gifski'         : ffmpeg extract PNG frames → gifski
+      //     encode. Higher visual quality on full-colour clips at the
+      //     cost of disk I/O for the PNG sequence.
+      // Both engines share the downstream compressLoop step so the
+      // user's lossy / colors / size-budget knobs still apply.
+      const engine: 'ffmpeg' | 'gifski' = job.params.engine === 'gifski' ? 'gifski' : 'ffmpeg';
       emit({
         taskId: job.id,
         status: 'converting',
         percent: 25,
         substep: 'encoding',
-        message: 'encoding video → gif',
+        message: `encoding video → gif (${engine})`,
         elapsedMs: elapsed()
       });
       const tmpGif = path.join(work, `${inputStem}.raw.gif`);
-      await videoToGifPalette(
-        {
-          input: job.inputPath,
-          output: tmpGif,
-          startSec: clipStart,
-          durationSec: range,
-          fps,
-          width: targetWidth,
-          speed: 1
-        },
-        (s) => log(`ffmpeg: ${s}`),
-        signal
-      );
+      if (engine === 'gifski') {
+        await videoToGifGifski(
+          {
+            input: job.inputPath,
+            output: tmpGif,
+            startSec: clipStart,
+            durationSec: range,
+            fps,
+            width: targetWidth,
+            speed: 1
+          },
+          (s) => log(s),
+          signal
+        );
+      } else {
+        await videoToGifPalette(
+          {
+            input: job.inputPath,
+            output: tmpGif,
+            startSec: clipStart,
+            durationSec: range,
+            fps,
+            width: targetWidth,
+            speed: 1
+          },
+          (s) => log(`ffmpeg: ${s}`),
+          signal
+        );
+      }
 
       emit({
         taskId: job.id,
@@ -2633,6 +2659,70 @@ export async function startToolbox(
     activeBatchPromises.delete(run);
   });
   return run;
+}
+
+/**
+ * R-COMPRESS-V1 #4 — Lineage modal "试跑 0.5s" preview.
+ *
+ * Runs a single ToolboxJob on a pre-clipped 0.5s sample (the IPC layer
+ * does the clipping via toolboxTrim before calling here). Bypasses the
+ * shared p-queue so the preview never blocks behind a slow batch job
+ * and never counts toward concurrency. The job is treated as ephemeral
+ * — outputs land in `outputBaseDir` (a tmp dir managed by the caller),
+ * never enter history, and the caller is responsible for rm -rf on
+ * modal close.
+ *
+ * Returns the produced file paths captured from the job's progress
+ * emits. Throws on non-done terminal status so the renderer can show
+ * the same error UX as a real run.
+ */
+export async function runToolboxTrialJob(args: {
+  job: ToolboxJob;
+  outputBaseDir: string;
+  signal?: AbortSignal;
+}): Promise<{ outputs: string[] }> {
+  const { job, outputBaseDir } = args;
+  const ctrl = new AbortController();
+  activeAborts.add(ctrl);
+  const onParentAbort = (): void => {
+    try { ctrl.abort(); } catch { /* ignore */ }
+  };
+  if (args.signal) {
+    if (args.signal.aborted) ctrl.abort();
+    else args.signal.addEventListener('abort', onParentAbort, { once: true });
+  }
+  const collected: string[] = [];
+  let terminalError: string | null = null;
+  let cancelled = false;
+  try {
+    await processToolboxJob({
+      job,
+      outputBaseDir,
+      emit: (p) => {
+        if (Array.isArray(p.outputs)) {
+          for (const o of p.outputs) {
+            if (typeof o === 'string' && o && !collected.includes(o)) collected.push(o);
+          }
+        }
+        if (p.status === 'failed') terminalError = p.error || 'trial run failed';
+        if (p.status === 'cancelled') cancelled = true;
+      },
+      signal: ctrl.signal,
+      batchTaken: new Set<string>()
+    });
+  } catch (err) {
+    if (isAbortError(err)) {
+      throw new Error('trial run cancelled');
+    }
+    throw err;
+  } finally {
+    if (args.signal) args.signal.removeEventListener('abort', onParentAbort);
+    activeAborts.delete(ctrl);
+  }
+  if (cancelled) throw new Error('trial run cancelled');
+  if (terminalError) throw new Error(terminalError);
+  if (collected.length === 0) throw new Error('trial run produced no outputs');
+  return { outputs: collected };
 }
 
 /* ----------------------- R-TB-CHAIN: single-input chain ----------------------- */
