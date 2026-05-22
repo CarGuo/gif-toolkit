@@ -31,7 +31,8 @@ export type SessionLogStage =
   | 'sniff'     // every sniff backend (url / webview / system-chrome / ytdlp / offline)
   | 'process'   // processor.ts / ffmpeg / compressLoop
   | 'upload'    // uploader backends
-  | 'resolve';  // embed resolver (yt-dlp)
+  | 'resolve'   // embed resolver (yt-dlp)
+  | 'toolbox';  // R-TB-LOG-V1 — toolbox chain runner: start / per-step / cancel / size-regression
 
 /**
  * One immutable entry. Always carries the wall-clock timestamp the

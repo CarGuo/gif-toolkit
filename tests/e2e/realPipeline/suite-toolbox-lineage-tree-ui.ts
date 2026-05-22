@@ -340,6 +340,36 @@ async function listChainRows(page: Page, chainId: string): Promise<ChainLineageN
 }
 
 /**
+ * R-TB-LOG-V1 — read a single session log snapshot via the preload
+ * `db:sessionLogs:read` channel. Returns null when the session id is
+ * not on disk. Used by TREE-G-LOG to assert that every chain run
+ * leaves a recoverable audit trail keyed by the tree-wide chainId.
+ */
+interface SessionLogEntryLite {
+  seq: number;
+  level: string;
+  stage: string;
+  substep?: string;
+  message: string;
+  data?: Record<string, unknown>;
+}
+interface SessionLogSnapshotLite {
+  sessionId: string;
+  origin?: string;
+  outcome?: string;
+  entries: SessionLogEntryLite[];
+}
+async function readSessionLog(page: Page, sessionId: string): Promise<SessionLogSnapshotLite | null> {
+  return page.evaluate(async (sid: string) => {
+    const w = window as unknown as {
+      giftk: { db: { sessionLogs: { read(s: string): Promise<unknown> } } };
+    };
+    const snap = await w.giftk.db.sessionLogs.read(sid);
+    return (snap ?? null) as SessionLogSnapshotLite | null;
+  }, sessionId);
+}
+
+/**
  * Locate every rendered tree node group regardless of nodeId. Used to
  * count nodes / iterate by index when the test doesn't know specific
  * ids ahead of time (most of these cases derive ids from the DOM).
@@ -859,6 +889,80 @@ test.describe('SUITE TB-LINEAGE-TREE-UI — branching lineage tree (R-LINEAGE-TR
       await tearDownRecorder();
       rmDirOf(outPath);
       rmDirOf(goldGif);
+      await clearAllHistory(page).catch(() => undefined);
+    }
+  });
+
+  /**
+   * TREE-G-LOG — R-TB-LOG-V1 audit trail.
+   *
+   * Why: previously a failing chain only surfaced as a generic toaster
+   * + a `failed` row in chain history; the user had no way to inspect
+   * *which* substep blew up nor with what params. With R-TB-LOG-V1
+   * every step start / done / failed / cancelled / size-regression
+   * lands in the per-session log on disk, keyed by the tree-wide
+   * chainId so a whole branching lineage shares one timeline.
+   *
+   * What we assert:
+   * 1. After a normal 1-step chain, sessionLogs.read('tb:<chainId>')
+   *    returns a non-null snapshot with origin='toolbox'.
+   * 2. The snapshot includes (in order) the canonical chain.start,
+   *    step.start, step.done substeps tagged stage='toolbox'.
+   * 3. The snapshot's outcome is 'done' and the chain.start data
+   *    payload carries lineageChainId equal to the chainId we read
+   *    from sqlite.
+   */
+  test('TREE-G-LOG R-TB-LOG-V1 audit trail (chain.start / step.start / step.done) keyed by tree chainId', async () => {
+    const { page } = getHarness();
+    await clearAllHistory(page);
+    await ensureToolboxTab(page);
+    await seedHistoryRow(page, FIXTURE_GIF, 'gif-resize', 'tiny.gif');
+    await installRecorder();
+
+    try {
+      const modal = await enterLineage(page);
+      await selectChip(modal, /^GIF Resize$/);
+      const result = await runStepAndWaitDone(modal, page);
+      expect(result.status).toBe('done');
+
+      const cid = await readLatestChainId(page);
+      expect(cid).toBeTruthy();
+
+      // The session id mirrors `tb:${tree-wide chainId}` (see
+      // startToolboxChain: `tb:${lineageChainId || chainId}`). The
+      // persistence is fire-and-forget so we wait briefly with a poll
+      // rather than rely on a single read happening to win the race.
+      let snap: SessionLogSnapshotLite | null = null;
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        snap = await readSessionLog(page, `tb:${cid as string}`);
+        if (snap && snap.entries.length >= 3) break;
+        await page.waitForTimeout(150);
+      }
+      expect(snap).toBeTruthy();
+      expect(snap!.origin).toBe('toolbox');
+
+      const substeps = snap!.entries.map((e) => e.substep ?? '');
+      expect(substeps).toContain('chain.start');
+      expect(substeps).toContain('step.start');
+      expect(substeps).toContain('step.done');
+
+      // Every audit entry must be tagged with the toolbox stage so a
+      // future `.log` export filter ('stage=toolbox') is non-empty.
+      const toolboxEntries = snap!.entries.filter((e) => e.stage === 'toolbox');
+      expect(toolboxEntries.length).toBeGreaterThanOrEqual(3);
+
+      // chain.start carries the lineageChainId in its data payload.
+      const chainStart = snap!.entries.find((e) => e.substep === 'chain.start');
+      expect(chainStart).toBeTruthy();
+      expect((chainStart!.data as { lineageChainId?: string })?.lineageChainId).toBe(cid);
+
+      // The closing `session.done` line is logged by sessionLogger
+      // itself (substep='session.done'), so the outcome is `done`.
+      expect(snap!.outcome).toBe('done');
+
+      await exitLineage(page, modal);
+    } finally {
+      await tearDownRecorder();
       await clearAllHistory(page).catch(() => undefined);
     }
   });

@@ -304,6 +304,10 @@ const api = {
     inputPath: string;
     steps: ToolboxChainStep[];
     outputDirOverride?: string;
+    /** R-TB-LOG-V1 — tree-wide id for the unified session log. */
+    lineageChainId?: string;
+    /** R-TB-LOG-V1 — display label for the log session row. */
+    chainInputName?: string;
   }): Promise<ToolboxChainStartResult> {
     ensureObject(payload, 'payload');
     ensureString(payload.chainId, 'chainId');

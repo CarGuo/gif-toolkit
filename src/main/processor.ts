@@ -26,6 +26,16 @@ import {
 import type { GifOptimizeLevel, GifDither } from '../shared/types/process';
 import { DEFAULT_OPTIONS } from '../shared/types';
 import { downloadToFile } from './downloader';
+// R-TB-LOG-V1 — every toolbox chain run gets its own session log so
+// users can audit which step of which chain produced an artefact, and
+// failures (cancel / error / size-regression) are recoverable without
+// re-running the whole chain.
+import {
+  openSession as openLogSession,
+  reopenSession as reopenLogSession,
+  closeSession as closeLogSession,
+  log as logSessionEvent
+} from './sessionLogger';
 import {
   probe,
   videoToGifPalette,
@@ -2775,6 +2785,10 @@ interface ActiveChain {
   chainId: string;
   abort: AbortController;
   pause: ChainPauseTicket | null;
+  /** R-TB-LOG-V1 — sessionId used for the chain's audit log. Equals
+   *  the renderer-supplied `lineageChainId` (tree-wide) when present,
+   *  else falls back to the IPC chainId. */
+  logSessionId: string;
 }
 
 const activeChains = new Map<string, ActiveChain>();
@@ -2826,6 +2840,20 @@ export function resumeToolboxChain(
 export function cancelToolboxChain(chainId: string): boolean {
   const ch = activeChains.get(chainId);
   if (!ch) return false;
+  // R-TB-LOG-V1 — record the *user-side* cancel intent before we tear
+  // down the runner. The runner itself logs `chain.end` with
+  // outcome=cancelled once it actually unwinds; this entry is the
+  // explicit "user pressed cancel" trace the audit needs to
+  // distinguish from internal aborts (e.g. cancelAll on app quit).
+  try {
+    logSessionEvent({
+      sessionId: ch.logSessionId,
+      stage: 'toolbox',
+      level: 'warn',
+      substep: 'chain.cancel.requested',
+      message: `cancel requested for chain ${chainId}`
+    });
+  } catch { /* swallow — logging never crashes cancel */ }
   if (ch.pause) {
     ch.pause.reject(new Error('chain cancelled while paused'));
     ch.pause = null;
@@ -2872,13 +2900,63 @@ export async function startToolboxChain(args: {
    *  step runs. The IPC layer wires this to sanitizeToolboxParams so
    *  the resume patch goes through the same gate as startChain. */
   sanitizeParams?: (p: ToolboxParams) => ToolboxParams;
+  /** R-TB-LOG-V1 — tree-wide chainId from useToolboxLineage. When
+   *  provided, *all* IPC chains belonging to the same lineage tree
+   *  share one session log so the user sees the entire branch
+   *  history (incl. re-runs / forks) on a single timeline. Falls
+   *  back to the per-step IPC chainId when absent (legacy callers). */
+  lineageChainId?: string;
+  /** R-TB-LOG-V1 — display label for the session row (e.g. the input
+   *  file basename). Used only by the renderer log viewer. */
+  chainInputName?: string;
 }): Promise<{ status: ToolboxChainStatus; steps: ToolboxChainHistoryStep[]; error?: string }> {
-  const { chainId, inputPath, steps, outputBaseDir, emit, sanitizeParams } = args;
+  const {
+    chainId, inputPath, steps, outputBaseDir, emit, sanitizeParams,
+    lineageChainId, chainInputName
+  } = args;
   const ctrl = new AbortController();
   activeAborts.add(ctrl);
-  const active: ActiveChain = { chainId, abort: ctrl, pause: null };
+  // R-TB-LOG-V1 — derive the session id once and stash it on the
+  // ActiveChain entry so cancelToolboxChain can log against the same
+  // bucket without re-deriving (and without diverging if the runner
+  // ever switches mid-flight).
+  const logSessionId = `tb:${lineageChainId || chainId}`;
+  const active: ActiveChain = { chainId, abort: ctrl, pause: null, logSessionId };
   activeChains.set(chainId, active);
   await ensureDir(outputBaseDir);
+
+  // R-TB-LOG-V1 — open or re-open the session. We *re-open* on every
+  // chain start because the same lineage tree may execute multiple
+  // sub-chains over time (think "branch from node X" → another chain
+  // run with the same lineageChainId), and each re-entry should be
+  // recorded but seq-continuous.
+  try {
+    openLogSession({
+      sessionId: logSessionId,
+      origin: 'toolbox',
+      title: chainInputName || path.basename(inputPath)
+    });
+    // openSession is idempotent on the metadata side, but it does NOT
+    // resurrect a session that has already been closed (outcome set).
+    // For lineage-wide sessions we explicitly reopen to clear the
+    // closed_at marker so the renderer flips back to "in progress"
+    // and seq keeps climbing.
+    reopenLogSession({ sessionId: logSessionId, origin: 'toolbox' });
+    logSessionEvent({
+      sessionId: logSessionId,
+      stage: 'toolbox',
+      level: 'info',
+      substep: 'chain.start',
+      message: `chain ${chainId} started: ${steps.length} step(s)`,
+      data: {
+        ipcChainId: chainId,
+        lineageChainId: lineageChainId ?? null,
+        inputPath,
+        outputBaseDir,
+        steps: steps.map((s) => ({ id: s.id, kind: s.kind, params: s.params }))
+      }
+    });
+  } catch { /* logging never breaks the runner */ }
 
   const audit: ToolboxChainHistoryStep[] = steps.map((s) => ({
     kind: s.kind,
@@ -2902,6 +2980,18 @@ export async function startToolboxChain(args: {
       let effectiveParams = step.params;
 
       if (PAUSING_KINDS.has(step.kind)) {
+        // R-TB-LOG-V1 — log the awaiting-input gate so timeline shows
+        // the human-in-the-loop pause distinct from "step running".
+        try {
+          logSessionEvent({
+            sessionId: logSessionId,
+            stage: 'toolbox',
+            level: 'info',
+            substep: 'step.awaiting-input',
+            message: `step ${i + 1}/${steps.length} ${step.kind} paused for renderer input`,
+            data: { stepIndex: i + 1, kind: step.kind, taskId: step.id }
+          });
+        } catch { /* ignore */ }
         emit({
           taskId: step.id,
           status: 'awaiting-input',
@@ -2916,6 +3006,16 @@ export async function startToolboxChain(args: {
         });
         effectiveParams = mergeParams(step.params, patch);
         if (sanitizeParams) effectiveParams = sanitizeParams(effectiveParams);
+        try {
+          logSessionEvent({
+            sessionId: logSessionId,
+            stage: 'toolbox',
+            level: 'info',
+            substep: 'step.resume',
+            message: `step ${i + 1}/${steps.length} ${step.kind} resumed with patched params`,
+            data: { stepIndex: i + 1, kind: step.kind, params: effectiveParams }
+          });
+        } catch { /* ignore */ }
       }
 
       // Per-step abort wired to the chain's parent controller.
@@ -2933,6 +3033,25 @@ export async function startToolboxChain(args: {
       };
       const stepAudit = audit[i];
       stepAudit.params = effectiveParams;
+      // R-TB-LOG-V1 — emit step.start once the params are settled (so
+      // the log shows the *effective* params, not the unresolved
+      // pre-pause shell).
+      try {
+        logSessionEvent({
+          sessionId: logSessionId,
+          stage: 'toolbox',
+          level: 'info',
+          substep: 'step.start',
+          message: `step ${i + 1}/${steps.length} ${step.kind} starting`,
+          data: {
+            stepIndex: i + 1,
+            kind: step.kind,
+            taskId: step.id,
+            inputPath: job.inputPath,
+            params: effectiveParams
+          }
+        });
+      } catch { /* ignore */ }
       try {
         const collected: string[] = [];
         const stepEmit: typeof emit = (p) => {
@@ -2959,6 +3078,27 @@ export async function startToolboxChain(args: {
             } catch {
               // file unreachable — drop the field silently.
             }
+          }
+          // R-TB-LOG-V1 — when a size-regression triggers, log a warn
+          // entry tagged with the ratio so the audit timeline flags
+          // the spot without the user having to open every step.
+          if (sizeRegression) {
+            try {
+              logSessionEvent({
+                sessionId: logSessionId,
+                stage: 'toolbox',
+                level: 'warn',
+                substep: 'step.size-regression',
+                message: `step ${i + 1}/${steps.length} ${step.kind} produced a larger output (${(sizeRegression.ratio * 100).toFixed(1)}% of input)`,
+                data: {
+                  stepIndex: i + 1,
+                  kind: step.kind,
+                  beforeBytes: sizeRegression.beforeBytes,
+                  afterBytes: sizeRegression.afterBytes,
+                  ratio: sizeRegression.ratio
+                }
+              });
+            } catch { /* ignore */ }
           }
           emit({
             ...p,
@@ -2987,10 +3127,34 @@ export async function startToolboxChain(args: {
         stepAudit.outputs = collected;
         cursorInput = collected[0];
         cursorExt = path.extname(cursorInput).toLowerCase();
+        try {
+          logSessionEvent({
+            sessionId: logSessionId,
+            stage: 'toolbox',
+            level: 'info',
+            substep: 'step.done',
+            message: `step ${i + 1}/${steps.length} ${step.kind} done → ${path.basename(collected[0])}`,
+            data: {
+              stepIndex: i + 1,
+              kind: step.kind,
+              outputs: collected
+            }
+          });
+        } catch { /* ignore */ }
       } catch (err) {
         if (isAbortError(err)) {
           stepAudit.status = 'cancelled';
           chainStatus = 'cancelled';
+          try {
+            logSessionEvent({
+              sessionId: logSessionId,
+              stage: 'toolbox',
+              level: 'warn',
+              substep: 'step.cancelled',
+              message: `step ${i + 1}/${steps.length} ${step.kind} cancelled`,
+              data: { stepIndex: i + 1, kind: step.kind, taskId: step.id }
+            });
+          } catch { /* ignore */ }
           break;
         }
         const msg = (err as Error).message || String(err);
@@ -2998,6 +3162,16 @@ export async function startToolboxChain(args: {
         stepAudit.error = msg;
         chainStatus = 'failed';
         chainError = msg;
+        try {
+          logSessionEvent({
+            sessionId: logSessionId,
+            stage: 'toolbox',
+            level: 'error',
+            substep: 'step.failed',
+            message: `step ${i + 1}/${steps.length} ${step.kind} failed: ${msg}`,
+            data: { stepIndex: i + 1, kind: step.kind, taskId: step.id, error: msg }
+          });
+        } catch { /* ignore */ }
         emit({ taskId: step.id, status: 'failed', percent: 100, error: msg, stepIndex: i + 1, totalSteps: steps.length });
         break;
       } finally {
@@ -3016,6 +3190,22 @@ export async function startToolboxChain(args: {
   } finally {
     activeAborts.delete(ctrl);
     activeChains.delete(chainId);
+    // R-TB-LOG-V1 — close the log session with the terminal outcome.
+    // closeSession is idempotent (on a re-entry the next openSession
+    // calls reopenSession to clear it), so the lineage-wide id stays
+    // re-usable across sub-chains.
+    try {
+      const outcome: 'done' | 'cancelled' | 'error' =
+        chainStatus === 'done' ? 'done'
+        : chainStatus === 'cancelled' ? 'cancelled'
+        : 'error';
+      closeLogSession({
+        sessionId: logSessionId,
+        outcome,
+        message: `chain ${chainId} ended: ${chainStatus}${chainError ? ' — ' + chainError : ''}`,
+        data: { ipcChainId: chainId, status: chainStatus, error: chainError }
+      });
+    } catch { /* ignore */ }
   }
 
   // cursorExt is intentionally maintained through the loop so future

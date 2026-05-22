@@ -1809,6 +1809,21 @@ ipcMain.handle('toolbox:startChain', async (_e, payload: unknown) => {
   if (typeof obj.outputDirOverride === 'string' && obj.outputDirOverride) {
     outputDirOverride = obj.outputDirOverride;
   }
+  // R-TB-LOG-V1 — pull tree-wide log identity from the renderer if
+  // present. Both fields are optional and validated lightly (string,
+  // length-bounded, alphanumeric-ish for the id) — anything that
+  // doesn't pass the gate is dropped silently and the chain falls
+  // back to per-step logging keyed off the IPC chainId.
+  let lineageChainId: string | undefined;
+  if (typeof obj.lineageChainId === 'string') {
+    const cleaned = obj.lineageChainId.replace(/[^a-zA-Z0-9._-]/g, '').slice(0, 64);
+    if (cleaned) lineageChainId = cleaned;
+  }
+  let chainInputName: string | undefined;
+  if (typeof obj.chainInputName === 'string') {
+    const trimmed = obj.chainInputName.slice(0, 256);
+    if (trimmed) chainInputName = trimmed;
+  }
   const subDir = await ensureToolboxChainOutputDir(chainId, outputDirOverride);
 
   // Fire and forget. The runner emits progress (including
@@ -1827,7 +1842,9 @@ ipcMain.handle('toolbox:startChain', async (_e, payload: unknown) => {
             mainWindow.webContents.send('process:progress', p);
           }
         },
-        sanitizeParams: sanitizeToolboxParams
+        sanitizeParams: sanitizeToolboxParams,
+        lineageChainId,
+        chainInputName
       });
       // R-TB-CHAIN — persist the chain audit row. We write whatever
       // settled, even on cancel/failure: the renderer history panel

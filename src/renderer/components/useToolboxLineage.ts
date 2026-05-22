@@ -114,6 +114,11 @@ interface ToolboxBridge {
     inputPath: string;
     steps: Array<{ id: string; kind: ToolboxKind; params: ToolboxParams }>;
     outputDirOverride?: string;
+    /** R-TB-LOG-V1 — tree-wide chainId; main uses it as the session
+     *  log id so the entire branching lineage shares one timeline. */
+    lineageChainId?: string;
+    /** R-TB-LOG-V1 — display label for the log session row. */
+    chainInputName?: string;
   }): Promise<{ ok: boolean; chainId: string; outputDir: string }>;
   cancelToolboxChain(chainId: string): Promise<{ ok: boolean }>;
   resumeToolboxChain(
@@ -483,10 +488,17 @@ export function useToolboxLineage(): UseToolboxLineageResult {
       });
       try {
         const bridge = getBridge();
+        // R-TB-LOG-V1 — pass the tree-wide chainId so main keeps the
+        // whole branching lineage on a single session log timeline.
+        // chainInputName is the leaf basename of the focused input
+        // path; trims any URL noise to a stable display label.
+        const fileBaseName = focusPath.split(/[/\\]/).pop() || focusPath;
         await bridge.startToolboxChain({
           chainId: ipcChainId,
           inputPath: focusPath,
-          steps: [{ id: stepId, kind, params }]
+          steps: [{ id: stepId, kind, params }],
+          lineageChainId: treeChainId,
+          chainInputName: fileBaseName
         });
       } catch (err) {
         const e = err instanceof Error ? err : new Error(String(err));
