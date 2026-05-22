@@ -110,6 +110,29 @@ CREATE INDEX IF NOT EXISTS toolbox_history_finished_idx ON toolbox_history(finis
 ` as const;
 
 /**
+ * R-TB-CHAIN — independent table for single-input toolbox chains.
+ * Kept separate from `toolbox_history` (per the "独立 SQLite 表"
+ * decision) because a chain has fundamentally different semantics:
+ * it's one logical run with N audited steps, not a flat job. The
+ * full per-step audit trail (kind / params / status / outputs / error)
+ * lives in `steps_json` so we don't need a child table — chains are
+ * append-only and the renderer always reads the whole row.
+ */
+export const TOOLBOX_CHAIN_HISTORY_DDL = `
+CREATE TABLE IF NOT EXISTS toolbox_chain_history (
+  id TEXT PRIMARY KEY,
+  input_path TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  status TEXT NOT NULL,
+  error TEXT,
+  output_dir TEXT NOT NULL,
+  finished_at INTEGER NOT NULL,
+  steps_json TEXT NOT NULL DEFAULT '[]'
+);
+CREATE INDEX IF NOT EXISTS toolbox_chain_history_finished_idx ON toolbox_chain_history(finished_at DESC);
+` as const;
+
+/**
  * Per-session operation log family. Two tables:
  *
  *   - `session_logs`        — one row per session (sniff round / batch /
@@ -163,6 +186,7 @@ export type TableFamily =
   | 'upload_history'
   | 'sniff_history'
   | 'toolbox_history'
+  | 'toolbox_chain_history'
   | 'session_logs';
 
 /** Current head version per family. Bump and append a migrator in
@@ -172,5 +196,6 @@ export const HEAD_VERSIONS: Readonly<Record<TableFamily, number>> = {
   upload_history: 1,
   sniff_history: 1,
   toolbox_history: 1,
+  toolbox_chain_history: 1,
   session_logs: 1
 };

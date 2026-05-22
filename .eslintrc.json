@@ -25,6 +25,7 @@
         "src/main/processor.ts",
         "src/main/index.ts",
         "src/main/ffmpeg.ts",
+        "src/preload/index.ts",
         "src/renderer/App.tsx",
         "src/renderer/components/ToolboxPanel.tsx",
         "src/renderer/components/HistoryDetailModal.tsx",

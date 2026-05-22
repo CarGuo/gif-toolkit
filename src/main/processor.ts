@@ -11,8 +11,18 @@ import type {
   PreviewResult,
   ThumbnailResult,
   ToolboxJob,
-  ToolboxParams
+  ToolboxParams,
+  ToolboxKind,
+  ToolboxChainStep,
+  ToolboxChainHistoryStep,
+  ToolboxChainStatus
 } from '../shared/types';
+// R-TB-CHAIN — pure helpers live in a sibling module so unit tests
+// can exercise them without dragging in Electron / native ffmpeg.
+import {
+  chainStepOutputExt as chainStepOutputExtImpl,
+  validateChainCompatibility as validateChainCompatibilityImpl
+} from './processor-chain-utils';
 import type { GifOptimizeLevel, GifDither } from '../shared/types/process';
 import { DEFAULT_OPTIONS } from '../shared/types';
 import { downloadToFile } from './downloader';
@@ -2623,4 +2633,248 @@ export async function startToolbox(
     activeBatchPromises.delete(run);
   });
   return run;
+}
+
+/* ----------------------- R-TB-CHAIN: single-input chain ----------------------- */
+
+// Re-export the pure compatibility / output-extension helpers (the
+// implementations live in [processor-chain-utils.ts](./processor-chain-utils.ts)).
+// Existing call sites import them from this module unchanged.
+export const chainStepOutputExt = chainStepOutputExtImpl;
+export const validateChainCompatibility = validateChainCompatibilityImpl;
+
+/**
+ * R-TB-CHAIN — internal state for one in-flight chain. Held in the
+ * module-level `activeChains` map so the IPC layer can resolve resume
+ * / cancel calls back to the runner without wiring per-chain
+ * promises through closures.
+ */
+interface ChainPauseTicket {
+  stepIndex: number;
+  resolve: (paramsPatch: Partial<ToolboxParams>) => void;
+  reject: (err: Error) => void;
+}
+
+interface ActiveChain {
+  chainId: string;
+  abort: AbortController;
+  pause: ChainPauseTicket | null;
+}
+
+const activeChains = new Map<string, ActiveChain>();
+
+/** R-TB-CHAIN — list of kinds that pause the chain to collect runtime
+ *  params from the renderer. Currently only crop. */
+const PAUSING_KINDS: ReadonlySet<ToolboxKind> = new Set<ToolboxKind>(['crop']);
+
+/**
+ * R-TB-CHAIN — apply a partial params patch onto the original step
+ * params, with no deep merge (the patch is a flat object of optional
+ * fields, all numeric/boolean/string scalars). The runner re-runs the
+ * standard sanitiser AFTER merging via the IPC layer so values land
+ * inside their domain bounds.
+ */
+function mergeParams(base: ToolboxParams, patch: Partial<ToolboxParams>): ToolboxParams {
+  return { ...base, ...patch };
+}
+
+/**
+ * R-TB-CHAIN — resume a paused chain step. Returns true when a paused
+ * runner was found and resumed; false when the chain is unknown or was
+ * not actually paused. Mismatched stepIndex rejects with an Error so
+ * the IPC layer can surface "wrong step".
+ */
+export function resumeToolboxChain(
+  chainId: string,
+  stepIndex: number,
+  paramsPatch: Partial<ToolboxParams>
+): boolean {
+  const ch = activeChains.get(chainId);
+  if (!ch || !ch.pause) return false;
+  if (ch.pause.stepIndex !== stepIndex) {
+    ch.pause.reject(new Error(`resume stepIndex mismatch: expected ${ch.pause.stepIndex}, got ${stepIndex}`));
+    ch.pause = null;
+    return false;
+  }
+  const ticket = ch.pause;
+  ch.pause = null;
+  ticket.resolve(paramsPatch);
+  return true;
+}
+
+/**
+ * R-TB-CHAIN — cancel a chain. Aborts the current step and any
+ * pause-ticket; the runner emits cancelled events and exits. Returns
+ * true when an active chain was cancelled.
+ */
+export function cancelToolboxChain(chainId: string): boolean {
+  const ch = activeChains.get(chainId);
+  if (!ch) return false;
+  if (ch.pause) {
+    ch.pause.reject(new Error('chain cancelled while paused'));
+    ch.pause = null;
+  }
+  try { ch.abort.abort(); } catch { /* ignore */ }
+  return true;
+}
+
+/**
+ * R-TB-CHAIN — internal hook used by IPC's resumeChain handler when it
+ * needs to know if a chain is currently paused (for error wording).
+ */
+export function isChainPaused(chainId: string): boolean {
+  const ch = activeChains.get(chainId);
+  return !!ch && !!ch.pause;
+}
+
+/**
+ * R-TB-CHAIN — public entry point for a single-input chain. Allocates a
+ * sub-directory, runs each step serially using processToolboxJob, and
+ * pauses on PAUSING_KINDS until the renderer resumes via
+ * `resumeToolboxChain`. Always resolves with the complete per-step
+ * audit trail; never throws (errors land in the trail). Mirrors
+ * startBatch/startToolbox abort + activeAborts plumbing so cancelAll
+ * still aborts chains alongside batch jobs.
+ *
+ * Output naming: each step writes into `outputBaseDir` with a fresh
+ * id so processToolboxJob's existing fileNameFor logic produces a
+ * disambiguated filename. The runner then records that file as the
+ * step's output and feeds it as the next step's inputPath.
+ */
+export async function startToolboxChain(args: {
+  chainId: string;
+  inputPath: string;
+  steps: ToolboxChainStep[];
+  outputBaseDir: string;
+  emit: (p: TaskProgress) => void;
+  /** Optional sanitiser invoked on the merged params right before the
+   *  step runs. The IPC layer wires this to sanitizeToolboxParams so
+   *  the resume patch goes through the same gate as startChain. */
+  sanitizeParams?: (p: ToolboxParams) => ToolboxParams;
+}): Promise<{ status: ToolboxChainStatus; steps: ToolboxChainHistoryStep[]; error?: string }> {
+  const { chainId, inputPath, steps, outputBaseDir, emit, sanitizeParams } = args;
+  const ctrl = new AbortController();
+  activeAborts.add(ctrl);
+  const active: ActiveChain = { chainId, abort: ctrl, pause: null };
+  activeChains.set(chainId, active);
+  await ensureDir(outputBaseDir);
+
+  const audit: ToolboxChainHistoryStep[] = steps.map((s) => ({
+    kind: s.kind,
+    params: s.params,
+    status: 'skipped',
+    outputs: []
+  }));
+
+  let cursorInput = inputPath;
+  let cursorExt = path.extname(inputPath).toLowerCase();
+  let chainStatus: ToolboxChainStatus = 'done';
+  let chainError: string | undefined;
+
+  try {
+    for (let i = 0; i < steps.length; i += 1) {
+      if (ctrl.signal.aborted) {
+        chainStatus = 'cancelled';
+        break;
+      }
+      const step = steps[i];
+      let effectiveParams = step.params;
+
+      if (PAUSING_KINDS.has(step.kind)) {
+        emit({
+          taskId: step.id,
+          status: 'awaiting-input',
+          percent: 0,
+          message: `step ${i + 1}/${steps.length} ${step.kind} awaiting renderer input`,
+          outputs: i === 0 ? [] : [cursorInput],
+          stepIndex: i + 1,
+          totalSteps: steps.length
+        });
+        const patch = await new Promise<Partial<ToolboxParams>>((resolve, reject) => {
+          active.pause = { stepIndex: i, resolve, reject };
+        });
+        effectiveParams = mergeParams(step.params, patch);
+        if (sanitizeParams) effectiveParams = sanitizeParams(effectiveParams);
+      }
+
+      // Per-step abort wired to the chain's parent controller.
+      const stepCtrl = new AbortController();
+      const onParentAbort = (): void => { try { stepCtrl.abort(); } catch { /* ignore */ } };
+      if (ctrl.signal.aborted) stepCtrl.abort();
+      else ctrl.signal.addEventListener('abort', onParentAbort, { once: true });
+      taskAborts.set(step.id, stepCtrl);
+
+      const job: ToolboxJob = {
+        id: step.id,
+        kind: step.kind,
+        inputPath: cursorInput,
+        params: effectiveParams
+      };
+      const stepAudit = audit[i];
+      stepAudit.params = effectiveParams;
+      try {
+        const collected: string[] = [];
+        const stepEmit: typeof emit = (p) => {
+          if (p.outputs && p.outputs.length > 0) {
+            for (const o of p.outputs) if (!collected.includes(o)) collected.push(o);
+          }
+          emit({
+            ...p,
+            stepIndex: i + 1,
+            totalSteps: steps.length
+          });
+        };
+        emit({ taskId: step.id, status: 'pending', percent: 0, stepIndex: i + 1, totalSteps: steps.length });
+        await processToolboxJob({
+          job,
+          outputBaseDir,
+          emit: stepEmit,
+          signal: stepCtrl.signal,
+          batchTaken: new Set<string>()
+        });
+        if (collected.length === 0) {
+          throw new Error(`step ${i + 1} (${step.kind}) produced no outputs`);
+        }
+        stepAudit.status = 'done';
+        stepAudit.outputs = collected;
+        cursorInput = collected[0];
+        cursorExt = path.extname(cursorInput).toLowerCase();
+      } catch (err) {
+        if (isAbortError(err)) {
+          stepAudit.status = 'cancelled';
+          chainStatus = 'cancelled';
+          break;
+        }
+        const msg = (err as Error).message || String(err);
+        stepAudit.status = 'failed';
+        stepAudit.error = msg;
+        chainStatus = 'failed';
+        chainError = msg;
+        emit({ taskId: step.id, status: 'failed', percent: 100, error: msg, stepIndex: i + 1, totalSteps: steps.length });
+        break;
+      } finally {
+        ctrl.signal.removeEventListener('abort', onParentAbort);
+        if (taskAborts.get(step.id) === stepCtrl) taskAborts.delete(step.id);
+      }
+    }
+  } catch (err) {
+    if (isAbortError(err)) {
+      chainStatus = 'cancelled';
+    } else {
+      const msg = (err as Error).message || String(err);
+      chainStatus = 'failed';
+      chainError = msg;
+    }
+  } finally {
+    activeAborts.delete(ctrl);
+    activeChains.delete(chainId);
+  }
+
+  // cursorExt is intentionally maintained through the loop so future
+  // enhancements can branch on the live cursor extension without re-
+  // deriving from path.extname. Reference it here to silence the
+  // "declared but its value is never read" warning while keeping the
+  // invariant centralised.
+  void cursorExt;
+  return { status: chainStatus, steps: audit, error: chainError };
 }

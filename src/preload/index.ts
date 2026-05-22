@@ -12,7 +12,10 @@ import type {
   ResolvedMedia,
   ToolboxJob,
   ToolboxKind,
+  ToolboxParams,
   ToolboxStartResult,
+  ToolboxChainStep,
+  ToolboxChainStartResult,
   UploadConfigs,
   UploadProgress,
   UploadStartPayload,
@@ -289,6 +292,37 @@ const api = {
     if (!Array.isArray(jobs)) throw new TypeError('jobs must be array');
     return ipcRenderer.invoke('toolbox:start', { jobs, outputDirOverride });
   },
+  /* R-TB-CHAIN — single-input serial chain bridge. The renderer drives
+   *  one chainId through ≥1 ToolboxChainSteps; main pauses crop steps
+   *  and emits 'awaiting-input' through the existing process:progress
+   *  channel until resumeToolboxChain is called with the rect patch.
+   *  cancelToolboxChain aborts the in-flight step and any pause. */
+  async startToolboxChain(payload: {
+    chainId: string;
+    inputPath: string;
+    steps: ToolboxChainStep[];
+    outputDirOverride?: string;
+  }): Promise<ToolboxChainStartResult> {
+    ensureObject(payload, 'payload');
+    ensureString(payload.chainId, 'chainId');
+    ensureString(payload.inputPath, 'inputPath');
+    if (!Array.isArray(payload.steps)) throw new TypeError('steps must be array');
+    return ipcRenderer.invoke('toolbox:startChain', payload);
+  },
+  async resumeToolboxChain(
+    chainId: string,
+    stepIndex: number,
+    paramsPatch: Partial<ToolboxParams>
+  ): Promise<{ ok: boolean }> {
+    ensureString(chainId, 'chainId');
+    if (typeof stepIndex !== 'number') throw new TypeError('stepIndex must be number');
+    ensureObject(paramsPatch, 'paramsPatch');
+    return ipcRenderer.invoke('toolbox:resumeChain', { chainId, stepIndex, paramsPatch });
+  },
+  async cancelToolboxChain(chainId: string): Promise<{ ok: boolean }> {
+    ensureString(chainId, 'chainId');
+    return ipcRenderer.invoke('toolbox:cancelChain', chainId);
+  },
   /* R-38 — Trim/Crop need source dimensions and duration before the user
    *  configures the tool. probeMedia is a thin pass-through to ffmpeg's
    *  `probe()`; firstFrame returns a small JPEG dataUrl used by the
@@ -460,6 +494,25 @@ const api = {
       },
       clear(): Promise<void> {
         return ipcRenderer.invoke('db:toolboxHistory:clear');
+      }
+    },
+    /* R-TB-CHAIN — chain history. Independent SQLite table (separate
+     * audit trail per step). The renderer reads via readAll() to render
+     * the chain history panel; upsert is exposed for symmetry with the
+     * other repos (main writes from the chain runner directly so the
+     * renderer rarely needs to call it). */
+    toolboxChainHistory: {
+      readAll(): Promise<unknown[]> {
+        return ipcRenderer.invoke('db:toolboxChainHistory:readAll');
+      },
+      upsert(entry: unknown): Promise<void> {
+        return ipcRenderer.invoke('db:toolboxChainHistory:upsert', entry);
+      },
+      remove(id: string): Promise<void> {
+        return ipcRenderer.invoke('db:toolboxChainHistory:remove', ensureString(id, 'id'));
+      },
+      clear(): Promise<void> {
+        return ipcRenderer.invoke('db:toolboxChainHistory:clear');
       }
     },
     /**

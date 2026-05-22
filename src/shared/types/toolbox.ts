@@ -190,3 +190,108 @@ export interface ToolboxStartResult {
   ok: boolean;
   outputDir: string;
 }
+
+/* --------------------- R-TB-CHAIN: single-input chain --------------------- */
+
+/**
+ * R-TB-CHAIN — one step inside a chain. Parallel to ToolboxJob but with
+ * NO inputPath: the input is resolved at runtime by the chain runner
+ * (step 1 reads from the chain's source file; step N+1 reads step N's
+ * primary output). Each step still carries its own kind+params so the
+ * runner can sanitize/process each independently.
+ *
+ * Crop semantics: crop steps carry whatever cropX/Y/W/H the renderer
+ * could pre-fill (often zeros), but the runner emits an
+ * `awaiting-input` progress event for crop steps and pauses until the
+ * renderer calls `toolbox:resumeChain` with the rect drawn over the
+ * previous step's actual output frame. The patch overrides the
+ * persisted params before the step runs. Non-crop steps never pause.
+ */
+export interface ToolboxChainStep {
+  /** Stable id used as the taskId when the runner emits progress for
+   *  this step. Chain progress is keyed by stepId so the renderer can
+   *  show per-step state inside one chain. */
+  id: string;
+  kind: ToolboxKind;
+  params: ToolboxParams;
+}
+
+/**
+ * R-TB-CHAIN — full chain submission. The runner allocates one
+ * sub-directory `<root>/toolbox/chain-<YYYYMMDD>/<chainId>/` and
+ * deposits step-i-<kind>.<ext> files there. Failed steps abort the
+ * chain but PRESERVE intermediate files so the user can inspect where
+ * the chain broke (decision: "保留中间产物").
+ */
+export interface ToolboxChainRequest {
+  /** Stable chain id. Doubles as the leaf directory name. */
+  chainId: string;
+  /** Single source file. Same path-validation rules as ToolboxJob.inputPath. */
+  inputPath: string;
+  /** ≥1 steps. Each step's kind must accept the previous step's output
+   *  extension (validated by validateChainCompatibility in main). */
+  steps: ToolboxChainStep[];
+}
+
+export interface ToolboxChainStartResult {
+  ok: boolean;
+  outputDir: string;
+  chainId: string;
+}
+
+/**
+ * R-TB-CHAIN — patch sent by the renderer when resuming a paused step.
+ * Currently only crop steps pause, so the patch is a partial
+ * ToolboxParams (cropX/Y/W/H). The runner merges the patch on top of
+ * the original step params before executing.
+ */
+export interface ToolboxChainResumePatch {
+  chainId: string;
+  /** 0-based index of the paused step. The runner rejects mismatched
+   *  indices to prevent double-resume races. */
+  stepIndex: number;
+  /** Subset of ToolboxParams to merge in. Same sanitiser as startChain. */
+  paramsPatch: Partial<ToolboxParams>;
+}
+
+/**
+ * R-TB-CHAIN — terminal status of a chain run. Mirrors TaskStatus's
+ * settled subset; `awaiting-input` is in-flight only and never appears
+ * in history.
+ */
+export type ToolboxChainStatus = 'done' | 'failed' | 'cancelled';
+
+/**
+ * R-TB-CHAIN — one persisted chain run. Stored in the dedicated
+ * `toolbox_chain_history` table (decision: "独立 SQLite 表"). The list
+ * of steps is kept verbatim with per-step output paths so the renderer
+ * can reveal step-N intermediates from history, not just the final.
+ */
+export interface ToolboxChainHistoryStep {
+  kind: ToolboxKind;
+  params: ToolboxParams;
+  status: 'done' | 'failed' | 'cancelled' | 'skipped';
+  /** Output paths produced by this step (typically 1; gif-optimize may
+   *  emit aux files). Empty for steps that never ran. */
+  outputs: string[];
+  error?: string;
+}
+
+export interface ToolboxChainHistoryEntry {
+  /** Mirrors ToolboxChainRequest.chainId. */
+  id: string;
+  /** Original source file. */
+  inputPath: string;
+  /** Display-only filename derived from inputPath. */
+  displayName: string;
+  /** Final status after the runner settled. */
+  status: ToolboxChainStatus;
+  /** Per-step audit trail. */
+  steps: ToolboxChainHistoryStep[];
+  /** Chain output sub-directory (`<root>/toolbox/chain-<date>/<chainId>/`). */
+  outputDir: string;
+  /** Unix epoch ms when the chain settled. */
+  finishedAt: number;
+  /** First-failure error string when status='failed', else absent. */
+  error?: string;
+}

@@ -51,6 +51,10 @@ import {
   type ToolboxHistoryRow
 } from './repos/toolboxHistoryRepo';
 import {
+  createToolboxChainHistoryRepo
+} from './repos/toolboxChainHistoryRepo';
+import type { ToolboxChainHistoryEntry } from '../../shared/types';
+import {
   listSessions,
   readSession,
   removeSession,
@@ -68,6 +72,7 @@ type RepoCache = {
   uploadHistory?: ReturnType<typeof createUploadHistoryRepo>;
   sniffHistory?: ReturnType<typeof createSniffHistoryRepo>;
   toolboxHistory?: ReturnType<typeof createToolboxHistoryRepo>;
+  toolboxChainHistory?: ReturnType<typeof createToolboxChainHistoryRepo>;
 };
 
 const cache: RepoCache = {};
@@ -88,6 +93,9 @@ function getSniffHistory() {
 }
 function getToolboxHistory() {
   return cache.toolboxHistory ?? (cache.toolboxHistory = createToolboxHistoryRepo(openDb()));
+}
+function getToolboxChainHistory() {
+  return cache.toolboxChainHistory ?? (cache.toolboxChainHistory = createToolboxChainHistoryRepo(openDb()));
 }
 
 /**
@@ -170,6 +178,20 @@ export function registerDbIpc(): void {
     getToolboxHistory().clear();
   }));
 
+  // toolbox chain history (R-TB-CHAIN). Independent table from
+  // toolbox_history so chain rows can carry the per-step audit trail
+  // without bloating the flat batch-job table.
+  ipcMain.handle('db:toolboxChainHistory:readAll', safeHandle('toolboxChainHistory:readAll', async () => getToolboxChainHistory().readAll()));
+  ipcMain.handle('db:toolboxChainHistory:upsert', safeHandle('toolboxChainHistory:upsert', async (_e, entry: ToolboxChainHistoryEntry) => {
+    getToolboxChainHistory().upsert(entry);
+  }));
+  ipcMain.handle('db:toolboxChainHistory:remove', safeHandle('toolboxChainHistory:remove', async (_e, id: string) => {
+    getToolboxChainHistory().remove(id);
+  }));
+  ipcMain.handle('db:toolboxChainHistory:clear', safeHandle('toolboxChainHistory:clear', async () => {
+    getToolboxChainHistory().clear();
+  }));
+
   // bootstrap import
   ipcMain.handle(
     'db:bootstrapImport',
@@ -231,4 +253,16 @@ export function _resetDbIpcCacheForTests(): void {
   cache.uploadHistory = undefined;
   cache.sniffHistory = undefined;
   cache.toolboxHistory = undefined;
+  cache.toolboxChainHistory = undefined;
+}
+
+/**
+ * R-TB-CHAIN — main-internal accessor. The toolbox:startChain handler
+ * needs to write the audit row when the runner settles, but going
+ * through the IPC channel from a main-side caller would need a fake
+ * sender. Reusing the lazy cache here keeps the prepared statements
+ * shared with the renderer-facing path and dodges the round-trip.
+ */
+export function getToolboxChainHistoryRepo() {
+  return getToolboxChainHistory();
 }

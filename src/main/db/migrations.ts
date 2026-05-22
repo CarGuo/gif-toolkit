@@ -27,6 +27,7 @@ import {
   UPLOAD_HISTORY_DDL,
   SNIFF_HISTORY_DDL,
   TOOLBOX_HISTORY_DDL,
+  TOOLBOX_CHAIN_HISTORY_DDL,
   SESSION_LOGS_DDL,
   HEAD_VERSIONS,
   type TableFamily
@@ -80,6 +81,12 @@ const MIGRATORS: Readonly<Record<TableFamily, ReadonlyArray<Migrator>>> = {
       db.exec(TOOLBOX_HISTORY_DDL);
     }
   ],
+  toolbox_chain_history: [
+    () => undefined,
+    (db) => {
+      db.exec(TOOLBOX_CHAIN_HISTORY_DDL);
+    }
+  ],
   session_logs: [
     () => undefined,
     (db) => {
@@ -116,6 +123,7 @@ export function runMigrations(db: Database.Database): void {
     'upload_history',
     'sniff_history',
     'toolbox_history',
+    'toolbox_chain_history',
     'session_logs'
   ];
   for (const family of families) {

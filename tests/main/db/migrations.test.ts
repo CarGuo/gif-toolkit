@@ -45,6 +45,7 @@ describe('R-80 migrations runner', () => {
         upload_history: HEAD_VERSIONS.upload_history,
         sniff_history: HEAD_VERSIONS.sniff_history,
         toolbox_history: HEAD_VERSIONS.toolbox_history,
+        toolbox_chain_history: HEAD_VERSIONS.toolbox_chain_history,
         session_logs: HEAD_VERSIONS.session_logs
       });
     } finally {
@@ -64,6 +65,7 @@ describe('R-80 migrations runner', () => {
         'upload_history_items',
         'sniff_history',
         'toolbox_history',
+        'toolbox_chain_history',
         'session_logs',
         'session_log_entries',
         'schema_meta'

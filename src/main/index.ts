@@ -7,7 +7,7 @@ import { sniffPage } from './sniffer';
 import { openWebviewSniff } from './webviewSniff';
 import { sniffViaSystemChrome, findInstalledBrowsers } from './systemChromeSniff';
 import { sniffViaYtdlp } from './ytdlpDirectSniff';
-import { previewMedia, startBatch, cancelAllTasks, cancelTask, prefetchThumbnail, startToolbox } from './processor';
+import { previewMedia, startBatch, cancelAllTasks, cancelTask, prefetchThumbnail, startToolbox, startToolboxChain, validateChainCompatibility, resumeToolboxChain, cancelToolboxChain } from './processor';
 import { killAllProcs, probe as probeMedia, extractFrameDataUrl } from './ffmpeg';
 import { log } from './logger';
 import {
@@ -21,7 +21,7 @@ import { printPathsAsync } from './binaries';
 import { getCapabilityReport } from './capabilities';
 import { registerUploaderIpc } from './uploader';
 import { openDb, closeDb } from './db';
-import { registerDbIpc } from './db/dbIpc';
+import { registerDbIpc, getToolboxChainHistoryRepo } from './db/dbIpc';
 import {
   DEFAULT_OPTIONS,
   TOOLBOX_INPUT_EXTENSIONS,
@@ -35,6 +35,8 @@ import type {
   ToolboxJob,
   ToolboxKind,
   ToolboxParams,
+  ToolboxChainStep,
+  ToolboxChainHistoryEntry,
 } from '../shared/types';
 import { isPrivateHost, safeName } from './helpers';
 import { applySniffFilters, type SniffFilterOptions } from './sniffFilters';
@@ -1671,6 +1673,166 @@ ipcMain.handle('toolbox:start', async (_e, payload: unknown) => {
     }
   }).catch((e) => log(`toolbox error: ${(e as Error).message}`));
   return { ok: true, outputDir: subDir };
+});
+
+/* ----------------------- R-TB-CHAIN: chain IPC ----------------------- */
+
+/**
+ * R-TB-CHAIN — compute the per-chain output sub-directory:
+ *
+ *   <baseOutDir>/toolbox/chain-<YYYYMMDD>/<chainId>/
+ *
+ * Mirrors ensureToolboxOutputDir but namespaces by chainId so the
+ * step-i-<kind>.<ext> files for one chain stay isolated and the
+ * renderer can reveal the whole chain folder from history.
+ */
+async function ensureToolboxChainOutputDir(chainId: string, baseOutDir?: string): Promise<string> {
+  const root = baseOutDir ? assertOutputDir(baseOutDir) : (defaultOutDir() || '');
+  if (!root) throw new Error('output directory unavailable');
+  const ymd = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const safeId = String(chainId).replace(/[^a-zA-Z0-9._-]/g, '');
+  if (!safeId) throw new Error('invalid chainId');
+  const dir = path.resolve(path.join(root, 'toolbox', `chain-${ymd}`, safeId));
+  await fsp.mkdir(dir, { recursive: true });
+  allowedOutputDirs.add(dir);
+  return dir;
+}
+
+/**
+ * R-TB-CHAIN — sanitise a single chain step. Mirrors sanitizeToolboxJob
+ * but WITHOUT the inputPath check (chain steps don't carry an input —
+ * the runner threads it through). Kind must still be on the toolbox
+ * allow-list and params still pass through sanitizeToolboxParams so a
+ * tampered IPC payload can't smuggle out-of-range cropW etc.
+ */
+function sanitizeToolboxChainStep(j: unknown): ToolboxChainStep {
+  if (!j || typeof j !== 'object') throw new Error('invalid chain step');
+  const obj = j as Record<string, unknown>;
+  const id = String(obj.id || '').replace(/[^a-zA-Z0-9._-]/g, '');
+  if (!id) throw new Error('invalid step.id');
+  if (!isToolboxKind(obj.kind)) throw new Error('invalid step.kind');
+  return {
+    id,
+    kind: obj.kind,
+    params: sanitizeToolboxParams(obj.params)
+  };
+}
+
+/**
+ * R-TB-CHAIN — chain inputPath validation. The first step's accepted
+ * extensions are checked by validateChainCompatibility, so here we
+ * only enforce the platform-level invariants shared with batch jobs:
+ * absolute, no null bytes, exists, non-empty file. Returns the
+ * canonical absolute path.
+ */
+function sanitizeChainInputPath(p: unknown): string {
+  if (typeof p !== 'string' || !p) throw new Error('chain inputPath required');
+  if (p.length > 4096) throw new Error('chain inputPath too long');
+  const norm = path.resolve(p);
+  if (norm.indexOf('\u0000') !== -1) throw new Error('chain inputPath contains null byte');
+  let st;
+  try {
+    st = statSync(norm);
+  } catch {
+    throw new Error('chain inputPath does not exist');
+  }
+  if (!st.isFile()) throw new Error('chain inputPath is not a file');
+  if (st.size <= 0) throw new Error('chain inputPath is empty');
+  return norm;
+}
+
+ipcMain.handle('toolbox:startChain', async (_e, payload: unknown) => {
+  if (!payload || typeof payload !== 'object') throw new Error('toolbox:startChain: invalid payload');
+  const obj = payload as Record<string, unknown>;
+  const chainId = String(obj.chainId || '').replace(/[^a-zA-Z0-9._-]/g, '');
+  if (!chainId) throw new Error('toolbox:startChain: invalid chainId');
+  const inputPath = sanitizeChainInputPath(obj.inputPath);
+  if (!Array.isArray(obj.steps) || obj.steps.length === 0) {
+    throw new Error('toolbox:startChain: steps must be a non-empty array');
+  }
+  const safeSteps: ToolboxChainStep[] = obj.steps.map((s) => sanitizeToolboxChainStep(s));
+  // First step's input ext + cross-step compatibility. Throws on the
+  // first incompatible boundary so the renderer surfaces "step N can't
+  // accept the previous output".
+  const sourceExt = path.extname(inputPath).toLowerCase();
+  validateChainCompatibility(safeSteps, sourceExt);
+
+  let outputDirOverride: string | undefined;
+  if (typeof obj.outputDirOverride === 'string' && obj.outputDirOverride) {
+    outputDirOverride = obj.outputDirOverride;
+  }
+  const subDir = await ensureToolboxChainOutputDir(chainId, outputDirOverride);
+
+  // Fire and forget. The runner emits progress (including
+  // 'awaiting-input' on PAUSING_KINDS) and writes its terminal audit
+  // into chain history when settled. Errors inside startToolboxChain
+  // are absorbed by the runner and surfaced as status='failed'.
+  void (async () => {
+    try {
+      const result = await startToolboxChain({
+        chainId,
+        inputPath,
+        steps: safeSteps,
+        outputBaseDir: subDir,
+        emit: (p) => {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('process:progress', p);
+          }
+        },
+        sanitizeParams: sanitizeToolboxParams
+      });
+      // R-TB-CHAIN — persist the chain audit row. We write whatever
+      // settled, even on cancel/failure: the renderer history panel
+      // surfaces the per-step audit (including which step failed and
+      // its error) so users can resume manually from intermediate
+      // products. Failure to write history must NEVER throw out of
+      // this fire-and-forget worker (it would crash the main process
+      // with an unhandled rejection); we log the SQL error instead.
+      const entry: ToolboxChainHistoryEntry = {
+        id: chainId,
+        inputPath,
+        displayName: path.basename(inputPath),
+        status: result.status,
+        steps: result.steps,
+        outputDir: subDir,
+        finishedAt: Date.now()
+      };
+      if (result.error) entry.error = result.error;
+      try {
+        getToolboxChainHistoryRepo().upsert(entry);
+      } catch (sqlErr) {
+        log(`toolbox chain ${chainId} history write failed: ${(sqlErr as Error).message}`);
+      }
+      log(`toolbox chain ${chainId} settled: status=${result.status} steps=${result.steps.length}${result.error ? ` error=${result.error}` : ''}`);
+    } catch (e) {
+      log(`toolbox chain ${chainId} fatal: ${(e as Error).message}`);
+    }
+  })();
+
+  return { ok: true, outputDir: subDir, chainId };
+});
+
+ipcMain.handle('toolbox:resumeChain', async (_e, payload: unknown) => {
+  if (!payload || typeof payload !== 'object') throw new Error('toolbox:resumeChain: invalid payload');
+  const obj = payload as Record<string, unknown>;
+  const chainId = String(obj.chainId || '').replace(/[^a-zA-Z0-9._-]/g, '');
+  if (!chainId) throw new Error('toolbox:resumeChain: invalid chainId');
+  const stepIndex = typeof obj.stepIndex === 'number' && Number.isFinite(obj.stepIndex)
+    ? Math.max(0, Math.floor(obj.stepIndex))
+    : -1;
+  if (stepIndex < 0) throw new Error('toolbox:resumeChain: invalid stepIndex');
+  // Run the same sanitiser the chain used at submit time so a tampered
+  // resume IPC can't smuggle out-of-range cropX/Y/W/H past the runner.
+  const patch = sanitizeToolboxParams(obj.paramsPatch);
+  const ok = resumeToolboxChain(chainId, stepIndex, patch);
+  return { ok };
+});
+
+ipcMain.handle('toolbox:cancelChain', async (_e, chainId: unknown) => {
+  const id = String(chainId || '').replace(/[^a-zA-Z0-9._-]/g, '');
+  if (!id) throw new Error('toolbox:cancelChain: invalid chainId');
+  const ok = cancelToolboxChain(id);
+  return { ok };
 });
 
 /* ----------------------- Resolver IPC (yt-dlp) ----------------------- */

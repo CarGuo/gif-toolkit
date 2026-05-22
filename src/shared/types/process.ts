@@ -136,7 +136,14 @@ export type TaskStatus =
   | 'done'
   | 'failed'
   | 'skipped'
-  | 'cancelled';
+  | 'cancelled'
+  /** R-TB-CHAIN — chain step is paused waiting for the renderer to
+   *  resolve runtime params (currently only crop, where the user must
+   *  draw a box on the previous step's output frame). The renderer
+   *  must call `toolbox:resumeChain` with the param patch to advance,
+   *  or `toolbox:cancelChain` to abort. Outside chain mode this status
+   *  is never emitted. */
+  | 'awaiting-input';
 
 export interface TaskProgress {
   taskId: string;
