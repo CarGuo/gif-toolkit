@@ -3653,6 +3653,11 @@ details.advanced-gif > summary {
 .tb-lineage-preview {
   flex: 1 1 auto;
   min-height: 240px;
+  /* R-TB-CHAIN-V2.7 — cap the preview so portrait media (e.g. 450×800
+     phone-shot videos) doesn't push the chip menu / param form below
+     the fold. The grid track has no resolved height so the inner
+     <img>'s `max-height: 100%` would otherwise be a no-op. */
+  max-height: min(58vh, 520px);
   background: #000;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -3672,6 +3677,28 @@ details.advanced-gif > summary {
 .tb-lineage-preview-empty {
   font-size: 48px;
   opacity: 0.35;
+}
+.tb-lineage-preview-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--muted);
+  text-align: center;
+  padding: 24px 16px;
+}
+.tb-lineage-preview-error-icon {
+  font-size: 36px;
+  opacity: 0.7;
+}
+.tb-lineage-preview-error-text {
+  font-size: 14px;
+  color: var(--text);
+}
+.tb-lineage-preview-error-hint {
+  font-size: 12px;
+  opacity: 0.7;
 }
 .tb-lineage-meta-row {
   display: flex;

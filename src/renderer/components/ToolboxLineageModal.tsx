@@ -84,12 +84,54 @@ function detectKind(p: string | null | undefined): 'gif' | 'webp' | 'video' | 'i
 /**
  * Auto-playing preview of the current focus node.
  * GIF/animated WebP via <img>, video via muted autoplay loop.
+ *
+ * R-TB-CHAIN-V2.7 — formerly this component just rendered <img src=…>
+ * with no error handling, so any load failure (file deleted, perms,
+ * unusual MIME, decoder rejection) painted the parent box's `#000`
+ * background and looked like a "黑屏 bug" to the user. We now:
+ *   - track an explicit `errored` state via onError;
+ *   - render a static poster (first-frame data URL passed in by the
+ *     panel via `posterDataUrl`) as a fallback when live render fails;
+ *   - if even the poster is missing, show an explicit message instead
+ *     of a black void so the user knows preview is unavailable rather
+ *     than misreading it as "loading forever".
+ * The metadata row beneath (W×H · duration · 在文件管理器中显示) is
+ * unchanged so the user still has a path to inspect the file.
  */
-function FocusPreview({ path }: { path: string | null | undefined }): JSX.Element {
+function FocusPreview({
+  path,
+  posterDataUrl
+}: {
+  path: string | null | undefined;
+  posterDataUrl?: string | null;
+}): JSX.Element {
   const kind = detectKind(path);
   const url = path ? pathToLocalUrl(path) : '';
+  const [errored, setErrored] = useState(false);
+  // Reset the error flag whenever the focus path changes — the previous
+  // failure shouldn't poison subsequent navigation.
+  useEffect(() => { setErrored(false); }, [url]);
   if (!url) {
     return <div className="tb-lineage-preview-empty" aria-hidden="true">🎞️</div>;
+  }
+  if (errored) {
+    if (posterDataUrl) {
+      return (
+        <img
+          className="tb-lineage-preview-media"
+          src={posterDataUrl}
+          alt="预览静态首帧"
+          loading="eager"
+        />
+      );
+    }
+    return (
+      <div className="tb-lineage-preview-error" role="status">
+        <div className="tb-lineage-preview-error-icon" aria-hidden="true">⚠️</div>
+        <div className="tb-lineage-preview-error-text">预览不可用</div>
+        <div className="tb-lineage-preview-error-hint">文件可能已被移动或删除</div>
+      </div>
+    );
   }
   if (kind === 'video') {
     return (
@@ -101,6 +143,7 @@ function FocusPreview({ path }: { path: string | null | undefined }): JSX.Elemen
         loop
         playsInline
         preload="auto"
+        onError={() => setErrored(true)}
       />
     );
   }
@@ -112,6 +155,7 @@ function FocusPreview({ path }: { path: string | null | undefined }): JSX.Elemen
       src={url}
       alt=""
       loading="eager"
+      onError={() => setErrored(true)}
     />
   );
 }
@@ -131,6 +175,11 @@ export interface ToolboxLineageModalProps {
   setDraftParams: (p: ToolboxParams | ((prev: ToolboxParams) => ToolboxParams)) => void;
   /** Probed media info for the current focus path, if any. */
   focusMedia: MediaInfo | null;
+  /** First-frame poster (data URL) for the focus path, if cached by the
+   *  panel. Used as a fallback when the live giftk-local:// render
+   *  fails (e.g. file moved). Optional — without it the FocusPreview
+   *  falls through to an explicit "预览不可用" message. */
+  focusPosterDataUrl?: string | null;
   /** ParamForm renderer injected by the panel (lives in ToolboxPanel.tsx). */
   renderParamForm: (args: {
     kind: ToolboxKind;
@@ -168,6 +217,7 @@ export function ToolboxLineageModal(props: ToolboxLineageModalProps): JSX.Elemen
     draftParams,
     setDraftParams,
     focusMedia,
+    focusPosterDataUrl,
     renderParamForm,
     renderCropForm,
     onFocusNode,
@@ -274,7 +324,7 @@ export function ToolboxLineageModal(props: ToolboxLineageModalProps): JSX.Elemen
             </ol>
 
             <div className="tb-lineage-preview" aria-label="当前产物预览">
-              <FocusPreview path={focusPath} />
+              <FocusPreview path={focusPath} posterDataUrl={focusPosterDataUrl} />
             </div>
 
             {focus ? (

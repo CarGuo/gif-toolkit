@@ -1476,6 +1476,7 @@ export function ToolboxPanel(): JSX.Element {
         draftParams={lineageDraftParams}
         setDraftParams={setLineageDraftParams}
         focusMedia={lineageFocus ? (jobMedia[lineageFocus.path] ?? null) : null}
+        focusPosterDataUrl={lineageFocus ? (jobMedia[lineageFocus.path]?.previewDataUrl ?? null) : null}
         renderParamForm={({ kind, params, setParams, mediaInfo }) => (
           <ParamForm kind={kind} params={params} setParams={setParams} mediaInfo={mediaInfo} />
         )}
