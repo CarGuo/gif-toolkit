@@ -30,20 +30,33 @@
  *    fire-and-forget worker must NOT crash the app (we still get a
  *    page response after cancel and the recorder keeps emitting).
  *
- * Why these three and not more
- * ----------------------------
+ * 4. TB-CHAIN-D — pause-at-step (crop): start a chain
+ *    `gif-optimize → crop → gif-resize` on a 300×60 .gif fixture
+ *    WITHOUT supplying cropX/Y/W/H up front, observe the runner emit
+ *    `'awaiting-input'` for step 2 (the crop), call resumeToolboxChain
+ *    with a sanitised rect (50,10,200,40), and verify the chain runs
+ *    to completion with a final artifact whose actual width === 64
+ *    (gif-resize's targetWidth) — proving the resume rect threaded
+ *    through ffmpeg correctly. Also asserts: the audit row's step 2
+ *    persists the merged params (cropX/Y/W/H all non-zero), and
+ *    NEITHER 'awaiting-input' NOR 'pending' leaks into the persisted
+ *    audit (only the in-flight emit carries those statuses).
+ *
+ * Why these four and not more
+ * ---------------------------
  * Phase 1 has no renderer UI yet, so this SUITE drives the IPC layer
- * directly. The extra cases (crop pause-resume, cross-format, e2e
- * mode toggle) belong to Phase 2 once the renderer hook + ChainStep
- * UI exist; covering them here would mean re-implementing the UI
- * inside test code and would not add coverage over the unit tests in
- * processor-chain.test.ts and toolboxChainHistoryRepo.test.ts.
+ * directly. The remaining cases (cross-format webp double convert,
+ * mode toggle UI flow) belong to Phase 2 once the renderer hook +
+ * ChainStep UI exist; covering them here would mean re-implementing
+ * the UI inside test code and would not add coverage over the unit
+ * tests in processor-chain.test.ts and toolboxChainHistoryRepo.test.ts.
  */
 import { test, expect } from '@playwright/test';
 import { existsSync, statSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import {
   FIXTURE_MP4,
+  FIXTURE_GIF,
   getHarness,
   installRecorder,
   tearDownRecorder,
@@ -380,5 +393,180 @@ test('SUITE TB-CHAIN-C — cancel settles cleanly, no awaiting-input/pending lea
     } catch {
       /* ignore */
     }
+  }
+});
+
+/**
+ * Wait for an `'awaiting-input'` emit on a specific stepIndex. The
+ * runner emits `taskId === step.id`; the test cares about the
+ * stepIndex/totalSteps pair to confirm the pause point matches the
+ * crop step the chain definition asked to pause on. Pollings 250ms
+ * to mirror the other helpers.
+ */
+async function waitForAwaitingInput(
+  stepIndex: number,
+  totalSteps: number,
+  timeoutMs: number
+): Promise<{ taskId: string; stepIndex: number }> {
+  const { page } = getHarness();
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const snap = await snapshotRecorder();
+    for (const p of snap.progress) {
+      const cp = p as unknown as ChainTerminalProgress & { taskId: string };
+      if (
+        cp.status === 'awaiting-input' &&
+        cp.stepIndex === stepIndex &&
+        cp.totalSteps === totalSteps &&
+        typeof cp.taskId === 'string'
+      ) {
+        return { taskId: cp.taskId, stepIndex: cp.stepIndex };
+      }
+    }
+    await page.waitForTimeout(250);
+  }
+  throw new Error(`timeout waiting for 'awaiting-input' on step ${stepIndex}/${totalSteps}`);
+}
+
+test('SUITE TB-CHAIN-D — crop pause-at-step + resumeToolboxChain settles the chain', async () => {
+  const { page } = getHarness();
+  await clearChainHistory();
+  await installRecorder();
+  const chainId = `tbchain-d-${Date.now()}`;
+  // tiny.gif is 300×60 (verified via ffprobe); the crop rect picks an
+  // off-center 200×40 sub-region, then gif-resize squashes width to 64
+  // (height ratio-preserved → 64 * 40 / 200 = 12.8 → ffmpeg rounds).
+  const CROP = { cropX: 50, cropY: 10, cropW: 200, cropH: 40 };
+  const RESIZE_TARGET_WIDTH = 64;
+  try {
+    const startResult = await page.evaluate(
+      async (args: { chainId: string; inputPath: string; resizeWidth: number }) => {
+        const w = window as unknown as {
+          giftk: {
+            startToolboxChain(payload: unknown): Promise<{
+              ok: boolean;
+              chainId: string;
+              outputDir: string;
+            }>;
+          };
+        };
+        return w.giftk.startToolboxChain({
+          chainId: args.chainId,
+          inputPath: args.inputPath,
+          steps: [
+            {
+              id: `${args.chainId}-s1`,
+              kind: 'gif-optimize',
+              params: { method: 'lossy', lossy: 80, optimizeLevel: 3 }
+            },
+            {
+              // Deliberately omit cropX/Y/W/H here. The runner must
+              // emit awaiting-input and block until resumeChain
+              // supplies them.
+              id: `${args.chainId}-s2`,
+              kind: 'crop',
+              params: {}
+            },
+            {
+              id: `${args.chainId}-s3`,
+              kind: 'gif-resize',
+              params: { targetWidth: args.resizeWidth }
+            }
+          ]
+        });
+      },
+      { chainId, inputPath: FIXTURE_GIF, resizeWidth: RESIZE_TARGET_WIDTH }
+    );
+
+    expect(startResult.ok).toBe(true);
+    expect(startResult.chainId).toBe(chainId);
+    expect(existsSync(startResult.outputDir)).toBe(true);
+
+    // 1) The runner pauses BEFORE invoking ffmpeg for crop and emits
+    //    awaiting-input on step 2/3.
+    const pausePoint = await waitForAwaitingInput(2, 3, 60_000);
+    expect(pausePoint.taskId).toBe(`${chainId}-s2`);
+
+    // 2) Resume with a sanitised rect. main/index.ts re-runs
+    //    sanitizeToolboxParams on the patch, so a tampered IPC could
+    //    not smuggle out-of-range values; here the rect is well inside
+    //    300×60 and should round-trip unchanged.
+    const resumeRes = await page.evaluate(
+      async (args: { chainId: string; stepIndex: number; patch: typeof CROP }) => {
+        const w = window as unknown as {
+          giftk: { resumeToolboxChain(chainId: string, stepIndex: number, patch: unknown): Promise<{ ok: boolean }> };
+        };
+        // stepIndex passed to resumeToolboxChain is the ZERO-based
+        // index inside the steps array (the runner stored
+        // `pause.stepIndex = i` where i is 0-based). Step 2 in the
+        // human-friendly progress emit (stepIndex===2) corresponds to
+        // i===1 internally.
+        return w.giftk.resumeToolboxChain(args.chainId, args.stepIndex, args.patch);
+      },
+      { chainId, stepIndex: 1, patch: CROP }
+    );
+    expect(resumeRes.ok).toBe(true);
+
+    // 3) The chain should now finish step 2 and step 3.
+    const final = await waitForChainLastStep(3, 60_000);
+    expect(final.status).toBe('done');
+    expect(final.stepIndex).toBe(3);
+    const finalOutputs = final.outputs ?? [];
+    expect(finalOutputs.length).toBeGreaterThanOrEqual(1);
+    const finalOutput = finalOutputs[0];
+    expect(existsSync(finalOutput)).toBe(true);
+    expect(statSync(finalOutput).size).toBeGreaterThan(40);
+
+    // 4) Audit row reflects merged params: step 2 must persist the
+    //    cropX/Y/W/H we resumed with.
+    const row = await waitForChainHistoryRow(chainId, 10_000);
+    expect(row.status).toBe('done');
+    expect(row.steps).toHaveLength(3);
+    for (const s of row.steps) {
+      expect(s.status).toBe('done');
+      // No leaked in-flight statuses in the audit even though the
+      // chain went through awaiting-input mid-run.
+      expect(s.status).not.toBe('awaiting-input');
+      expect(s.status).not.toBe('pending');
+    }
+    expect(row.steps[1].kind).toBe('crop');
+    expect(row.steps[1].params.cropX).toBe(CROP.cropX);
+    expect(row.steps[1].params.cropY).toBe(CROP.cropY);
+    expect(row.steps[1].params.cropW).toBe(CROP.cropW);
+    expect(row.steps[1].params.cropH).toBe(CROP.cropH);
+
+    // 5) ffprobe the final artifact: gif-resize targetWidth=64 must
+    //    have produced a width of exactly 64. (Aspect-preserved
+    //    height = round(64 * 40 / 200) = 13; we just assert width to
+    //    avoid pinning a rounding strategy.)
+    const ffprobeStatic = await import('ffprobe-static');
+    const { spawnSync } = await import('node:child_process');
+    const probe = spawnSync(
+      ffprobeStatic.path,
+      ['-v', 'error', '-select_streams', 'v:0',
+       '-show_entries', 'stream=width,height',
+       '-of', 'csv=p=0', finalOutput],
+      { encoding: 'utf8' }
+    );
+    expect(probe.status).toBe(0);
+    const [wStr, hStr] = probe.stdout.trim().split(',');
+    const width = Number.parseInt(wStr, 10);
+    const height = Number.parseInt(hStr, 10);
+    expect(width).toBe(RESIZE_TARGET_WIDTH);
+    expect(height).toBeGreaterThan(0);
+    expect(height).toBeLessThan(CROP.cropH); // proves the resize ran
+  } finally {
+    await tearDownRecorder();
+    try {
+      const rows = await readChainHistory();
+      for (const r of rows) {
+        if (r.id === chainId && r.outputDir) {
+          rmSync(r.outputDir, { recursive: true, force: true });
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    await clearChainHistory().catch(() => undefined);
   }
 });

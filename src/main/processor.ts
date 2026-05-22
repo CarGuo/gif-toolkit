@@ -2736,10 +2736,15 @@ export function isChainPaused(chainId: string): boolean {
  * startBatch/startToolbox abort + activeAborts plumbing so cancelAll
  * still aborts chains alongside batch jobs.
  *
- * Output naming: each step writes into `outputBaseDir` with a fresh
- * id so processToolboxJob's existing fileNameFor logic produces a
- * disambiguated filename. The runner then records that file as the
- * step's output and feeds it as the next step's inputPath.
+ * Output naming: each step writes into a per-step sub-directory
+ * (`step-{i+1}-{kind}/`) under `outputBaseDir`. Without per-step dirs,
+ * a chain like `gif-optimize → crop` on `tiny.gif` would have step 1
+ * produce `<outputBaseDir>/tiny.gif` and step 2 try to write to the
+ * same path — ffmpeg refuses to edit files in place and the chain
+ * fails. The per-step sub-dir guarantees every step has a fresh,
+ * collision-free output namespace, while still letting
+ * processToolboxJob's existing fileNameFor logic pick a sensible
+ * basename per step.
  */
 export async function startToolboxChain(args: {
   chainId: string;
@@ -2825,9 +2830,14 @@ export async function startToolboxChain(args: {
           });
         };
         emit({ taskId: step.id, status: 'pending', percent: 0, stepIndex: i + 1, totalSteps: steps.length });
+        // Per-step output directory ensures no in-place write
+        // collisions when consecutive steps would otherwise produce
+        // the same basename (e.g. gif-optimize → crop on tiny.gif).
+        const stepDir = path.join(outputBaseDir, `step-${i + 1}-${step.kind}`);
+        await ensureDir(stepDir);
         await processToolboxJob({
           job,
-          outputBaseDir,
+          outputBaseDir: stepDir,
           emit: stepEmit,
           signal: stepCtrl.signal,
           batchTaken: new Set<string>()
