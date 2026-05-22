@@ -600,7 +600,7 @@ describe('ToolboxPanel — lineage (R-TB-CHAIN-V2)', () => {
     expect(screen.queryByRole('button', { name: /继续处理/ })).toBeNull();
   });
 
-  it('clicking 「继续处理 →」 switches the panel into lineage mode (breadcrumb + 退出链路 visible, batch body hidden)', async () => {
+  it('clicking 「继续处理 →」 opens the lineage modal (breadcrumb + 退出链路 visible; batch UI stays mounted underneath)', async () => {
     const { fake } = installLineageGiftk();
     seedDoneEntry(fake);
     await act(async () => {
@@ -609,16 +609,18 @@ describe('ToolboxPanel — lineage (R-TB-CHAIN-V2)', () => {
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: /继续处理/ }));
     });
-    // Lineage section shows up.
+    // Lineage modal shows up.
     expect(screen.getByLabelText('链式处理')).toBeInTheDocument();
     expect(screen.getByLabelText('链路面包屑')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '退出链路' })).toBeInTheDocument();
     // Root crumb shows the kind label of the previous run as starting
     // point — V2 implementation labels the root with '原始输入'.
     expect(screen.getByText('原始输入')).toBeInTheDocument();
-    // Batch start button is gone (the entire tb-body / tb-footer is
-    // unmounted by the lineage ternary).
-    expect(screen.queryByRole('button', { name: /^开始$/ })).toBeNull();
+    // R-TB-CHAIN-V2.6 — batch UI is now an overlayed modal, so the
+    // 开始 button stays in the DOM. Assert the modal is mounted as
+    // a dialog instead.
+    const dialog = screen.getByRole('dialog', { name: '链式处理' });
+    expect(dialog).toBeInTheDocument();
   });
 
   it('lineage chips for a .gif focus EXCLUDE video-to-* kinds (extension-aware filter)', async () => {
@@ -729,7 +731,7 @@ describe('ToolboxPanel — lineage (R-TB-CHAIN-V2)', () => {
     expect(crumbs[0]!.classList.contains('is-focus')).toBe(false);
   });
 
-  it('clicking 「退出链路」 unmounts the lineage section and restores batch UI', async () => {
+  it('clicking 「退出链路」 closes the lineage modal (modal unmounts; batch UI was always mounted)', async () => {
     const { fake } = installLineageGiftk();
     seedDoneEntry(fake);
     await act(async () => {
@@ -742,8 +744,10 @@ describe('ToolboxPanel — lineage (R-TB-CHAIN-V2)', () => {
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: '退出链路' }));
     });
+    // R-TB-CHAIN-V2.6 — modal disappears.
     expect(screen.queryByLabelText('链式处理')).toBeNull();
-    // Batch's 开始 button is back.
+    expect(screen.queryByRole('dialog', { name: '链式处理' })).toBeNull();
+    // Batch's 开始 button stays in document (it never left).
     expect(screen.getByRole('button', { name: /^开始$/ })).toBeInTheDocument();
   });
 });

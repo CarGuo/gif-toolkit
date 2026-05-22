@@ -583,8 +583,9 @@ test('SUITE TB-CHAIN-D — crop pause-at-step + resumeToolboxChain settles the c
  *    running ffmpeg twice — that path is already covered by SUITE E.
  *    The crucial assertion is that the V2.2 lineage UI takes a real
  *    artifact and chains a real follow-up step on it.
- * 3. Click the row's 「继续处理 →」 button → assert the lineage section
- *    mounts (面包屑 visible, batch 开始 button gone).
+ * 3. Click the row's 「继续处理 →」 button → assert the lineage modal
+ *    mounts (面包屑 visible inside the dialog; batch UI stays mounted
+ *    underneath as an overlay rather than a swap).
  * 4. Verify the chip filter (extension-aware): .gif focus must show
  *    GIF Resize and must NOT show Video → GIF.
  * 5. Click GIF Resize → click 「继续 →」 → wait for the chain runner's
@@ -593,7 +594,8 @@ test('SUITE TB-CHAIN-D — crop pause-at-step + resumeToolboxChain settles the c
  *    Breadcrumb DOM now shows TWO `.tb-lineage-crumb` entries with
  *    `is-focus` on the second one.
  * 7. Click the first crumb → focus walks back to root.
- * 8. Click 「退出链路」 → lineage section unmounts, batch UI returns.
+ * 8. Click 「退出链路」 → lineage modal unmounts, batch UI stays
+ *    visible (it never went away).
  *
  * This SUITE deliberately does NOT call `window.giftk.startToolboxChain`
  * directly; every transition is triggered by a DOM event, exactly as a
@@ -666,22 +668,29 @@ test('SUITE TB-CHAIN-E — UI lineage: history → 继续处理 → GIF Resize �
   await toolboxTab.click();
 
   // The seeded row should now be visible.
+  // R-TB-CHAIN-V2.6 — visible label trimmed to 「继续 →」 to fit the
+  // tighter 4-col grid; the long form lives in `aria-label="继续处理"`
+  // so the assertion targets that for stability.
   const continueBtn = page.locator('button.tb-history-continue').first();
   await expect(continueBtn).toBeVisible({ timeout: 10_000 });
-  await expect(continueBtn).toHaveText(/继续处理/);
+  await expect(continueBtn).toHaveAttribute('aria-label', '继续处理');
 
   await installRecorder();
   let lineageOutputPath: string | null = null;
   try {
     // === Step 1 — enter lineage from history ============================
     await continueBtn.click();
-    const lineageSection = page.locator('section.tb-lineage');
+    // R-TB-CHAIN-V2.6 — lineage UI now lives inside an overlay modal
+    // (dialog role, aria-label="链式处理"). The previous inline
+    // `<section class="tb-lineage">` selector is gone.
+    const lineageSection = page.locator('div.modal.tb-lineage-modal[role="dialog"]');
     await expect(lineageSection).toBeVisible({ timeout: 5_000 });
     await expect(page.locator('button', { hasText: '退出链路' })).toBeVisible();
-    // Batch mode's 开始 button must be unmounted — proves the ternary
-    // really swapped sections (not just stacked them).
+    // Batch mode's 开始 button STAYS in the DOM (modal overlay
+    // pattern). We assert it's still visible to prove the modal is
+    // not unmounting the underlying batch UI.
     const batchStart = page.locator('footer.tb-footer button.primary', { hasText: '开始' });
-    await expect(batchStart).toHaveCount(0);
+    await expect(batchStart).toBeVisible();
 
     // === Step 2 — verify breadcrumb at 1 node + chip filter ============
     let crumbs = lineageSection.locator('.tb-lineage-crumb');

@@ -332,9 +332,15 @@ export function useToolboxLineage(): UseToolboxLineageResult {
       // pending entry so the synchronous-IPC-failure path doesn't have
       // to re-read pendingRef (which the listener might have already
       // cleared) and doesn't need the unsound `as unknown as` cast.
+      //
+      // R-TB-CHAIN-V2.6 — explicit type annotation on `localReject`:
+      // TypeScript's CFA does NOT know that the Promise constructor
+      // callback runs synchronously, so it narrows `localReject` to
+      // `null` for the entire `catch` block. The annotation widens it
+      // to the full union, mirroring the actual runtime shape.
       let localReject: ((e: Error) => void) | null = null;
       const promise = new Promise<LineageNode>((resolve, reject) => {
-        localReject = reject;
+        localReject = reject as (e: Error) => void;
         pendingRef.current = {
           chainId,
           kind,
@@ -358,7 +364,8 @@ export function useToolboxLineage(): UseToolboxLineageResult {
         // may have raced and already settled the same chainId for some
         // reason; in that case we just bubble the error out without
         // double-rejecting.
-        if (pendingRef.current && pendingRef.current.chainId === chainId) {
+        const pending = pendingRef.current as PendingStep | null;
+        if (pending && pending.chainId === chainId) {
           pendingRef.current = null;
         }
         if (inflightChainIdRef.current === chainId) {
@@ -366,7 +373,8 @@ export function useToolboxLineage(): UseToolboxLineageResult {
         }
         setIsRunning(false);
         setError(e.message);
-        if (localReject) localReject(e);
+        const reject = localReject as ((e: Error) => void) | null;
+        if (reject) reject(e);
         throw e;
       }
       return promise;

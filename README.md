@@ -131,9 +131,11 @@ npm run package:linux   # Linux:AppImage / deb / tar.gz
 | Crop | 可视化框选裁剪 |
 | GIF ↔ WebP | 两种动画格式互转 |
 
-### 渐进式链路（R-TB-CHAIN-V2）
+### 渐进式链路（R-TB-CHAIN-V2.6 — 弹窗化 + 自动播放预览）
 
-工具箱右侧的历史结果区，每条 done 行都带「继续处理 →」按钮：点一下，工具箱面板会从批量模式切到独立的 **链路区**，把刚才的产物作为根节点；上方一条线性面包屑记录每一步（`原始输入 → GIF Resize → GIF Optimize ...`）。点击下方按产物扩展名过滤的下一步 chip（`.gif` 焦点不会出现 `Video → GIF`），填好参数点「继续 →」，结果会自动追加为新尾节点并把焦点跟过去；点中间面包屑可回到历史节点再分叉。「退出链路」回到批量模式，链路本身不丢——再点任意历史「继续处理 →」即重新进入。
+工具箱右侧的历史结果区，每条 done 行都带「继续 →」按钮（aria-label 仍为「继续处理」）：点一下，会**弹出一个独立的链路弹窗（modal overlay）**，把刚才的产物作为根节点；批量 UI 不会被卸载，仍然挂载在弹窗背后。弹窗顶部一条线性面包屑记录每一步（`原始输入 → GIF Resize → GIF Optimize ...`），中间是当前产物的**自动播放预览**——`.gif/.webp` 用 `<img>` 借浏览器原生动画循环，`.mp4/.mov/.webm` 等视频走 `<video muted autoplay loop playsInline>`（Chromium muted 自动播放无须用户手势）。下方按产物扩展名过滤的下一步 chip（`.gif` 焦点不会出现 `Video → GIF`）+ 参数表单 + 「退出链路 / 取消 / 继续 →」footer。点击中间面包屑可回到历史节点再分叉。ESC 键 / 点击灰色遮罩 / 「退出链路」都关闭弹窗，链路本身不丢——再点任意历史「继续 →」即重新进入。
+
+历史结果行也升级到 4-列布局：左侧 56×56 缩略图（默认显示静态首帧，**鼠标悬停**会切到 `giftk-local://` 真实文件让 GIF/WebP 自播）+ 状态/类型/时间元数据 + 「继续 →」紧凑按钮 + 删除。
 
 每一步实际上是单步 1-step `startToolboxChain` IPC，复用既有的链路运行器 / 取消传播 / 历史记录契约（详见 [docs/ipc-contract.md](./docs/ipc-contract.md) 与 SUITE TB-CHAIN A/B/C/D/E）。Crop 在链路模式下直接复用批量的 CropForm 把矩形写进 draft params，不再走 awaiting-input 暂停模型。
 

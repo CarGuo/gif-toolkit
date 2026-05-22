@@ -21,9 +21,15 @@
   - `nextKindOptions = useMemo([focus])`，按 focus 路径扩展名查 `TOOLBOX_INPUT_EXTENSIONS`
     过滤可选下一步 kind。
 - [src/renderer/components/ToolboxPanel.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/ToolboxPanel.tsx)
-  - `<section class="tb-lineage">` 与批量 UI 互斥；`isLineageActive && !lineageDormant` 决定切换。
-  - 历史区每条 done 行 `<button class="tb-history-continue">继续处理 →</button>`，
-    `disabled={lineage.isRunning}` 防 in-flight 重入。
+  - **V2.6 起**：lineage UI 不再 inline 渲染为 `<section.tb-lineage>`；
+    改为 overlay [ToolboxLineageModal](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/ToolboxLineageModal.tsx)
+    （`<div class="modal tb-lineage-modal" role="dialog">`），批量 UI 始终挂载在底层。
+    `showLineageSection = isLineageActive && !lineageDormant` 仅控制 modal `open` prop。
+  - 历史区每条 done 行采用 4-列 grid `[thumb 56px | main 1fr | continue auto | remove 28px]`，
+    新增 `<TbHistoryThumb>` 组件：默认显示 `useFileThumbnail` 出的静态首帧 dataUrl，
+    `onMouseEnter` 把 `<img>` 的 src 切到 `giftk-local://...` 让 .gif/.webp 真实自播。
+  - 「继续处理 →」按钮升级为紧凑 gradient pill；显示文本简化为 `继续 →`，
+    长形态保留在 `aria-label="继续处理"` 用于无障碍 + e2e 选择器稳定性。
   - `handleEnterLineageFromHistory`：in-flight 时先 `await lineage.cancel()` 再 reset。
   - `handleExitLineage`：捕获 `lineageExitEpochRef` 在 `await cancel()` 后比对，
     防止 await 期间用户从历史重新进入又被 dormant 覆盖。
@@ -31,6 +37,22 @@
     避免 `nextKindOptions` 数组身份变化清空用户编辑过的 ParamForm。
   - Crop 在链路模式直接复用批量的 `<CropForm>`，把 cropX/Y/W/H 写进 draft params；
     **不**走 awaiting-input 暂停模型。
+- [src/renderer/components/ToolboxLineageModal.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/ToolboxLineageModal.tsx)（V2.6 新增）
+  - 弹窗承载整套 lineage UI：面包屑 + 当前产物预览（自动播放）+ 下一步 chips +
+    ParamForm/CropForm + 退出链路/取消/继续 → footer。
+  - **`pathToLocalUrl(absPath)`** 将绝对路径转 `giftk-local://localhost/<encoded-abs-path>`，
+    镜像 [src/main/offlineImport.ts L65-L80](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/offlineImport.ts#L65-L80)
+    并由 [src/main/index.ts L1975-L1997](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/index.ts#L1975-L1997)
+    `protocol.handle('giftk-local')` 做 main 进程文件 stream。
+  - **`<FocusPreview>`** 按扩展名分流：
+    - `.gif/.webp` → `<img>`（浏览器原生循环动画格式）
+    - `.mp4/.mov/.webm/.mkv/.m4v` → `<video muted autoPlay loop playsInline preload="auto">`
+      （Chromium 允许 muted 视频无须用户手势 autoplay）
+    - 其它图片 → 静态 `<img>`
+  - **`renderParamForm` / `renderCropForm` 注入式 props**：因 ParamForm/CropForm 是
+    [ToolboxPanel.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/ToolboxPanel.tsx) 内的 local function（非 export），
+    用 render-prop 注入避免循环依赖与上提重构开销。
+  - ESC 键 + mask 点击 = `onClose`，对接 panel 的 `handleExitLineage`（带 cancel-await + epoch）。
 - [src/preload/index.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/preload/index.ts)
   Phase 1 已暴露的 `startToolboxChain` / `cancelToolboxChain` / `onProgress`
   保持原契约不动。
@@ -46,8 +68,14 @@
    否则后端会留下幽灵 chain 与孤儿产物。
 4. **下一步过滤**：`deriveNextKinds(focusPath)` 只允许产物扩展名命中
    `TOOLBOX_INPUT_EXTENSIONS[kind]` 的 kind，UI 不渲染不兼容 chip。
-5. **批量 UI 与链路 UI 互斥**：通过 ternary 切换；不允许两套同时挂载
-   （e2e 用 `footer.tb-footer button.primary[name=开始]` 应不存在做断言）。
+5. **批量 UI 始终在场（V2.6 起）**：lineage 是 modal overlay，不再
+   通过 ternary 把批量 UI 卸载。批量 footer 的 `开始` 按钮始终在 DOM；
+   e2e 用 `.modal.tb-lineage-modal[role="dialog"]` 的 visible / count(0)
+   作为 lineage 进出断言。这条破坏了 V2.5 之前的「`开始` 按钮 absent」断言，
+   是有意 breaking 的：用户在弹窗中操作 lineage 时不应感知背景 UI 被卸载重挂。
+6. **giftk-local:// 协议必须放行 CSP**：弹窗内 `<img>/<video>` 直接用该协议串
+   播放绝对路径文件，依赖 [src/main/index.ts L1975-L1997](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/index.ts#L1975-L1997)
+   `protocol.handle('giftk-local')` + main 端 CSP 的 `img-src/media-src/connect-src giftk-local:`。
 
 ## 红线（NEVER）
 

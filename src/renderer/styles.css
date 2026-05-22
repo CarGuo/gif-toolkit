@@ -3080,8 +3080,14 @@ details.advanced-gif > summary {
 
 .tb-history-row {
   display: grid;
-  grid-template-columns: 1fr 32px;
-  align-items: stretch;
+  /* R-TB-CHAIN-V2.6 — 4-col grid: thumb 56px | main 1fr | continue auto | remove 28px.
+     Previously `1fr 32px` which forced the optional 「继续处理 →」 button
+     to wrap into the same column as the main button, stretching the
+     row vertically. Now each control owns a fixed column. */
+  grid-template-columns: 56px minmax(0, 1fr) auto 28px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
   border-bottom: 1px solid var(--border);
   transition: background 120ms ease;
 }
@@ -3103,7 +3109,10 @@ details.advanced-gif > summary {
   background: transparent;
   border: none;
   text-align: left;
-  padding: 8px 14px;
+  /* R-TB-CHAIN-V2.6 — outer .tb-history-row now owns the row padding;
+     the main button only contributes per-button breathing room so the
+     4-col grid (thumb / main / continue / remove) lines up cleanly. */
+  padding: 2px 4px;
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -3501,17 +3510,202 @@ details.advanced-gif > summary {
   gap: 8px;
 }
 .tb-history-continue {
-  background: rgba(96, 165, 250, 0.12);
-  border: 1px solid rgba(96, 165, 250, 0.3);
+  /* R-TB-CHAIN-V2.6 — compact gradient pill, replaces the previous
+     translucent rectangle that looked bloated when the row was
+     stretched vertically (the row is now flat, so this is a true
+     inline action). aria-label still holds the long form. */
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: linear-gradient(135deg, rgba(96, 165, 250, 0.22), rgba(139, 92, 246, 0.22));
+  border: 1px solid rgba(96, 165, 250, 0.35);
   color: var(--text);
   padding: 4px 10px;
-  border-radius: 6px;
+  border-radius: 14px;
   font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
   cursor: pointer;
   flex: 0 0 auto;
-  transition: background 0.12s, border-color 0.12s;
+  white-space: nowrap;
+  transition: background 120ms ease, border-color 120ms ease, transform 80ms ease;
 }
-.tb-history-continue:hover {
-  background: rgba(96, 165, 250, 0.22);
-  border-color: rgba(96, 165, 250, 0.55);
+.tb-history-continue:hover:not(:disabled) {
+  background: linear-gradient(135deg, rgba(96, 165, 250, 0.35), rgba(139, 92, 246, 0.35));
+  border-color: rgba(96, 165, 250, 0.65);
+}
+.tb-history-continue:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.tb-history-continue:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.tb-history-continue-label {
+  font-weight: 500;
+}
+.tb-history-continue-arrow {
+  font-size: 13px;
+  opacity: 0.85;
+}
+
+/* R-TB-CHAIN-V2.6 — history row thumbnail.
+   Static poster (dataUrl from useFileThumbnail) by default; on
+   mouseenter the React component swaps src to the giftk-local://
+   live URL so animated GIF/WebP auto-plays for the duration of the
+   hover. The aspect-ratio + object-fit cover keeps the row height
+   stable regardless of source aspect. */
+.tb-history-thumb {
+  width: 56px;
+  height: 56px;
+  border-radius: 6px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.tb-history-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.tb-history-thumb-fallback {
+  font-size: 22px;
+  opacity: 0.5;
+}
+
+/* R-TB-CHAIN-V2.6 — Lineage modal (overlay). Reuses the global
+   .modal-mask / .modal box; this file only adds size + body grid
+   tweaks specific to the lineage two-pane layout. */
+.tb-lineage-modal {
+  width: min(92vw, 1080px);
+  max-height: min(86vh, 800px);
+  display: flex;
+  flex-direction: column;
+}
+.tb-lineage-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  gap: 16px;
+  padding: 12px 16px;
+  overflow: auto;
+}
+.tb-lineage-stage {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.tb-lineage-side {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.tb-lineage-side-head {
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.tb-lineage-breadcrumb {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.tb-lineage-crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.tb-lineage-crumb-btn {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 3px 9px;
+  border-radius: 12px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.tb-lineage-crumb-btn:hover { background: var(--panel); }
+.tb-lineage-crumb.is-focus .tb-lineage-crumb-btn {
+  background: linear-gradient(135deg, rgba(96, 165, 250, 0.28), rgba(139, 92, 246, 0.28));
+  border-color: rgba(96, 165, 250, 0.6);
+  color: var(--text);
+}
+.tb-lineage-crumb.is-abandoned .tb-lineage-crumb-btn {
+  opacity: 0.45;
+}
+.tb-lineage-sep {
+  color: var(--muted);
+  font-size: 12px;
+}
+.tb-lineage-preview {
+  flex: 1 1 auto;
+  min-height: 240px;
+  background: #000;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.tb-lineage-preview-media {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  display: block;
+}
+.tb-lineage-preview-empty {
+  font-size: 48px;
+  opacity: 0.35;
+}
+.tb-lineage-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.tb-lineage-meta-row .tb-lineage-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.tb-lineage-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.tb-lineage-form,
+.tb-lineage-cropbox {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tb-lineage-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.tb-lineage-footer .modal-footer-right {
+  display: flex;
+  gap: 8px;
 }
