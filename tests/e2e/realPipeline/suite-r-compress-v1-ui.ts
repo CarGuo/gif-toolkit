@@ -621,7 +621,12 @@ test('SUITE RCV1-E: toolbox.trialRun produces a real 0.5s gif and trialCleanup r
  * the cheapest thing that proves all five changed files agreed on a
  * shared shape.
  */
-test('SUITE RCV1-F — sniff card 压到 <5MB preset jumps to 工具箱 + sets gif-optimize budget', async () => {
+test.skip('SUITE RCV1-F — sniff card 压到 <5MB preset jumps to 工具箱 + sets gif-optimize budget', async () => {
+  // R-PRESET-PRUNE-V1 — the GIF→budget-compress preset chips
+  // ("压到 <5MB" / "压到 <2MB") were removed from the home page on
+  // user request. The video→GIF chips remain, so the rest of the
+  // suite is unaffected. Skipping this scenario instead of deleting
+  // it so the scenario is easy to revive if the chip ever returns.
   const { page } = getHarness();
   test.setTimeout(60_000);
 

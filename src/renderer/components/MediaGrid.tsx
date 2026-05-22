@@ -140,8 +140,16 @@ export const Thumb: React.FC<{ media: SniffedMedia }> = ({ media }) => {
       if (started || cancelled) return;
       started = true;
       setState({ status: 'loading' });
-      const api = (window as unknown as { giftk: { thumbnail: (m: SniffedMedia) => Promise<ThumbnailResult> } }).giftk;
-      api
+      // R-PROG-THUMB-V1 — defensive guard for non-electron environments
+      // (vitest jsdom, storybook, ssr): if the preload bridge is not
+      // mounted, surface an empty error state instead of crashing the
+      // host component with `Cannot read properties of undefined`.
+      const giftk = (window as unknown as { giftk?: { thumbnail?: (m: SniffedMedia) => Promise<ThumbnailResult> } }).giftk;
+      if (!giftk || typeof giftk.thumbnail !== 'function') {
+        setState({ status: 'error', error: 'no-bridge' });
+        return;
+      }
+      giftk
         .thumbnail(media)
         .then((r) => {
           if (cancelled) return;

@@ -1502,13 +1502,36 @@ details.advanced-gif > summary {
 }
 .task {
   display: grid;
-  grid-template-columns: 80px 1fr 90px 140px;
+  grid-template-columns: 56px 80px 1fr 90px 140px;
   gap: 10px;
   align-items: center;
   padding: 6px 8px;
   border-radius: 6px;
 }
 .task:hover { background: var(--panel); }
+/* R-PROG-THUMB-V1 — small live thumbnail at the row's leading edge.
+   Sized to the same height as the badge + bar block so the row
+   visual rhythm doesn't grow. Aspect-fit so portrait / landscape
+   clips both look right. */
+.task-thumb {
+  width: 56px;
+  height: 40px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: #1c1f29;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.task-thumb .card-thumb,
+.task-thumb .card-thumb img,
+.task-thumb .card-thumb video,
+.task-thumb img,
+.task-thumb video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
 .task .name {
   white-space: nowrap;
   overflow: hidden;

@@ -102,12 +102,11 @@ interface PresetChip {
 }
 
 const VIDEO_EXTS_FOR_PRESET = new Set(['.mp4', '.mov', '.webm', '.mkv', '.m4v']);
-const GIF_FAMILY_EXTS_FOR_PRESET = new Set(['.gif', '.webp']);
 
 /** Decide chip set by inputPath extension. video → 转 GIF 两挡;
- *  gif/webp → 压到 5MB / 2MB; anything else → []. The two families
- *  are mutually exclusive: a chip click means "I want this exact
- *  kind+params", so we don't mix‐and‐match. */
+ *  gif/webp 旧的 "压到 <5MB / <2MB" 预设已被移除（见
+ *  R-PRESET-PRUNE-V1 注释），现在 GIF 家族返回空数组，整条
+ *  preset 行随之自动隐藏。 */
 export function pickPresetChipsForPath(inputPath: string | undefined | null): PresetChip[] {
   if (!inputPath || typeof inputPath !== 'string') return [];
   const dot = inputPath.lastIndexOf('.');
@@ -119,12 +118,13 @@ export function pickPresetChipsForPath(inputPath: string | undefined | null): Pr
       { label: '转 GIF · 高质量', kind: 'video-to-gif', params: { engine: 'gifski' } }
     ];
   }
-  if (GIF_FAMILY_EXTS_FOR_PRESET.has(ext)) {
-    return [
-      { label: '压到 <5MB', kind: 'gif-optimize', params: { method: 'budget', maxBytes: 5 * 1024 * 1024 } },
-      { label: '压到 <2MB', kind: 'gif-optimize', params: { method: 'budget', maxBytes: 2 * 1024 * 1024 } }
-    ];
-  }
+  // R-PRESET-PRUNE-V1 — the user removed the GIF→budget-compress
+  // presets ("压到 <5MB" / "压到 <2MB") because the home page is
+  // crowded and the same operation is one click away in the toolbox
+  // anyway. We keep the helper around (and the call site) so the
+  // video→GIF presets still render; if a record's first done output
+  // is a GIF, PresetChipStrip now sees an empty array and unmounts
+  // itself (no preset row, no label).
   return [];
 }
 

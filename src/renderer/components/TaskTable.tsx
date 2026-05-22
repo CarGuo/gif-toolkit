@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import type { SniffedMedia, TaskProgress } from '../../shared/types';
+import { Thumb } from './MediaGrid';
 
 interface Props {
   items: SniffedMedia[];
@@ -205,6 +206,14 @@ export const TaskTable: React.FC<Props> = ({ items, progress, onRetry, onForceAl
         };
         return (
           <div className="task" key={m.id}>
+            {/* R-PROG-THUMB-V1 — small live thumbnail per row so the
+                user can identify which clip the progress bar belongs
+                to. Reuses the home-grid <Thumb /> so animated GIFs
+                actually animate (it returns a giftk-local:// playable
+                URL when the main process has cached the source). */}
+            <div className="task-thumb" aria-hidden="true">
+              <Thumb media={m} />
+            </div>
             <div className="status">
               <span className={`badge ${m.kind}`}>{m.kind}</span>
             </div>
