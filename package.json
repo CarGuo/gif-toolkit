@@ -36,6 +36,7 @@
     "test:db": "node scripts/test-db.mjs",
     "test:e2e": "npm run build && playwright test",
     "test:e2e:lineage-ui": "npm run build && playwright test tests/e2e/realPipeline.spec.ts -g \"TB-LINEAGE-UI-ALL\"",
+    "test:e2e:hist-up-entry": "npm run build && playwright test tests/e2e/realPipeline.spec.ts -g \"HIST-DETAIL-UPLOAD-ENTRY-UI\"",
     "docs:render": "node scripts/render-mermaid.mjs",
     "docs:screenshots": "npm run build && node scripts/capture-screenshots.mjs",
     "docs:all": "npm run docs:render && npm run docs:screenshots",

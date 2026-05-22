@@ -102,6 +102,7 @@ import './realPipeline/suite-compression-isolation-oracles'; // SUITE O, P, Q, R
 import './realPipeline/suite-toolbox-chain';            // SUITE TB-CHAIN A/B/C (R-TB-CHAIN)
 import './realPipeline/suite-toolbox-lineage-ui';       // SUITE TB-LINEAGE-UI-ALL (per-kind UI regression)
 import './realPipeline/suite-r-compress-v1-ui';         // SUITE RCV1 A/B/C (R-COMPRESS-V1 wave 1+2 UI gates)
+import './realPipeline/suite-history-detail-upload-entry-ui'; // SUITE HD-UP A/B (R-WS-90 P5i header 上传历史 entry)
 
 test.describe.configure({ timeout: 90_000 });
 

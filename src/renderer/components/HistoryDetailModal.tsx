@@ -343,6 +343,24 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
     [activeId, items]
   );
 
+  // R-WS-90 P5i — 标题栏「📤 上传历史」常驻入口。原先这个按钮藏在
+  // 右下角 ProgressDock 内嵌的 UploadsSection 工具栏里,而且 UploadsSection
+  // 在 flat.length===0(没产物的 sniff 记录) 时整段 return null,导致用户
+  // 一打开 detail modal 根本看不到入口。现在把同一个跳转 hook 提到
+  // 标题栏「打开目录」旁边: 有 done 上传 → enabled,直接 onJumpToUploadHistory;
+  // 无 done 上传 → disabled + title 提示「本记录尚未上传任何产物」(用户
+  // 至少能确认入口存在,而不是怀疑功能丢了)。反查算法仍由 ModalsHost 的
+  // onJumpToUploadHistory 实现:rec.uploadsByOutputPath[*].url ∩
+  // uploadHistory[*].items[*].url 反查 batchId。
+  const hasAnyDoneUploadHeader = useMemo(() => {
+    const ups = rec.uploadsByOutputPath || {};
+    for (const fp of Object.keys(ups)) {
+      const u = ups[fp];
+      if (u && u.status === 'done' && u.url) return true;
+    }
+    return false;
+  }, [rec.uploadsByOutputPath]);
+
   return (
     <div
       className="modal-mask hist-detail-mask"
@@ -368,6 +386,27 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
               title="在文件管理器中打开输出目录"
             >
               打开目录
+            </button>
+          ) : null}
+          {/* R-WS-90 P5i — 标题栏常驻「📤 上传历史」按钮。 */}
+          {onJumpToUploadHistory ? (
+            <button
+              type="button"
+              className="hist-open-dir"
+              data-testid="hist-detail-jump-uploads"
+              style={{ marginLeft: 8 }}
+              onClick={() => {
+                if (hasAnyDoneUploadHeader) onJumpToUploadHistory(rec);
+              }}
+              disabled={!hasAnyDoneUploadHeader}
+              aria-disabled={!hasAnyDoneUploadHeader}
+              title={
+                hasAnyDoneUploadHeader
+                  ? '跳转到「上传历史」tab,定位包含本记录产物的上传批次'
+                  : '本记录尚未上传任何产物,先用下方「📤 上传记录」面板上传'
+              }
+            >
+              📤 上传历史
             </button>
           ) : null}
           <span className="modal-header-spacer" />
