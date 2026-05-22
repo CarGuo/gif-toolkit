@@ -2502,7 +2502,7 @@ async function processToolboxJob({ job, outputBaseDir, emit, signal, batchTaken 
     emit({
       taskId: job.id,
       status: 'converting',
-      percent: 30,
+      percent: 5,
       substep: 'cropping',
       message: `crop ${cropW}×${cropH} @ (${cropX},${cropY})`,
       elapsedMs: elapsed()
@@ -2512,7 +2512,25 @@ async function processToolboxJob({ job, outputBaseDir, emit, signal, batchTaken 
       job.inputPath,
       finalOut,
       { x: cropX, y: cropY, w: cropW, h: cropH },
-      { signal }
+      {
+        signal,
+        // R-CROP-PROG-V1 — bridge ffmpeg's stderr-driven percent into
+        // the same emit channel the lineage modal listens on. We clamp
+        // to 5..95 so the start/done bookends still own 0/100.
+        onProgress: (pct, etaSec) => {
+          const clamped = Math.max(5, Math.min(95, pct));
+          emit({
+            taskId: job.id,
+            status: 'converting',
+            percent: clamped,
+            substep: 'cropping',
+            message: etaSec != null
+              ? `crop ${cropW}×${cropH} · 剩余约 ${etaSec}s`
+              : `crop ${cropW}×${cropH}`,
+            elapsedMs: elapsed()
+          });
+        }
+      }
     );
     const sizeMB = await statSizeMB(finalOut);
     emit({

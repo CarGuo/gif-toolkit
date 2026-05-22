@@ -1666,7 +1666,7 @@ export async function toolboxCrop(
   input: string,
   output: string,
   rect: { x: number; y: number; w: number; h: number },
-  opts: { signal?: AbortSignal } = {}
+  opts: { signal?: AbortSignal; onProgress?: (percent: number, etaSec: number | null) => void } = {}
 ): Promise<void> {
   // Snap to even pixels (mandatory for many codecs; harmless for gif).
   const x = Math.max(0, Math.floor(rect.x / 2) * 2);
@@ -1684,11 +1684,40 @@ export async function toolboxCrop(
     return;
   }
 
+  // R-CROP-PROG-V1 — probe upstream duration so we can convert ffmpeg's
+  // `time=HH:MM:SS.cc` stderr lines into a real 0..100 percent for the
+  // toolbox lineage progress bar. Probe failure is non-fatal — we just
+  // skip percent updates and let the start/done bookends carry the UI.
+  let totalSec = 0;
+  try {
+    const meta = await probe(input);
+    if (meta?.durationSec && meta.durationSec > 0) totalSec = meta.durationSec;
+  } catch { /* probe optional */ }
+
   const ffmpeg = getFfmpegPath();
+  // Stderr-driven progress parser. ffmpeg emits a status line every ~0.5s
+  // shaped like `frame=  25 fps=12 q=-0.0 size=N/A time=00:00:01.23 ...`.
+  // We only forward integer percent changes so the IPC channel doesn't
+  // flood the renderer.
+  let lastPct = -1;
+  const onStderr = (txt: string): void => {
+    if (!opts.onProgress || totalSec <= 0) return;
+    // Match the last `time=HH:MM:SS.cc` token in the chunk (ffmpeg flushes
+    // multiple lines at a time on slow ticks).
+    const m = /time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})/g.exec(txt.trim().split('\n').pop() || '');
+    if (!m) return;
+    const cur = (+m[1]) * 3600 + (+m[2]) * 60 + (+m[3]) + (+m[4]) / 100;
+    const pct = Math.max(0, Math.min(99, Math.round((cur / totalSec) * 100)));
+    if (pct === lastPct) return;
+    lastPct = pct;
+    const eta = cur > 0 && cur < totalSec ? Math.max(0, Math.round(totalSec - cur)) : null;
+    try { opts.onProgress(pct, eta); } catch { /* swallow */ }
+  };
+
   if (isGifPath(input)) {
     // For gifs we re-encode through the gif muxer; ffmpeg keeps the
     // animation timing (per-frame delays) intact when no -r is given.
-    await run(ffmpeg, ['-y', '-i', input, '-vf', vf, '-loop', '0', output], { signal: opts.signal });
+    await run(ffmpeg, ['-y', '-i', input, '-vf', vf, '-loop', '0', output], { signal: opts.signal, onStderr });
     return;
   }
 
@@ -1697,11 +1726,11 @@ export async function toolboxCrop(
   // back to re-encoding audio so the user still gets an output file.
   const args = ['-y', '-i', input, '-vf', vf, '-c:a', 'copy', output];
   try {
-    await run(ffmpeg, args, { signal: opts.signal });
+    await run(ffmpeg, args, { signal: opts.signal, onStderr });
   } catch (e) {
     if ((e as Error).name === 'CancelledError') throw e;
     const fallback = ['-y', '-i', input, '-vf', vf, output];
-    await run(ffmpeg, fallback, { signal: opts.signal });
+    await run(ffmpeg, fallback, { signal: opts.signal, onStderr });
   }
 }
 
