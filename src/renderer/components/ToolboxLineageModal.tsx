@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ToolboxKind, ToolboxParams } from '../../shared/types';
 import type { LineageNode, UseToolboxLineageResult } from './useToolboxLineage';
 import type { MediaInfo } from './ToolboxPanel';
+import { LineageProgressRow } from './ToolboxLineageProgress';
 
 /**
  * R-TB-CHAIN-V2.6 — ToolboxLineageModal.
@@ -85,25 +86,13 @@ function detectKind(p: string | null | undefined): 'gif' | 'webp' | 'video' | 'i
  * Auto-playing preview of the current focus node.
  * GIF/animated WebP via <img>, video via muted autoplay loop.
  *
- * R-TB-CHAIN-V2.7 — formerly this component just rendered <img src=…>
- * with no error handling, so any load failure (file deleted, perms,
- * unusual MIME, decoder rejection) painted the parent box's `#000`
- * background and looked like a "黑屏 bug" to the user. We now:
- *   - track an explicit `errored` state via onError;
- *   - render a static poster (first-frame data URL passed in by the
- *     panel via `posterDataUrl`) as a fallback when live render fails;
- *   - if even the poster is missing, show an explicit message instead
- *     of a black void so the user knows preview is unavailable rather
- *     than misreading it as "loading forever".
- * The metadata row beneath (W×H · duration · 在文件管理器中显示) is
- * unchanged so the user still has a path to inspect the file.
+ * R-TB-CHAIN-V2.7 — error-handling: track `errored` via onError, fall
+ * back to the panel-provided posterDataUrl, and finally to an explicit
+ * "预览不可用" message so failures never look like a "黑屏 bug".
  *
  * R-COMPRESS-V1 #4 — When `trialPath` is set, FocusPreview renders the
- * trial-run output (a 0.5s tmp clip living under
- * `os.tmpdir()/giftk-trial-*`) instead of the focus node's path. The
- * media element is otherwise identical, so the user sees a 1:1 preview
- * of what the next step would produce. The parent owns trialPath
- * lifecycle (clear on focus change / kind change / modal close).
+ * trial-run output (a 0.5s tmp clip under `os.tmpdir()/giftk-trial-*`)
+ * instead of the focus node's path. Parent owns trialPath lifecycle.
  */
 function FocusPreview({
   path,
@@ -114,15 +103,33 @@ function FocusPreview({
   posterDataUrl?: string | null;
   trialPath?: string | null;
 }): JSX.Element {
-  // Trial output (when present) takes precedence over the focus path so
+  // Trial output (when present) takes precedence over focus path so
   // the user sees the would-be next-step output, not the input.
   const renderPath = trialPath || path || null;
   const kind = detectKind(renderPath);
   const url = renderPath ? pathToLocalUrl(renderPath) : '';
   const [errored, setErrored] = useState(false);
-  // Reset the error flag whenever the render path changes — the previous
-  // failure shouldn't poison subsequent navigation.
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   useEffect(() => { setErrored(false); }, [url]);
+  // R-COMPRESS-V1 #4 follow-up — focus-change between video nodes
+  // reuses the same <video> DOM element; setting `src` alone leaves
+  // Chromium on the previous decoder. Explicitly call load()+play()
+  // to restart playback. play() rejection is silenced — element is
+  // muted+autoplay+playsInline so only transient decoder issues fail.
+  useEffect(() => {
+    if (kind !== 'video') return;
+    const el = videoRef.current;
+    if (!el) return;
+    try {
+      el.load();
+      const promise = el.play();
+      if (promise && typeof promise.catch === 'function') {
+        promise.catch(() => { /* autoplay race — ignore */ });
+      }
+    } catch {
+      /* DOM not ready / element gone — ignore */
+    }
+  }, [url, kind]);
   if (!url) {
     return <div className="tb-lineage-preview-empty" aria-hidden="true">🎞️</div>;
   }
@@ -130,6 +137,7 @@ function FocusPreview({
     if (posterDataUrl) {
       return (
         <img
+          key={`poster-${posterDataUrl.length}`}
           className="tb-lineage-preview-media"
           src={posterDataUrl}
           alt="预览静态首帧"
@@ -148,6 +156,13 @@ function FocusPreview({
   if (kind === 'video') {
     return (
       <video
+        // key={url} forces React to remount the <video> element when
+        // the focus moves to a different file; combined with the
+        // imperative load()+play() in the effect above this guarantees
+        // the new src actually starts playing instead of staying paused
+        // on the previous decoder's last frame.
+        key={url}
+        ref={videoRef}
         className="tb-lineage-preview-media"
         src={url}
         muted
@@ -160,9 +175,17 @@ function FocusPreview({
     );
   }
   // gif / webp / image — all served via <img>; animated formats loop
-  // natively in the browser.
+  // natively in the browser. The key={url} forces a fresh DOM node on
+  // every focus change — this is the canonical workaround for the
+  // Chromium quirk where reusing an <img> element to load the same or
+  // a different GIF leaves the animation paused on the last decoded
+  // frame (a behaviour we observed when the user navigates the lineage
+  // breadcrumb and the current preview "freezes"). Remounting forces
+  // the renderer to re-run the GIF decoder from frame 0 with full
+  // animation enabled.
   return (
     <img
+      key={url}
       className="tb-lineage-preview-media"
       src={url}
       alt=""
@@ -510,6 +533,15 @@ export function ToolboxLineageModal(props: ToolboxLineageModalProps): JSX.Elemen
             ) : null}
           </aside>
         </div>
+
+        {/* R-COMPRESS-V1 #4 follow-up — Progress row, full-width
+            between modal-body and footer. Visible whenever a step is
+            in flight; cleared automatically on done/failed/cancelled
+            via the hook's currentProgress lifecycle. See
+            ToolboxLineageProgress.tsx for the badge/bar/detail markup. */}
+        {lineage.isRunning ? (
+          <LineageProgressRow progress={lineage.currentProgress} />
+        ) : null}
 
         <footer className="modal-footer tb-lineage-footer">
           <div className="modal-footer-left">

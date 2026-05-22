@@ -112,6 +112,11 @@ export interface UseToolboxLineageResult {
   /** Compatible next-step kinds for the current focus, derived
    *  from the focus path's extension via TOOLBOX_INPUT_EXTENSIONS. */
   nextKindOptions: readonly ToolboxKind[];
+  /** Latest non-terminal `process:progress` event for the in-flight
+   *  step, or null when idle. The lineage modal renders this as a
+   *  inline progress bar with status badge + secondary text, mirroring
+   *  the home-page TaskTable. Cleared on done/failed/cancel/reset. */
+  currentProgress: TaskProgress | null;
 }
 
 interface ToolboxBridge {
@@ -160,6 +165,14 @@ export function useToolboxLineage(): UseToolboxLineageResult {
   const [focusIndex, setFocusIndex] = useState<number>(-1);
   const [isRunning, setIsRunning] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  // R-COMPRESS-V1 #4 follow-up — capture the running progress so the
+  // ToolboxLineageModal can render a real progress bar + status text
+  // identical to the home-page TaskTable. Previously the modal only
+  // rendered "处理中…" inside the primary button which made long
+  // video-to-gif chains feel like the app had hung. Cleared whenever
+  // the in-flight step terminates (done/failed/cancelled) or the
+  // lineage is reset.
+  const [currentProgress, setCurrentProgress] = useState<TaskProgress | null>(null);
 
   // chainId of the in-flight runNextStep, used by cancel() to
   // address the right IPC and by the progress listener to ignore
@@ -210,6 +223,7 @@ export function useToolboxLineage(): UseToolboxLineageResult {
     setFocusIndex(0);
     setIsRunning(false);
     setError(null);
+    setCurrentProgress(null);
     nextIdCounterRef.current = 0;
   }, []);
 
@@ -233,6 +247,7 @@ export function useToolboxLineage(): UseToolboxLineageResult {
     inflightChainIdRef.current = null;
     pendingRef.current = null;
     setIsRunning(false);
+    setCurrentProgress(null);
     try {
       const bridge = getBridge();
       await bridge.cancelToolboxChain(id);
@@ -272,6 +287,7 @@ export function useToolboxLineage(): UseToolboxLineageResult {
           pendingRef.current = null;
           inflightChainIdRef.current = null;
           setIsRunning(false);
+          setCurrentProgress(null);
           setError('done emit had no outputs');
           return;
         }
@@ -291,6 +307,7 @@ export function useToolboxLineage(): UseToolboxLineageResult {
         });
         setFocusIndex(pending.branchFromIndex + 1);
         setIsRunning(false);
+        setCurrentProgress(null);
         inflightChainIdRef.current = null;
         pendingRef.current = null;
         pending.resolve(newNode);
@@ -300,11 +317,17 @@ export function useToolboxLineage(): UseToolboxLineageResult {
         pendingRef.current = null;
         inflightChainIdRef.current = null;
         setIsRunning(false);
+        setCurrentProgress(null);
         setError(msg);
+      } else {
+        // Intermediate status (downloading / probing / segmenting /
+        // converting / compressing / pending). Store the latest snapshot
+        // so the modal can render a real progress bar + secondary text.
+        // We store the entire TaskProgress object so the modal can pull
+        // percent / message / substep / stepIndex / segmentIndex /
+        // currentSizeMB / elapsedMs without coupling to the schema here.
+        setCurrentProgress(p);
       }
-      // intermediate statuses (running/awaiting-input/etc.) are
-      // ignored here — UI reads them off the existing tb progress
-      // store if it cares about per-step progress bars.
     });
     return () => { off(); };
   }, []);
@@ -327,6 +350,7 @@ export function useToolboxLineage(): UseToolboxLineageResult {
       const stepId = `${chainId}-s1`;
       setError(null);
       setIsRunning(true);
+      setCurrentProgress(null);
       inflightChainIdRef.current = chainId;
       // Issue R5 — keep local references to the promise reject + the
       // pending entry so the synchronous-IPC-failure path doesn't have
@@ -372,6 +396,7 @@ export function useToolboxLineage(): UseToolboxLineageResult {
           inflightChainIdRef.current = null;
         }
         setIsRunning(false);
+        setCurrentProgress(null);
         setError(e.message);
         const reject = localReject as ((e: Error) => void) | null;
         if (reject) reject(e);
@@ -398,6 +423,7 @@ export function useToolboxLineage(): UseToolboxLineageResult {
     focusNode,
     runNextStep,
     cancel,
-    nextKindOptions
+    nextKindOptions,
+    currentProgress
   };
 }

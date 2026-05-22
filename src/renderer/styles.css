@@ -3803,3 +3803,39 @@ button.hist-stage.is-clickable:active {
   display: flex;
   gap: 8px;
 }
+
+/* R-COMPRESS-V1 #4 follow-up — Lineage modal in-flight progress row.
+   Visually consistent with the home-page TaskTable's per-row progress
+   block: status badge → bar → percent on the first line, then a muted
+   secondary line with message · substep · segment · elapsed · size.
+   Sits between the modal body and the footer, full-width. */
+.tb-lineage-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.02);
+}
+.tb-lineage-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.tb-lineage-progress-bar-wrap {
+  flex: 1 1 auto;
+  min-width: 120px;
+}
+.tb-lineage-progress-percent {
+  font-size: 11px;
+  color: var(--muted);
+  min-width: 40px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.tb-lineage-progress-detail {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.45;
+  word-break: break-word;
+}
