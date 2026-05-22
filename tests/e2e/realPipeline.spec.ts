@@ -100,6 +100,7 @@ import './realPipeline/suite-segment-trim-reoptimize';  // SUITE I, J, L
 import './realPipeline/suite-format-contracts';         // SUITE M, N
 import './realPipeline/suite-compression-isolation-oracles'; // SUITE O, P, Q, R, S
 import './realPipeline/suite-toolbox-chain';            // SUITE TB-CHAIN A/B/C (R-TB-CHAIN)
+import './realPipeline/suite-r-compress-v1-ui';         // SUITE RCV1 A/B/C (R-COMPRESS-V1 wave 1+2 UI gates)
 
 test.describe.configure({ timeout: 90_000 });
 
