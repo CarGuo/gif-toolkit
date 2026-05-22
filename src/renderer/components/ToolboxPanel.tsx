@@ -283,6 +283,13 @@ export interface MediaInfo {
   /** Data URL for the first-frame preview (Crop only). May be empty
    *  while loading or when the probe failed. */
   previewDataUrl?: string;
+  /** R-COMPRESS-V1 #2 — source frame rate from ffprobe (r_frame_rate
+   *  or avg_frame_rate). 0/undefined when unknown. Used by ParamForm
+   *  for video→gif/webp to default fps to `min(srcFps, 24)` instead
+   *  of the static `12`/`15`, so users with 60fps screen recordings
+   *  get a sane "follow source up to 24" instead of an over-aggressive
+   *  drop or an under-sampled motion. */
+  frameRate?: number;
 }
 
 /** R-38 — Crop sub-form. Lifted out of ParamForm so we can use refs +
@@ -442,9 +449,15 @@ function ParamForm({ kind, params, setParams, mediaInfo, onTargetFormatTouch }: 
   }, [setParams]);
 
   if (kind === 'video-to-gif') {
+    // R-COMPRESS-V1 #2 — surface the source frame rate in the FPS hint
+    // so the user can sanity-check the smart default vs reality.
+    const srcFps = mediaInfo?.frameRate;
+    const fpsHint = srcFps && srcFps > 0
+      ? `1–60 · 源视频 ${srcFps.toFixed(srcFps % 1 === 0 ? 0 : 2)}fps,默认取 min(源,24)`
+      : '1–60';
     return (
       <div className="tb-params">
-        <NumField label="FPS" value={params.fps} onChange={(v) => patch('fps', v)} min={1} max={60} hint="1–60" />
+        <NumField label="FPS" value={params.fps} onChange={(v) => patch('fps', v)} min={1} max={60} hint={fpsHint} />
         <NumField label="宽度 (px)" value={params.width} onChange={(v) => patch('width', v)} min={16} max={4096} hint="保持比例,留空则不缩放" />
         <NumField label="开始 (秒)" value={params.startSec} onChange={(v) => patch('startSec', v)} min={0} step={0.1} placeholder="0" />
         <NumField label="结束 (秒)" value={params.endSec} onChange={(v) => patch('endSec', v)} min={0} step={0.1} placeholder="尾部" />
@@ -454,9 +467,13 @@ function ParamForm({ kind, params, setParams, mediaInfo, onTargetFormatTouch }: 
     );
   }
   if (kind === 'video-to-webp') {
+    const srcFps = mediaInfo?.frameRate;
+    const fpsHint = srcFps && srcFps > 0
+      ? `1–60 · 源 ${srcFps.toFixed(srcFps % 1 === 0 ? 0 : 2)}fps,默认 min(源,24)`
+      : undefined;
     return (
       <div className="tb-params">
-        <NumField label="FPS" value={params.fps} onChange={(v) => patch('fps', v)} min={1} max={60} />
+        <NumField label="FPS" value={params.fps} onChange={(v) => patch('fps', v)} min={1} max={60} hint={fpsHint} />
         <NumField label="宽度 (px)" value={params.width} onChange={(v) => patch('width', v)} min={16} max={4096} hint="留空则不缩放" />
         <NumField label="质量 (0-100)" value={params.quality} onChange={(v) => patch('quality', v)} min={0} max={100} />
         <NumField label="循环 (0=无限)" value={params.loop} onChange={(v) => patch('loop', v)} min={0} />
@@ -641,8 +658,74 @@ function ParamForm({ kind, params, setParams, mediaInfo, onTargetFormatTouch }: 
   }
   // gif-optimize — method picker drives which sub-fields render.
   const method: ToolboxOptimizeMethod = params.method ?? 'lossy';
+  // R-COMPRESS-V1 #1 — 「目标体积快捷条」: a 4-chip strip surfaced
+  // ABOVE the method picker so users who only care about "make this
+  // GIF fit under 5 MB" can one-click into the budget pipeline. The
+  // size chips force `method='budget'` (mirrors `setMethod` defaulting
+  // logic) and overwrite `maxBytes`. The "自定义" chip only sets
+  // method='budget' without touching maxBytes, letting the user type
+  // a specific value into the existing NumField below. Active state
+  // is derived from current params, so reload / lineage replay still
+  // shows the right chip highlighted.
+  const TARGET_BYTES_PRESETS: ReadonlyArray<{ label: string; bytes: number }> = [
+    { label: '< 2 MB', bytes: 2 * 1024 * 1024 },
+    { label: '< 5 MB', bytes: 5 * 1024 * 1024 },
+    { label: '< 10 MB', bytes: 10 * 1024 * 1024 }
+  ];
+  const activePresetBytes =
+    method === 'budget' && typeof params.maxBytes === 'number'
+      ? params.maxBytes
+      : null;
+  const isCustomActive =
+    method === 'budget' &&
+    !TARGET_BYTES_PRESETS.some((p) => p.bytes === activePresetBytes);
+  const applyTargetBytes = (bytes: number) => {
+    setParams((prev) => ({ ...prev, method: 'budget', maxBytes: bytes }));
+  };
+  const applyCustomTarget = () => {
+    // Keep current maxBytes if already set in budget; otherwise seed
+    // with 2MB so the NumField shows a sane starting point.
+    setParams((prev) => ({
+      ...prev,
+      method: 'budget',
+      maxBytes: prev.method === 'budget' && typeof prev.maxBytes === 'number'
+        ? prev.maxBytes
+        : 2 * 1024 * 1024
+    }));
+  };
   return (
     <div className="tb-params">
+      <div
+        className="tb-target-bytes-row"
+        role="group"
+        aria-label="目标体积快捷条"
+      >
+        <span className="tb-target-bytes-label">目标体积</span>
+        {TARGET_BYTES_PRESETS.map((p) => {
+          const active = activePresetBytes === p.bytes;
+          return (
+            <button
+              type="button"
+              key={p.bytes}
+              className={`tb-target-bytes-chip${active ? ' is-active' : ''}`}
+              aria-pressed={active}
+              onClick={() => applyTargetBytes(p.bytes)}
+              title={`一键切到 budget 4-Phase 压缩并设目标 ${p.label}`}
+            >
+              {p.label}
+            </button>
+          );
+        })}
+        <button
+          type="button"
+          className={`tb-target-bytes-chip${isCustomActive ? ' is-active' : ''}`}
+          aria-pressed={isCustomActive}
+          onClick={applyCustomTarget}
+          title="切换到 budget 模式后,在下方手动填具体 KB"
+        >
+          自定义
+        </button>
+      </div>
       <SelectField<ToolboxOptimizeMethod>
         label="Optimization method"
         value={method}
@@ -874,6 +957,46 @@ export function ToolboxPanel(): JSX.Element {
   // jobs[0]. ParamForm only cares about Trim's duration and Crop's
   // preview, both of which are driven by the first queued file.
   const mediaInfo: MediaInfo | null = previewPath ? (jobMedia[previewPath] ?? null) : null;
+
+  // R-COMPRESS-V1 #2 — smart fps default for video→gif / video→webp.
+  // The static defaults (12 / 15) under-sample 60fps screen recordings
+  // and bookmark-quality footage. ezgif's "use video frame rate" toggle
+  // and gifski's docs both hint that `min(srcFps, 24)` is the sweet
+  // spot: ≤24 still encodes well in palette-based GIF, and lets 60fps
+  // captures keep ~2x more motion detail than the static 12. We only
+  // overwrite `params.fps` when:
+  //   - kind is video-to-gif or video-to-webp
+  //   - mediaInfo has a usable frameRate (>0)
+  //   - params.fps is *still* the kind's static default (12 / 15) —
+  //     i.e. the user hasn't typed a custom value
+  //   - we haven't already applied a smart default for this exact
+  //     (kind, focus path, frameRate) tuple
+  // This last guard is what keeps the effect from re-bouncing the
+  // user's manual edit back to the smart value: once they type 30
+  // and we leave it alone, switching files will run again only if
+  // params.fps re-matches the static default.
+  const smartFpsAppliedRef = useRef<string | null>(null);
+  useEffect(() => {
+    const k = tb.kind;
+    const isVideoOut = k === 'video-to-gif' || k === 'video-to-webp';
+    if (!isVideoOut) return;
+    const srcFps = mediaInfo?.frameRate;
+    if (!srcFps || srcFps <= 0) return;
+    if (!previewPath) return;
+    const staticDefault = k === 'video-to-gif' ? 12 : 15;
+    if (tb.params.fps !== staticDefault) return; // user already customised
+    const key = `${k}|${previewPath}|${Math.round(srcFps * 1000)}`;
+    if (smartFpsAppliedRef.current === key) return;
+    const smart = Math.min(Math.round(srcFps), 24);
+    if (smart === staticDefault) {
+      // Source already runs at our static default → no change needed
+      // but still mark as applied so we don't keep re-checking.
+      smartFpsAppliedRef.current = key;
+      return;
+    }
+    smartFpsAppliedRef.current = key;
+    tb.setParams((prev) => ({ ...prev, fps: smart }));
+  }, [tb, mediaInfo?.frameRate, previewPath]);
 
   // R-42 / R-43 — When the user is on the GIF ↔ WebP convert tool, default
   // `targetFormat` to the *opposite* of the queue head's extension. This

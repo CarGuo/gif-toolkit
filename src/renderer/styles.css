@@ -3029,6 +3029,50 @@ button.hist-stage.is-clickable:active {
   color: #f0a14b;
   font-size: 12px;
 }
+/* R-COMPRESS-V1 #1 — GIF Optimize 顶部「目标体积快捷条」.
+   横向胶囊行,与 hist-stage 同款 999px 圆角,但配色用 accent
+   (蓝)而非 accent-2(蓝紫)以与上传胶囊区分开。.is-active
+   用实心 accent 背景突出当前选中,无 hover 时只有边框轻提
+   亮,避免误导用户看成已选中。 */
+.tb-target-bytes-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 6px 0;
+}
+.tb-target-bytes-label {
+  font-size: 12px;
+  color: var(--muted);
+  margin-right: 2px;
+}
+.tb-target-bytes-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text);
+  background: transparent;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background-color 0.15s ease;
+}
+.tb-target-bytes-chip:hover {
+  border-color: rgba(91, 141, 239, 0.55);
+  background: rgba(91, 141, 239, 0.08);
+}
+.tb-target-bytes-chip:focus-visible {
+  outline: 2px solid rgba(91, 141, 239, 0.85);
+  outline-offset: 2px;
+}
+.tb-target-bytes-chip.is-active {
+  border-color: rgba(91, 141, 239, 0.85);
+  background: rgba(91, 141, 239, 0.20);
+  color: var(--text);
+}
 .tb-crop-pane {
   display: flex;
   flex-direction: column;
