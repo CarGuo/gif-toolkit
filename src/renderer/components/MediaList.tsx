@@ -28,8 +28,18 @@ function fileName(u: string): string {
 type ThumbState =
   | { status: 'idle' }
   | { status: 'loading' }
-  | { status: 'ok'; dataUrl: string }
+  | { status: 'ok'; dataUrl: string; playable?: { url: string; kind: 'video' | 'gif' | 'image' } }
   | { status: 'error'; error: string };
+
+/** Mirrors `ToolboxLineageModal#pathToLocalUrl`. */
+function pathToLocalUrl(absPath: string): string {
+  if (!absPath) return '';
+  const sep = absPath.includes('\\') ? '\\' : '/';
+  const parts = absPath.split(sep).map((seg) => encodeURIComponent(seg));
+  const isWin = /^[a-zA-Z]:/.test(absPath);
+  const joined = isWin ? '/' + parts.filter(Boolean).join('/') : parts.join('/');
+  return `giftk-local://localhost${joined}`;
+}
 
 const Thumb: React.FC<{ media: SniffedMedia }> = ({ media }) => {
   const [state, setState] = useState<ThumbState>({ status: 'idle' });
@@ -53,7 +63,10 @@ const Thumb: React.FC<{ media: SniffedMedia }> = ({ media }) => {
         .then((r) => {
           if (cancelled) return;
           if (r.status === 'ok' && r.dataUrl) {
-            setState({ status: 'ok', dataUrl: r.dataUrl });
+            const playable = r.localPath && (r.kind === 'gif' || r.kind === 'video')
+              ? { url: pathToLocalUrl(r.localPath), kind: r.kind }
+              : undefined;
+            setState({ status: 'ok', dataUrl: r.dataUrl, playable });
           } else {
             setState({ status: 'error', error: r.error || 'thumbnail failed' });
           }
@@ -94,7 +107,23 @@ const Thumb: React.FC<{ media: SniffedMedia }> = ({ media }) => {
 
   return (
     <div ref={ref} className="thumb" title={state.status === 'error' ? state.error : undefined}>
-      {state.status === 'ok' && <img src={state.dataUrl} alt="" loading="lazy" />}
+      {state.status === 'ok' && state.playable
+        ? (state.playable.kind === 'video'
+            ? (
+              <video
+                src={state.playable.url}
+                muted
+                autoPlay
+                loop
+                playsInline
+                preload="auto"
+                poster={state.dataUrl}
+              />
+            )
+            : (
+              <img src={state.playable.url} alt="" loading="lazy" />
+            ))
+        : state.status === 'ok' && <img src={state.dataUrl} alt="" loading="lazy" />}
       {state.status === 'loading' && <div className="thumb-skeleton" />}
       {state.status === 'idle' && <div className="thumb-skeleton dim" />}
       {state.status === 'error' && (

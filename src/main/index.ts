@@ -2135,6 +2135,25 @@ if (!gotLock) {
     }
     tick('mkdir + allowedOutputDirs');
 
+    // R-COMPRESS-V1 #4 follow-up — explicit MIME table used by the
+    // giftk-local protocol handler so chromium runs the correct
+    // multi-frame decoder for animated formats.
+    const MIME_BY_EXT: Record<string, string> = {
+      '.gif': 'image/gif',
+      '.webp': 'image/webp',
+      '.apng': 'image/apng',
+      '.png': 'image/png',
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.bmp': 'image/bmp',
+      '.svg': 'image/svg+xml',
+      '.mp4': 'video/mp4',
+      '.m4v': 'video/x-m4v',
+      '.mov': 'video/quicktime',
+      '.webm': 'video/webm',
+      '.mkv': 'video/x-matroska'
+    };
+
     // R-56 — Register the giftk-local:// fetch handler. Resolves
     // `giftk-local://localhost/<urlencoded-abs-path>` back to a real
     // file on disk and streams it to the renderer. We deliberately
@@ -2168,7 +2187,24 @@ if (!gotLock) {
         if (norm !== p) {
           return new Response('giftk-local: non-canonical path', { status: 400 });
         }
-        return net.fetch(pathToFileURL(p).toString());
+        // R-COMPRESS-V1 #4 follow-up — `net.fetch(file://)` returns a
+        // Response with no Content-Type, which forces Chromium's image
+        // pipeline to sniff the bytes and treat animated GIFs as a
+        // single-frame still image (the lineage modal preview was
+        // showing a frozen first frame as a result). Re-wrap the
+        // upstream response with an explicit Content-Type derived from
+        // the file extension so animated formats decode normally.
+        const upstream = await net.fetch(pathToFileURL(p).toString());
+        const ext = path.extname(p).toLowerCase();
+        const mime = MIME_BY_EXT[ext];
+        if (!mime) return upstream;
+        const headers = new Headers(upstream.headers);
+        headers.set('Content-Type', mime);
+        return new Response(upstream.body, {
+          status: upstream.status,
+          statusText: upstream.statusText,
+          headers
+        });
       } catch (e) {
         return new Response(`giftk-local: ${(e as Error).message}`, { status: 500 });
       }

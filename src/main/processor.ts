@@ -813,7 +813,15 @@ export async function prefetchThumbnail(media: SniffedMedia): Promise<ThumbnailR
         status: 'ok',
         dataUrl: t.dataUrl,
         width: t.width,
-        height: t.height
+        height: t.height,
+        // R-WS-90 P5h follow-up — surface the cached source path so
+        // the renderer can swap a static first-frame thumbnail for a
+        // live giftk-local:// `<img>` / `<video>` playback when the
+        // user wants a real GIF preview.
+        localPath: local,
+        kind: media.kind === 'video' || media.kind === 'gif' || media.kind === 'image'
+          ? media.kind
+          : undefined
       };
       cacheThumb(media.id, result);
       thumbErrAt.delete(media.id);

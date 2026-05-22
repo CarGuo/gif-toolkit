@@ -222,6 +222,17 @@ export interface ThumbnailResult {
   dataUrl?: string;
   width?: number;
   height?: number;
+  /** Absolute local cache path of the downloaded source. When present
+   *  the renderer can swap from the static `dataUrl` to a live
+   *  `giftk-local://<localPath>` playback for animated formats so the
+   *  thumbnail loops the actual GIF/WebP/video instead of a frozen
+   *  first frame. Only populated for kinds that benefit from it
+   *  (gif / video). */
+  localPath?: string;
+  /** Source file kind hint — let the renderer pick a sensible <img> /
+   *  <video> element without re-sniffing the URL. Mirrors
+   *  SniffedMedia.kind. */
+  kind?: 'video' | 'gif' | 'image';
   error?: string;
 }
 

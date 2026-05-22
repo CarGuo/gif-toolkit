@@ -3770,17 +3770,23 @@ button.hist-stage.is-clickable:active {
 .tb-lineage-meta-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  row-gap: 4px;
   gap: 12px;
   font-size: 12px;
   color: var(--muted);
 }
 .tb-lineage-meta-row .tb-lineage-name {
-  flex: 1 1 auto;
+  flex: 1 1 220px;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text);
+}
+.tb-lineage-meta-row > a,
+.tb-lineage-meta-row > button {
+  flex-shrink: 0;
 }
 .tb-lineage-chips {
   display: flex;

@@ -110,7 +110,7 @@ export function SniffSection(props: SniffSectionProps): JSX.Element {
         >
           ☰
         </button>
-        <button className="primary" onClick={onSniff} disabled={sniffing} style={{ whiteSpace: 'nowrap' }}>
+        <button className="primary" onClick={onSniff} disabled={sniffing} style={{ whiteSpace: 'nowrap', minWidth: 96 }}>
           {sniffing ? '嗅探中…' : '嗅探'}
         </button>
         {/* R-44/R-47 — webview-assisted sniff button. Disabled

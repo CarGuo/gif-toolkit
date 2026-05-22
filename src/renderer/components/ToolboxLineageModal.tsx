@@ -96,35 +96,9 @@ function FocusPreview({
   // the user sees the would-be next-step output, not the input.
   const renderPath = trialPath || path || null;
   const kind = detectKind(renderPath);
-  const baseUrl = renderPath ? pathToLocalUrl(renderPath) : '';
-  // Cache-buster — Chromium reuses decoded GIFs by URL; appending a
-  // per-mount counter forces a fresh decoder every focus change. The
-  // protocol handler ignores query strings.
-  const mountSeqRef = useRef(0);
-  const url = useMemo(() => {
-    if (!baseUrl) return '';
-    mountSeqRef.current += 1;
-    return `${baseUrl}?_=${mountSeqRef.current}`;
-  }, [baseUrl]);
+  const url = renderPath ? pathToLocalUrl(renderPath) : '';
   const [errored, setErrored] = useState(false);
-  const videoRef = useRef<HTMLVideoElement | null>(null);
   useEffect(() => { setErrored(false); }, [url]);
-  // <video> reuses the DOM element on src change; explicit load+play
-  // avoids freezing on the previous decoder. play() rejection is OK.
-  useEffect(() => {
-    if (kind !== 'video') return;
-    const el = videoRef.current;
-    if (!el) return;
-    try {
-      el.load();
-      const promise = el.play();
-      if (promise && typeof promise.catch === 'function') {
-        promise.catch(() => { /* autoplay race — ignore */ });
-      }
-    } catch {
-      /* DOM not ready / element gone — ignore */
-    }
-  }, [url, kind]);
   if (!url) {
     return <div className="tb-lineage-preview-empty" aria-hidden="true">🎞️</div>;
   }
@@ -132,7 +106,6 @@ function FocusPreview({
     if (posterDataUrl) {
       return (
         <img
-          key={`poster-${posterDataUrl.length}`}
           className="tb-lineage-preview-media"
           src={posterDataUrl}
           alt="预览静态首帧"
@@ -151,10 +124,6 @@ function FocusPreview({
   if (kind === 'video') {
     return (
       <video
-        // key={url} remounts the element on focus change so the new
-        // src + load()/play() effect actually restarts playback.
-        key={url}
-        ref={videoRef}
         className="tb-lineage-preview-media"
         src={url}
         muted
@@ -166,13 +135,10 @@ function FocusPreview({
       />
     );
   }
-  // gif / webp / image — animated formats loop natively. key={url} +
-  // the cache-buster query string force a brand new DOM node and a
-  // fresh image-pipeline entry, working around the Chromium quirk
-  // where a reused <img> can stay frozen on the last decoded frame.
+  // gif / webp / image — animated formats loop natively now that the
+  // giftk-local:// protocol handler returns a proper Content-Type.
   return (
     <img
-      key={url}
       className="tb-lineage-preview-media"
       src={url}
       alt=""

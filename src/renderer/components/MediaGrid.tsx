@@ -54,8 +54,20 @@ function fileName(u: string): string {
 type ThumbState =
   | { status: 'idle' }
   | { status: 'loading' }
-  | { status: 'ok'; dataUrl: string }
+  | { status: 'ok'; dataUrl: string; playable?: { url: string; kind: 'video' | 'gif' | 'image' } }
   | { status: 'error'; error: string };
+
+/** Mirrors `ToolboxLineageModal#pathToLocalUrl` — kept inline so this
+ *  module stays free of cross-component imports. Encodes the absolute
+ *  path segments for safe `giftk-local://` round-trips. */
+function pathToLocalUrl(absPath: string): string {
+  if (!absPath) return '';
+  const sep = absPath.includes('\\') ? '\\' : '/';
+  const parts = absPath.split(sep).map((seg) => encodeURIComponent(seg));
+  const isWin = /^[a-zA-Z]:/.test(absPath);
+  const joined = isWin ? '/' + parts.filter(Boolean).join('/') : parts.join('/');
+  return `giftk-local://localhost${joined}`;
+}
 
 /**
  * R-26 #1 — While yt-dlp resolves an embed there is no real progress
@@ -134,7 +146,13 @@ export const Thumb: React.FC<{ media: SniffedMedia }> = ({ media }) => {
         .then((r) => {
           if (cancelled) return;
           if (r.status === 'ok' && r.dataUrl) {
-            setState({ status: 'ok', dataUrl: r.dataUrl });
+            // R-WS-90 P5h follow-up — animate GIF/WebP/video by
+            // pointing a live giftk-local:// URL at the cached
+            // source whenever the main process surfaces one.
+            const playable = r.localPath && (r.kind === 'gif' || r.kind === 'video')
+              ? { url: pathToLocalUrl(r.localPath), kind: r.kind }
+              : undefined;
+            setState({ status: 'ok', dataUrl: r.dataUrl, playable });
           } else {
             setState({ status: 'error', error: r.error || 'thumbnail failed' });
           }
@@ -182,7 +200,24 @@ export const Thumb: React.FC<{ media: SniffedMedia }> = ({ media }) => {
           : undefined
       }
     >
-      {state.status === 'ok' && <img src={state.dataUrl} alt="" loading="lazy" />}
+      {state.status === 'ok' && state.playable
+        ? (state.playable.kind === 'video'
+            ? (
+              <video
+                className="card-thumb-media"
+                src={state.playable.url}
+                muted
+                autoPlay
+                loop
+                playsInline
+                preload="auto"
+                poster={state.dataUrl}
+              />
+            )
+            : (
+              <img src={state.playable.url} alt="" loading="lazy" />
+            ))
+        : state.status === 'ok' && <img src={state.dataUrl} alt="" loading="lazy" />}
       {state.status === 'loading' && <div className="thumb-skeleton" />}
       {state.status === 'idle' && <div className="thumb-skeleton dim" />}
       {state.status === 'error' && (

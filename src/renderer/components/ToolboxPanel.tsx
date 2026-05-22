@@ -6,6 +6,19 @@ import { CropBox, type CropRect } from './CropBox';
 import { useToolboxLineage } from './useToolboxLineage';
 import { ToolboxLineageModal } from './ToolboxLineageModal';
 
+/** Convert an absolute disk path to a `giftk-local://` URL the
+ *  renderer's protocol handler can stream. Mirrors
+ *  `ToolboxLineageModal#pathToLocalUrl`; kept here to avoid an
+ *  import cycle (the modal already imports from this file). */
+function pathToGiftkLocal(absPath: string): string {
+  if (!absPath) return '';
+  const sep = absPath.includes('\\') ? '\\' : '/';
+  const parts = absPath.split(sep).map((seg) => encodeURIComponent(seg));
+  const isWin = /^[a-zA-Z]:/.test(absPath);
+  const joined = isWin ? '/' + parts.filter(Boolean).join('/') : parts.join('/');
+  return `giftk-local://localhost${joined}`;
+}
+
 /**
  * R-35 / R-36 — ToolboxPanel.
  *
@@ -829,17 +842,7 @@ function TbHistoryThumb({
   const [hover, setHover] = useState(false);
   const lower = (filePath ?? '').toLowerCase();
   const isAnimated = lower.endsWith('.gif') || lower.endsWith('.webp');
-  const liveUrl = useMemo(() => {
-    // Inline path-to-giftk-local conversion — mirrors
-    // ToolboxLineageModal.pathToLocalUrl. Kept inline to avoid an
-    // import cycle (ToolboxLineageModal already imports from here).
-    if (!filePath) return '';
-    const sep = filePath.includes('\\') ? '\\' : '/';
-    const parts = filePath.split(sep).map((seg) => encodeURIComponent(seg));
-    const isWin = /^[a-zA-Z]:/.test(filePath);
-    const joined = isWin ? '/' + parts.filter(Boolean).join('/') : parts.join('/');
-    return `giftk-local://localhost${joined}`;
-  }, [filePath]);
+  const liveUrl = useMemo(() => (filePath ? pathToGiftkLocal(filePath) : ''), [filePath]);
 
   const showLive = hover && isAnimated && !!liveUrl;
   const src = showLive ? liveUrl : (posterDataUrl ?? '');
@@ -1481,13 +1484,40 @@ export function ToolboxPanel(props: ToolboxPanelProps = {}): JSX.Element {
                 if (m?.nbFrames) metaParts.push(`${m.nbFrames} frames`);
                 metaParts.push(`type: ${fmtType(job.inputPath)}`);
                 if (m?.durationSec) metaParts.push(`length: ${fmtDuration(m.durationSec)}`);
+                // R-WS-90 P5h follow-up — animate row thumbnails for
+                // GIF/WebP/video by serving the on-disk source via
+                // giftk-local:// instead of the static first-frame
+                // dataUrl. Static images keep using previewDataUrl
+                // so the row stays cheap.
+                const lowerInput = job.inputPath.toLowerCase();
+                const inputKind: 'video' | 'gif-or-webp' | 'image' | 'other' = (
+                  /\.(mp4|mov|webm|mkv|m4v)$/.test(lowerInput) ? 'video'
+                    : (lowerInput.endsWith('.gif') || lowerInput.endsWith('.webp')) ? 'gif-or-webp'
+                      : /\.(png|jpe?g|bmp)$/.test(lowerInput) ? 'image'
+                        : 'other'
+                );
+                const liveJobUrl = inputKind === 'gif-or-webp' || inputKind === 'video'
+                  ? pathToGiftkLocal(job.inputPath)
+                  : '';
                 return (
                   <li key={job.id} className={`tb-job-row${p?.status ? ` is-${p.status}` : ''}`}>
                     {/* R-39 — every queued row carries a thumbnail, including
                         pending ones, so the user can identify which clip is
                         which before processing starts. */}
                     <div className="tb-job-thumb" aria-hidden="true">
-                      {m?.previewDataUrl ? (
+                      {liveJobUrl && inputKind === 'video' ? (
+                        <video
+                          src={liveJobUrl}
+                          muted
+                          autoPlay
+                          loop
+                          playsInline
+                          preload="auto"
+                          poster={m?.previewDataUrl}
+                        />
+                      ) : liveJobUrl ? (
+                        <img src={liveJobUrl} alt="" loading="lazy" />
+                      ) : m?.previewDataUrl ? (
                         <img src={m.previewDataUrl} alt="" loading="lazy" />
                       ) : (
                         <span className="tb-job-thumb-fallback">🎞️</span>
