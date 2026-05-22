@@ -25,7 +25,8 @@ import type {
   SessionLogEntry,
   SessionLogSnapshot,
   SessionLogExportFormat,
-  UpdateCheckResult
+  UpdateCheckResult,
+  ChainLineageNodeRow
 } from '../shared/types';
 import type { BuildInfo } from '../shared/buildInfo';
 
@@ -593,6 +594,29 @@ const api = {
       },
       clear(): Promise<void> {
         return ipcRenderer.invoke('db:toolboxChainHistory:clear');
+      }
+    },
+    /* R-LINEAGE-TREE-V1 — persistent lineage tree for toolbox chains.
+     * One row per chain step (a "node") in a tree rooted at the input
+     * file. Renderer reads via `listByChain` / `listChainIds` to render
+     * the lineage panel; the chain runner owns writes (`upsert`).
+     * `removeByChain` / `clear` back the destructive UI affordances. */
+    chainLineageNodes: {
+      listByChain(chainId: string): Promise<ChainLineageNodeRow[]> {
+        return ipcRenderer.invoke('db:chainLineageNodes:listByChain', ensureString(chainId, 'chainId'));
+      },
+      listChainIds(): Promise<string[]> {
+        return ipcRenderer.invoke('db:chainLineageNodes:listChainIds');
+      },
+      upsert(row: ChainLineageNodeRow): Promise<void> {
+        ensureObject(row, 'row');
+        return ipcRenderer.invoke('db:chainLineageNodes:upsert', row);
+      },
+      removeByChain(chainId: string): Promise<void> {
+        return ipcRenderer.invoke('db:chainLineageNodes:removeByChain', ensureString(chainId, 'chainId'));
+      },
+      clear(): Promise<void> {
+        return ipcRenderer.invoke('db:chainLineageNodes:clear');
       }
     },
     /**

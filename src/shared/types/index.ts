@@ -31,3 +31,4 @@ export * from './upload';
 export * from './system';
 export * from './log';
 export * from './update';
+export * from './chainLineage';

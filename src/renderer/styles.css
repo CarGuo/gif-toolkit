@@ -3868,3 +3868,26 @@ button.hist-stage.is-clickable:active {
   line-height: 1.45;
   word-break: break-word;
 }
+
+/* ----------------------- R-LINEAGE-TREE-V1 ----------------------- */
+/* Scrollable wrapper for the SVG tree; large lineages overflow both
+   axes so we let the user pan with native scroll instead of inventing
+   our own zoom UX. */
+.tb-lineage-tree-view {
+  max-height: 360px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  padding: 4px;
+}
+.tb-lineage-tree-view svg {
+  display: block;
+}
+.tb-lineage-tree-view svg text {
+  user-select: none;
+  pointer-events: none;
+}
+.tb-lineage-tree-view svg g[data-testid^="tb-lineage-tree-node-"]:hover rect {
+  filter: brightness(0.97);
+}

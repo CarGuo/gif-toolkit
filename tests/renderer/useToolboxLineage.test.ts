@@ -274,8 +274,12 @@ describe('useToolboxLineage', () => {
     expect(result.current.nodes).toHaveLength(3);
     expect(result.current.focusIndex).toBe(2);
 
-    // user goes back to step1.gif (index 1) and branches into a different kind
-    act(() => { result.current.focusNode('n1'); });
+    // user goes back to step1.gif (index 1) and branches into a different kind.
+    // R-LINEAGE-TREE-V1 — node ids are now `n-${chainIdSlice}-${counter}`
+    // rather than the old `n1` / `n2`. Look up by ordering instead of
+    // a hard-coded literal so the test stays robust to the id format.
+    const step1NodeId = result.current.nodes[1].nodeId;
+    act(() => { result.current.focusNode(step1NodeId); });
     expect(result.current.focusIndex).toBe(1);
     // tail still visible in lineage UNTIL the branch actually fires;
     // see the V2 spec note on "abandoned tail dropped on branch".

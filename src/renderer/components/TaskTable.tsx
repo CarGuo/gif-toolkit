@@ -254,7 +254,19 @@ export const TaskTable: React.FC<Props> = ({ items, progress, onRetry, onForceAl
                 </div>
               ) : null}
             </div>
-            <div className={`size`}>{p.currentSizeMB ? `${p.currentSizeMB.toFixed(2)} MB` : ''}</div>
+            <div className={`size`}>
+              {p.currentSizeMB ? `${p.currentSizeMB.toFixed(2)} MB` : ''}
+              {p.sizeRegression ? (
+                <span
+                  className="size-regression-warn"
+                  data-testid="task-size-regression-warn"
+                  title={`体积反向增加 ${(((p.sizeRegression.ratio) - 1) * 100).toFixed(1)}%（${(p.sizeRegression.beforeBytes / 1024 / 1024).toFixed(2)} MB → ${(p.sizeRegression.afterBytes / 1024 / 1024).toFixed(2)} MB）— 原文件可能已高度优化，原文件仍保留`}
+                  style={{ marginLeft: 4, cursor: 'help' }}
+                >
+                  ⚠️
+                </span>
+              ) : null}
+            </div>
             <div className={`status ${cls}`}>
               <span>{p.status}</span>
               {/* R-43.2 — per-row cancel. Visible only while the task is

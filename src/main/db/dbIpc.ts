@@ -21,6 +21,11 @@
  *   db:toolboxHistory:upsert  (entry) → void
  *   db:toolboxHistory:remove  (id) → void
  *   db:toolboxHistory:clear   ()    → void
+ *   db:chainLineageNodes:listByChain    (chainId) → ChainLineageNodeRow[]
+ *   db:chainLineageNodes:listChainIds   ()        → string[]
+ *   db:chainLineageNodes:upsert         (row)     → void
+ *   db:chainLineageNodes:removeByChain  (chainId) → void
+ *   db:chainLineageNodes:clear          ()        → void
  *   db:bootstrapImport        (BootstrapImportInput) → BootstrapImportResult
  *
  * The repos themselves are synchronous (better-sqlite3 hallmark);
@@ -53,6 +58,10 @@ import {
 import {
   createToolboxChainHistoryRepo
 } from './repos/toolboxChainHistoryRepo';
+import {
+  createChainLineageNodesRepo,
+  type ChainLineageNodeRow
+} from './repos/chainLineageNodesRepo';
 import type { ToolboxChainHistoryEntry } from '../../shared/types';
 import {
   listSessions,
@@ -73,6 +82,7 @@ type RepoCache = {
   sniffHistory?: ReturnType<typeof createSniffHistoryRepo>;
   toolboxHistory?: ReturnType<typeof createToolboxHistoryRepo>;
   toolboxChainHistory?: ReturnType<typeof createToolboxChainHistoryRepo>;
+  chainLineageNodes?: ReturnType<typeof createChainLineageNodesRepo>;
 };
 
 const cache: RepoCache = {};
@@ -96,6 +106,9 @@ function getToolboxHistory() {
 }
 function getToolboxChainHistory() {
   return cache.toolboxChainHistory ?? (cache.toolboxChainHistory = createToolboxChainHistoryRepo(openDb()));
+}
+function getChainLineageNodes() {
+  return cache.chainLineageNodes ?? (cache.chainLineageNodes = createChainLineageNodesRepo(openDb()));
 }
 
 /**
@@ -192,6 +205,27 @@ export function registerDbIpc(): void {
     getToolboxChainHistory().clear();
   }));
 
+  // chain lineage nodes (R-LINEAGE-TREE-V1). Persistent tree of
+  // toolbox-chain steps: one row per node, indexed by chain_id and
+  // (chain_id, parent_node_id). The chain runner owns writes; the
+  // renderer reads via listByChain / listChainIds to render the
+  // lineage tree panel.
+  ipcMain.handle('db:chainLineageNodes:listByChain', safeHandle('chainLineageNodes:listByChain', async (_e, chainId: string) =>
+    getChainLineageNodes().listByChain(chainId)
+  ));
+  ipcMain.handle('db:chainLineageNodes:listChainIds', safeHandle('chainLineageNodes:listChainIds', async () =>
+    getChainLineageNodes().listChainIds()
+  ));
+  ipcMain.handle('db:chainLineageNodes:upsert', safeHandle('chainLineageNodes:upsert', async (_e, row: ChainLineageNodeRow) => {
+    getChainLineageNodes().upsert(row);
+  }));
+  ipcMain.handle('db:chainLineageNodes:removeByChain', safeHandle('chainLineageNodes:removeByChain', async (_e, chainId: string) => {
+    getChainLineageNodes().removeByChain(chainId);
+  }));
+  ipcMain.handle('db:chainLineageNodes:clear', safeHandle('chainLineageNodes:clear', async () => {
+    getChainLineageNodes().clear();
+  }));
+
   // bootstrap import
   ipcMain.handle(
     'db:bootstrapImport',
@@ -254,6 +288,7 @@ export function _resetDbIpcCacheForTests(): void {
   cache.sniffHistory = undefined;
   cache.toolboxHistory = undefined;
   cache.toolboxChainHistory = undefined;
+  cache.chainLineageNodes = undefined;
 }
 
 /**

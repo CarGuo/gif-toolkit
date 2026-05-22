@@ -1,6 +1,6 @@
 import path from 'path';
 import os from 'os';
-import { promises as fsp } from 'fs';
+import { promises as fsp, statSync as fsStatSync } from 'fs';
 import PQueue from 'p-queue';
 import { isAxiosError } from 'axios';
 import type {
@@ -2939,10 +2939,32 @@ export async function startToolboxChain(args: {
           if (p.outputs && p.outputs.length > 0) {
             for (const o of p.outputs) if (!collected.includes(o)) collected.push(o);
           }
+          // R-SIZE-REGRESSION-V1 — 仅在 status==='done' 且 outputs 非空
+          // 时计算 sizeRegression。我们用 stepEmit 而不是 chain 末尾计算
+          // 是因为每个 step 都有自己的 inputPath/outputPath 对,以便树状
+          // 历史里每个节点都能挂自己的反向变大徽标。job.inputPath 是
+          // 闭包里的 cursorInput(本步输入),collected[0] 是本步主产物。
+          // 失败时 statSync 抛错被 try 吞掉,不影响主链路。
+          let sizeRegression: TaskProgress['sizeRegression'] | undefined;
+          if (p.status === 'done' && collected.length > 0) {
+            try {
+              const beforeBytes = fsStatSync(job.inputPath).size;
+              const afterBytes = fsStatSync(collected[0]).size;
+              if (beforeBytes > 0) {
+                const ratio = afterBytes / beforeBytes;
+                if (ratio > 1.05) {
+                  sizeRegression = { beforeBytes, afterBytes, ratio };
+                }
+              }
+            } catch {
+              // file unreachable — drop the field silently.
+            }
+          }
           emit({
             ...p,
             stepIndex: i + 1,
-            totalSteps: steps.length
+            totalSteps: steps.length,
+            ...(sizeRegression ? { sizeRegression } : {})
           });
         };
         emit({ taskId: step.id, status: 'pending', percent: 0, stepIndex: i + 1, totalSteps: steps.length });

@@ -29,6 +29,7 @@ import {
   TOOLBOX_HISTORY_DDL,
   TOOLBOX_CHAIN_HISTORY_DDL,
   SESSION_LOGS_DDL,
+  CHAIN_LINEAGE_NODES_DDL,
   HEAD_VERSIONS,
   type TableFamily
 } from './schema';
@@ -92,6 +93,12 @@ const MIGRATORS: Readonly<Record<TableFamily, ReadonlyArray<Migrator>>> = {
     (db) => {
       db.exec(SESSION_LOGS_DDL);
     }
+  ],
+  chain_lineage_nodes: [
+    () => undefined,
+    (db) => {
+      db.exec(CHAIN_LINEAGE_NODES_DDL);
+    }
   ]
 };
 
@@ -124,7 +131,8 @@ export function runMigrations(db: Database.Database): void {
     'sniff_history',
     'toolbox_history',
     'toolbox_chain_history',
-    'session_logs'
+    'session_logs',
+    'chain_lineage_nodes'
   ];
   for (const family of families) {
     const head = HEAD_VERSIONS[family];

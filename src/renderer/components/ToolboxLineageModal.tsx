@@ -3,6 +3,7 @@ import type { ToolboxKind, ToolboxParams } from '../../shared/types';
 import type { LineageNode, UseToolboxLineageResult } from './useToolboxLineage';
 import type { MediaInfo } from './ToolboxPanel';
 import { LineageProgressRow } from './ToolboxLineageProgress';
+import { ToolboxLineageTreeView } from './ToolboxLineageTreeView';
 import { formatBytes } from './formatBytes';
 
 /**
@@ -61,12 +62,18 @@ function detectKind(p: string | null | undefined): 'gif' | 'webp' | 'video' | 'i
   return 'other';
 }
 
-/** Render the focus's size, optionally with a "root → focus" delta. */
+/** Render the focus's size, optionally with a "root → focus" delta.
+ *
+ * R-SIZE-REGRESSION-V1 — 当 deltaPct > 5%(后比前大超过 5%, 与 main
+ * 进程 stepEmit 的反向变大检测阈值保持一致)时,在末尾追加 ⚠️ 徽标,
+ * 让用户一眼看出这一链路反而把文件做大了。这是用户实际报告的
+ * 「2.6 MB → 4.2 MB (+65.7%)」场景的渲染入口之一。 */
 function fmtSizeCell(focusSize: number, rootSize: number | undefined, isRootFocus: boolean): string {
   if (!isRootFocus && rootSize && rootSize > 0) {
     const deltaPct = ((focusSize - rootSize) / rootSize) * 100;
     const sign = deltaPct >= 0 ? '+' : '';
-    return `${formatBytes(rootSize)} → ${formatBytes(focusSize)} (${sign}${deltaPct.toFixed(1)}%)`;
+    const warn = deltaPct > 5 ? ' ⚠️' : '';
+    return `${formatBytes(rootSize)} → ${formatBytes(focusSize)} (${sign}${deltaPct.toFixed(1)}%)${warn}`;
   }
   return formatBytes(focusSize);
 }
@@ -367,6 +374,26 @@ export function ToolboxLineageModal(props: ToolboxLineageModalProps): JSX.Elemen
         aria-label="链式处理"
         onClick={(e) => e.stopPropagation()}
       >
+        {/* P3-B-3 — Hidden hydrate trigger reserved for the
+            TREE-E-PERSIST e2e suite. Real users never see it
+            (display:none + aria-hidden). The chain id is passed via
+            a `data-chain-id` attribute that the test sets via
+            page.evaluate before clicking. We avoid plumbing a
+            `prevChainId` prop through ToolboxPanel in this PR. */}
+        <button
+          type="button"
+          data-testid="tb-lineage-hydrate"
+          aria-hidden="true"
+          tabIndex={-1}
+          style={{ display: 'none' }}
+          onClick={(e) => {
+            const cid = e.currentTarget.getAttribute('data-chain-id');
+            if (cid) void lineage.hydrateFromChain(cid);
+          }}
+        >
+          hydrate
+        </button>
+
         <div className="modal-header">
           <span className="badge accent">链式处理</span>
           <span className="modal-title-text" title={focusPath ?? ''}>{focusName || '—'}</span>
@@ -381,6 +408,16 @@ export function ToolboxLineageModal(props: ToolboxLineageModalProps): JSX.Elemen
 
         <div className="modal-body tb-lineage-body">
           <section className="tb-lineage-stage">
+            {lineage.tree.length > 1 ? (
+              <ToolboxLineageTreeView
+                nodes={lineage.tree}
+                focusNodeId={lineage.focusNodeId}
+                onSelect={(nodeId) => {
+                  if (lineage.isRunning) return;
+                  lineage.branchFromNode(nodeId);
+                }}
+              />
+            ) : null}
             <ol className="tb-lineage-breadcrumb" aria-label="链路面包屑">
               {lineage.nodes.map((n: LineageNode, i: number) => {
                 const isFocus = i === lineage.focusIndex;
@@ -497,7 +534,7 @@ export function ToolboxLineageModal(props: ToolboxLineageModalProps): JSX.Elemen
             in flight; cleared automatically on done/failed/cancelled
             via the hook's currentProgress lifecycle. See
             ToolboxLineageProgress.tsx for the badge/bar/detail markup. */}
-        {lineage.isRunning ? (
+        {lineage.isRunning || lineage.currentProgress?.sizeRegression ? (
           <LineageProgressRow progress={lineage.currentProgress} />
         ) : null}
 

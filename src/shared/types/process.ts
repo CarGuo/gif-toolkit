@@ -191,6 +191,24 @@ export interface TaskProgress {
    *  modal so users see the complete trail rather than the first 2 only.
    *  Empty / undefined means no swallowed failures. */
   phaseFailures?: string[];
+  /**
+   * R-SIZE-REGRESSION-V1 — 当一步处理产出体积比输入体积**反而变大**
+   * 超过容忍阈值（5%）时,main 在 done emit 里携带这个负面信号,
+   * 让渲染端贴一个 ⚠️ 徽标给用户。这个字段只在 status==='done' 且
+   * (after / before) > 1.05 时存在;before/after 单位都是 bytes。
+   *
+   * 经典反例:已被 Photoshop 高度优化的源 gif 经过 ffmpeg 解码 ->
+   * crop -> 重编码后,palette / LZW 缓存重置 -> 体积反而上升 65%。
+   * 我们不自动 fallback,只把数据透出来让用户决定。
+   */
+  sizeRegression?: {
+    /** Source file bytes (the step's inputPath). */
+    beforeBytes: number;
+    /** Output file bytes (collected[0]). */
+    afterBytes: number;
+    /** afterBytes / beforeBytes; always > 1.05 when this field exists. */
+    ratio: number;
+  };
 }
 
 export interface ProcessTask {

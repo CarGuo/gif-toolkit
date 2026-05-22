@@ -1,66 +1,45 @@
 /**
- * R-TB-CHAIN-V2 Phase 2.1 — useToolboxLineage.
+ * R-LINEAGE-TREE-V1 — useToolboxLineage (tree model).
  *
- * Why this exists (and how it differs from the reverted v1)
- * --------------------------------------------------------
- * The first attempt at the chain feature modeled it as "user
- * pre-configures N steps then submits as one batch with optional
- * pause-at-step", which mismatched the user's actual mental model:
- * they want to perform ONE step, *see the result*, and only then
- * decide what comes next, like ezgif's "edit this gif further" flow.
+ * Why this rewrite (and how it differs from R-TB-CHAIN-V2 Phase 2.1)
+ * -----------------------------------------------------------------
+ * The original lineage hook modeled the chain as a *linear* breadcrumb
+ * (`nodes: LineageNode[]` + `focusIndex`) and dropped the abandoned
+ * tail whenever the user branched off an earlier step. That worked
+ * for the MVP "one path through the tree" UX but fundamentally cannot
+ * represent forks, which the persistence layer (`chain_lineage_nodes`)
+ * and the upcoming TreeView panel both require.
  *
- * useToolboxLineage owns the renderer-side state for that
- * progressive flow:
+ * This rewrite re-grounds the renderer state on a *tree*:
  *
- *   1. The lineage starts as a single root node holding the
- *      original input path (kind=null, params={}).
- *   2. The user picks a kind (e.g. 'gif-resize') with parameters
- *      and calls runNextStep(kind, params); the hook fires a
- *      single-step `startToolboxChain` IPC, listens on the global
- *      `process:progress` channel for that chainId's terminal
- *      emit, and appends a new LineageNode pointing at the produced
- *      artifact.
- *   3. The user can step backwards by calling focusNode(prevId);
- *      the next runNextStep then *branches* off that earlier node
- *      and discards the abandoned tail (linear breadcrumb model
- *      per the V2 spec — no tree visualisation in MVP).
- *   4. nextKindOptions is derived from the focus node's path
- *      extension matched against TOOLBOX_INPUT_EXTENSIONS, so the
- *      UI can render only chips that can actually consume the
- *      current artifact (e.g. video-to-* doesn't appear when the
- *      focus is already a .gif).
+ *   - Internal source of truth is `tree: LineageTreeNode[]`, a flat
+ *     array of nodes whose shape matches the SQLite row exactly so
+ *     `hydrateFromChain` can rehydrate without lossy projection.
+ *   - The legacy `nodes` field is preserved as a derived value: the
+ *     ancestor chain from root → focus (inclusive). That keeps the
+ *     existing breadcrumb consumer (ToolboxLineageModal) bit-for-bit
+ *     compatible while the new TreeView reads `tree` for the full
+ *     graph.
+ *   - `focusIndex` is also derived: index of the focused node within
+ *     the derived `nodes` ancestor chain.
+ *   - Branching (`focusNode` + `runNextStep` on a non-tail node) no
+ *     longer drops abandoned siblings — they stay in `tree` and on
+ *     disk so the user can navigate back to a fork later.
  *
- * Crop pause-at-step is intentionally NOT used here. In the
- * progressive model, the user already chose "Crop" deliberately
- * before runNextStep; the renderer collects the rect via the same
- * CropBox the batch path uses and passes it inline as params. The
- * underlying main-process pause logic stays available for the
- * legacy IPC contract but the renderer never triggers it.
+ * Persistence (fire-and-forget)
+ * -----------------------------
+ * Every state-changing transition (`pending` insert on runNextStep
+ * start; `done` / `failed` / `aborted` on terminal emit / cancel /
+ * reset-while-busy) is mirrored to
+ * `window.giftk.db.chainLineageNodes.upsert` with `.catch(() => undefined)`
+ * so the UI is never blocked by disk I/O. The synthetic root is NOT
+ * persisted — every chain has exactly one root and writing it would
+ * pollute `listChainIds()`.
  *
- * Concurrency
- * -----------
- * Only one runNextStep can be in-flight at a time; the hook
- * rejects subsequent calls with a clear "step already running"
- * error so the UI can disable the chips while a run is queued.
- * This matches the "look at result before choosing next" workflow
- * — running two steps in parallel would invalidate the lineage
- * concept anyway.
- *
- * Failure handling
- * ----------------
- * - When the IPC call rejects synchronously (e.g.
- *   validateChainCompatibility veto on a video kind against a
- *   .gif focus), `error` is set and `runNextStep` rejects with
- *   the same Error.
- * - When a step fails post-start, the terminal progress emit's
- *   error/errorCode are surfaced through `error` and the
- *   returned promise rejects. The lineage is NOT mutated — the
- *   user can simply pick a different kind/params and try again
- *   from the same focus node.
- * - cancel() walks the in-flight chainId through the existing
- *   `toolbox:cancelChain` IPC; the awaiting `runNextStep`
- *   rejects with a 'cancelled' message. Like the failure path
- *   above, no node is appended.
+ * Pure helpers (id generation, ext sniffing, ancestor walks, row
+ * decoration / SQL projection, hydrate-focus picker) live in
+ * `useToolboxLineageHelpers.ts` so this file stays focused on the
+ * stateful orchestration and the IPC listener wiring.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
@@ -68,55 +47,65 @@ import type {
   ToolboxParams,
   TaskProgress
 } from '../../shared/types';
-import { TOOLBOX_INPUT_EXTENSIONS } from '../../shared/types/toolbox';
+import type {
+  ChainLineageNodeRow,
+  ChainLineageNodeStatus
+} from '../../shared/types/chainLineage';
+import {
+  type LineageTreeNode,
+  type LineageNode,
+  makeChainId,
+  makeIpcChainId,
+  deriveNextKinds,
+  asLineageNode,
+  ancestorsTo,
+  toSqlRow,
+  fromSqlRow,
+  pickHydrateFocus,
+  maxNumericSuffix,
+  makeRootNode
+} from './useToolboxLineageHelpers';
 
-export interface LineageNode {
-  /** Stable identifier within this lineage instance. The first
-   *  node is always 'root'; derived nodes use 'n1', 'n2', ... in
-   *  arrival order so URL-style breadcrumbs are easy to encode. */
-  nodeId: string;
-  /** Absolute filesystem path. Root = original input; derived
-   *  nodes = produced artifact (gif/webp/mp4 depending on kind). */
-  path: string;
-  /** Kind that produced this node. null only for the root. */
-  kind: ToolboxKind | null;
-  /** Snapshot of the params used at this step. {} for root. */
-  params: ToolboxParams;
-  /** chainId of the IPC call that produced this node. null for root. */
-  chainId: string | null;
-}
+export type { LineageTreeNode, LineageNode } from './useToolboxLineageHelpers';
 
 export interface UseToolboxLineageResult {
+  /** Backwards-compatible: ancestor chain from root → focus. */
   nodes: readonly LineageNode[];
+  /** Backwards-compatible: index of focus within `nodes`. */
   focusIndex: number;
-  /** Convenience accessor for `nodes[focusIndex]`. null only when
-   *  the lineage has not been initialised (reset never called). */
+  /** Convenience accessor for the focus node, or null when uninitialised. */
   focus: LineageNode | null;
   /** True iff a runNextStep call is mid-flight. */
   isRunning: boolean;
   /** Last error message; cleared by reset/runNextStep/cancel. */
   error: string | null;
-  /** Initialise (or re-initialise) the lineage from a single input
-   *  path. Drops any previous nodes/error/in-flight state — caller
-   *  must wait for cancel() before reset() if a run is queued. */
+  /** Initialise (or re-initialise) the lineage from a single input path. */
   reset: (inputPath: string) => void;
-  /** Move focus to nodeId. Branching from a non-tail focus drops
-   *  the abandoned tail (linear breadcrumb model). When the user
-   *  clicks the current focus this is a no-op. */
+  /** Move focus to nodeId. Tree model: does NOT drop siblings. */
   focusNode: (nodeId: string) => void;
-  /** Run a single step from `nodes[focusIndex]`. Resolves with the
-   *  appended node on 'done'; rejects on failure / cancel. */
+  /** Run a single step from the current focus. Resolves with the produced node. */
   runNextStep: (kind: ToolboxKind, params: ToolboxParams) => Promise<LineageNode>;
   /** Cancel the in-flight step. No-op when idle. */
   cancel: () => Promise<void>;
-  /** Compatible next-step kinds for the current focus, derived
-   *  from the focus path's extension via TOOLBOX_INPUT_EXTENSIONS. */
+  /** Compatible next-step kinds for the current focus. */
   nextKindOptions: readonly ToolboxKind[];
-  /** Latest non-terminal `process:progress` event for the in-flight
-   *  step, or null when idle. The lineage modal renders this as a
-   *  inline progress bar with status badge + secondary text, mirroring
-   *  the home-page TaskTable. Cleared on done/failed/cancel/reset. */
+  /** Latest non-terminal `process:progress` event for the in-flight step. */
   currentProgress: TaskProgress | null;
+
+  // R-LINEAGE-TREE-V1 additions —————————————————————————————
+
+  /** Flat list of every node in the current tree (in createdAt asc order). */
+  tree: readonly LineageTreeNode[];
+  /** Stable id for the lineage instance (one per reset()). null before reset. */
+  chainId: string | null;
+  /** Currently focused node id, or null when uninitialised. */
+  focusNodeId: string | null;
+  /** root → focus ancestor chain (inclusive). Same data as `nodes`. */
+  pathToFocus: readonly LineageTreeNode[];
+  /** Rehydrate the tree from SQLite for a saved chainId. No-op if not found. */
+  hydrateFromChain: (chainId: string) => Promise<void>;
+  /** Explicit fork-point selection. Alias for focusNode with clearer intent. */
+  branchFromNode: (nodeId: string) => void;
 }
 
 interface ToolboxBridge {
@@ -135,121 +124,151 @@ interface ToolboxBridge {
   onProgress(cb: (p: TaskProgress) => void): () => void;
 }
 
+interface DbBridge {
+  chainLineageNodes?: {
+    listByChain(chainId: string): Promise<ChainLineageNodeRow[]>;
+    upsert(row: ChainLineageNodeRow): Promise<void>;
+  };
+}
+
 function getBridge(): ToolboxBridge {
   const w = window as unknown as { giftk?: ToolboxBridge };
   if (!w.giftk) throw new Error('toolbox lineage: window.giftk preload bridge missing');
   return w.giftk;
 }
 
-function makeChainId(): string {
-  return `tblineage-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-/** Lowercase extension including dot, or '' when path has none. */
-function extOf(p: string): string {
-  const slash = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
-  const base = slash >= 0 ? p.slice(slash + 1) : p;
-  const dot = base.lastIndexOf('.');
-  return dot >= 0 ? base.slice(dot).toLowerCase() : '';
-}
-
-/** Compute kinds whose TOOLBOX_INPUT_EXTENSIONS includes the given ext. */
-function deriveNextKinds(focusPath: string | null): ToolboxKind[] {
-  if (!focusPath) return [];
-  const ext = extOf(focusPath);
-  if (!ext) return [];
-  const out: ToolboxKind[] = [];
-  for (const k of Object.keys(TOOLBOX_INPUT_EXTENSIONS) as ToolboxKind[]) {
-    if (TOOLBOX_INPUT_EXTENSIONS[k].includes(ext)) out.push(k);
+function getDbBridge(): DbBridge['chainLineageNodes'] | null {
+  try {
+    const w = window as unknown as { giftk?: { db?: DbBridge } };
+    return w.giftk?.db?.chainLineageNodes ?? null;
+  } catch {
+    return null;
   }
-  return out;
+}
+
+/** Fire-and-forget upsert; never blocks the UI, never throws. */
+function persistRow(row: LineageTreeNode): void {
+  const repo = getDbBridge();
+  if (!repo) return;
+  void repo.upsert(toSqlRow(row)).catch(() => undefined);
+}
+
+/** Build a terminal-state row reusing the pending node's fixed fields. */
+function buildTerminalRow(
+  pending: PendingStep,
+  status: ChainLineageNodeStatus,
+  outputPath: string | null,
+  sizeAfter: number | null,
+  sizeRegressionRatio: number | null
+): LineageTreeNode {
+  return {
+    nodeId: pending.nodeId,
+    parentNodeId: pending.parentNodeId,
+    chainId: pending.treeChainId,
+    ipcChainId: pending.ipcChainId,
+    kind: pending.kind,
+    params: pending.params,
+    inputPath: pending.inputPath,
+    outputPath,
+    sizeBefore: pending.sizeBefore,
+    sizeAfter,
+    sizeRegressionRatio,
+    status,
+    createdAt: pending.createdAt,
+    doneAt: Date.now()
+  };
+}
+
+interface PendingStep {
+  ipcChainId: string;
+  treeChainId: string;
+  nodeId: string;
+  parentNodeId: string;
+  kind: ToolboxKind;
+  params: ToolboxParams;
+  inputPath: string;
+  sizeBefore: number | null;
+  createdAt: number;
+  resolve: (n: LineageNode) => void;
+  reject: (err: Error) => void;
 }
 
 export function useToolboxLineage(): UseToolboxLineageResult {
-  const [nodes, setNodes] = useState<LineageNode[]>([]);
-  const [focusIndex, setFocusIndex] = useState<number>(-1);
+  const [tree, setTree] = useState<LineageTreeNode[]>([]);
+  const [chainId, setChainId] = useState<string | null>(null);
+  const [focusNodeId, setFocusNodeId] = useState<string | null>(null);
   const [isRunning, setIsRunning] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
-  // R-COMPRESS-V1 #4 follow-up — capture the running progress so the
-  // ToolboxLineageModal can render a real progress bar + status text
-  // identical to the home-page TaskTable. Previously the modal only
-  // rendered "处理中…" inside the primary button which made long
-  // video-to-gif chains feel like the app had hung. Cleared whenever
-  // the in-flight step terminates (done/failed/cancelled) or the
-  // lineage is reset.
   const [currentProgress, setCurrentProgress] = useState<TaskProgress | null>(null);
 
-  // chainId of the in-flight runNextStep, used by cancel() to
-  // address the right IPC and by the progress listener to ignore
-  // unrelated chain emits (other panels / batch pipeline).
-  const inflightChainIdRef = useRef<string | null>(null);
-  // Counter for derived node ids (n1, n2, ...). Reset on reset().
-  const nextIdCounterRef = useRef<number>(0);
-  // Stable ref to nodes[] for the global progress listener — useState
-  // closure would otherwise capture a stale slice.
-  const nodesRef = useRef<LineageNode[]>([]);
-  useEffect(() => { nodesRef.current = nodes; }, [nodes]);
-  // Same trick for focusIndex — runNextStep needs the latest value
-  // when it appends, but the closure captured by the IPC promise
-  // resolves AFTER React has potentially re-rendered.
-  const focusIndexRef = useRef<number>(-1);
-  useEffect(() => { focusIndexRef.current = focusIndex; }, [focusIndex]);
+  // Per-step IPC chainId of the in-flight runNextStep — used by cancel()
+  // and the progress listener for routing. Distinct from the tree-wide
+  // chainId (which never changes mid-step).
+  const inflightIpcChainIdRef = useRef<string | null>(null);
+  const nodeCounterRef = useRef<number>(0);
+  // Stable refs for the global progress listener — useState closures
+  // capture stale slices and would mis-route emits otherwise.
+  const treeRef = useRef<LineageTreeNode[]>([]);
+  useEffect(() => { treeRef.current = tree; }, [tree]);
+  const focusNodeIdRef = useRef<string | null>(null);
+  useEffect(() => { focusNodeIdRef.current = focusNodeId; }, [focusNodeId]);
+  const chainIdRef = useRef<string | null>(null);
+  useEffect(() => { chainIdRef.current = chainId; }, [chainId]);
 
-  // Pending step descriptor; used by the progress listener to know
-  // which terminal emit to act on and which promise to settle.
-  type PendingStep = {
-    chainId: string;
-    kind: ToolboxKind;
-    params: ToolboxParams;
-    branchFromIndex: number;
-    resolve: (n: LineageNode) => void;
-    reject: (err: Error) => void;
-  };
   const pendingRef = useRef<PendingStep | null>(null);
 
   const reset = useCallback((inputPath: string): void => {
-    // Issue R1/R6 — if a step is still in-flight (caller violated the
-    // "cancel first" contract), fire-and-forget cancelToolboxChain so
-    // the main process doesn't keep churning out an orphaned artifact.
-    const stragglerChainId = inflightChainIdRef.current;
+    // Stragglers: a step still in-flight when the caller resets must
+    // be cancelled at the IPC layer and rejected on the JS side, or the
+    // promise dangles and the main process keeps churning out an
+    // orphaned artifact.
+    const stragglerIpcId = inflightIpcChainIdRef.current;
     const stragglerPending = pendingRef.current;
-    inflightChainIdRef.current = null;
+    inflightIpcChainIdRef.current = null;
     pendingRef.current = null;
-    if (stragglerChainId) {
+    if (stragglerIpcId) {
       try {
         const bridge = getBridge();
-        void bridge.cancelToolboxChain(stragglerChainId).catch(() => { /* best-effort */ });
+        void bridge.cancelToolboxChain(stragglerIpcId).catch(() => undefined);
       } catch { /* no bridge — test env */ }
     }
     if (stragglerPending) {
+      const aborted = buildTerminalRow(stragglerPending, 'aborted', null, null, null);
+      persistRow(aborted);
       stragglerPending.reject(new Error('lineage reset: in-flight step abandoned'));
     }
-    setNodes([{ nodeId: 'root', path: inputPath, kind: null, params: {}, chainId: null }]);
-    setFocusIndex(0);
+
+    const newChainId = makeChainId();
+    const now = Date.now();
+    const rootNode = makeRootNode(newChainId, inputPath, now);
+    setTree([rootNode]);
+    setChainId(newChainId);
+    setFocusNodeId('root');
     setIsRunning(false);
     setError(null);
     setCurrentProgress(null);
-    nextIdCounterRef.current = 0;
+    nodeCounterRef.current = 0;
+    // Intentionally do NOT persist the root — see header comment.
   }, []);
 
   const focusNode = useCallback((nodeId: string): void => {
-    setNodes((prev) => {
-      const idx = prev.findIndex((n) => n.nodeId === nodeId);
-      if (idx < 0) return prev;
-      setFocusIndex(idx);
+    setTree((prev) => {
+      if (!prev.some((n) => n.nodeId === nodeId)) return prev;
+      setFocusNodeId(nodeId);
       return prev;
     });
   }, []);
 
+  // R-LINEAGE-TREE-V1 — `branchFromNode` is a semantic alias for
+  // focusNode. Keeping the two names lets callers express intent
+  // ("I'm forking off this node") without polluting the type system.
+  const branchFromNode = focusNode;
+
   const cancel = useCallback(async (): Promise<void> => {
-    // Issue R6 — snapshot and clear refs synchronously BEFORE awaiting
-    // the IPC. This way any progress emit that arrives during the
-    // await is filtered out at the listener's `if (!pending) return`
-    // gate, so the chain can't append a node we've decided to abandon.
-    const id = inflightChainIdRef.current;
+    const id = inflightIpcChainIdRef.current;
     const pending = pendingRef.current;
     if (!id) return;
-    inflightChainIdRef.current = null;
+    inflightIpcChainIdRef.current = null;
     pendingRef.current = null;
     setIsRunning(false);
     setCurrentProgress(null);
@@ -257,129 +276,143 @@ export function useToolboxLineage(): UseToolboxLineageResult {
       const bridge = getBridge();
       await bridge.cancelToolboxChain(id);
     } catch {
-      // best-effort
+      // best-effort — main process IPC may already be gone
     }
     if (pending) {
+      const aborted = buildTerminalRow(pending, 'aborted', null, null, null);
+      persistRow(aborted);
+      // Update the in-memory node too so a future TreeView shows the
+      // aborted state and the legacy `nodes` ancestor chain doesn't
+      // misleadingly include a stuck 'pending' row.
+      setTree((prev) => prev.map((n) => n.nodeId === pending.nodeId ? aborted : n));
       pending.reject(new Error('cancelled'));
     }
   }, []);
 
-  // Single global subscription — one listener per hook instance,
-  // filters by inflightChainIdRef so stray emits from elsewhere are
-  // ignored. Mounted lazily on first render and torn down on unmount.
+  // Progress listener — single global subscription per hook instance,
+  // filtered by `pending.ipcChainId` so stray emits from elsewhere are
+  // ignored.
   useEffect(() => {
     let bridge: ToolboxBridge;
     try {
       bridge = getBridge();
     } catch {
-      // No bridge (e.g. test env without preload mock) — caller will
-      // see runNextStep fail with the same error when invoked.
+      // No bridge (e.g. test env without preload mock) — runNextStep
+      // will surface the same error when invoked.
       return;
     }
     const off = bridge.onProgress((p: TaskProgress) => {
       const pending = pendingRef.current;
       if (!pending) return;
-      // Issue R7 — chain runner emits taskId === stepId === `${chainId}-s1`
-      // exactly. Use strict equality instead of startsWith so a longer
-      // chainId that happens to share a prefix can't ever be misrouted.
       if (typeof p.taskId !== 'string') return;
-      if (p.taskId !== `${pending.chainId}-s1`) return;
-      const status = p.status;
-      if (status === 'done') {
-        const out = (p.outputs ?? [])[0];
-        if (!out) {
-          pending.reject(new Error('done emit had no outputs'));
-          pendingRef.current = null;
-          inflightChainIdRef.current = null;
-          setIsRunning(false);
-          setCurrentProgress(null);
-          setError('done emit had no outputs');
-          return;
-        }
-        nextIdCounterRef.current += 1;
-        const newNode: LineageNode = {
-          nodeId: `n${nextIdCounterRef.current}`,
-          path: out,
-          kind: pending.kind,
-          params: pending.params,
-          chainId: pending.chainId
-        };
-        setNodes((prev) => {
-          // Branch from pending.branchFromIndex: drop everything
-          // after that index, then append the new node.
-          const head = prev.slice(0, pending.branchFromIndex + 1);
-          return [...head, newNode];
-        });
-        setFocusIndex(pending.branchFromIndex + 1);
-        setIsRunning(false);
-        setCurrentProgress(null);
-        inflightChainIdRef.current = null;
-        pendingRef.current = null;
-        pending.resolve(newNode);
-      } else if (status === 'failed' || status === 'cancelled') {
-        const msg = p.error ?? `step ${status}`;
-        pending.reject(new Error(msg));
-        pendingRef.current = null;
-        inflightChainIdRef.current = null;
-        setIsRunning(false);
-        setCurrentProgress(null);
-        setError(msg);
-      } else if (status === 'awaiting-input') {
-        // R-TB-CHAIN-LINEAGE-RESUME-V1 — the main-process chain runner
-        // pauses on PAUSING_KINDS (currently just 'crop') and waits for
-        // a follow-up `toolbox:resumeChain` IPC carrying the rect.
-        //
-        // The lineage modal is a single-step driver: by the time the
-        // user clicks "处理", the cropX/Y/W/H have already been baked
-        // into the params we sent to startToolboxChain. There is no
-        // additional UI gate to clear, so just resume immediately with
-        // an empty patch (params already complete) and unblock ffmpeg.
-        //
-        // Without this hop the modal sits forever at 0% / "awaiting-
-        // input" while the user thinks the app froze.
-        const pendingChainId = pending.chainId;
-        let bridge2: ToolboxBridge | null = null;
-        try { bridge2 = getBridge(); } catch { bridge2 = null; }
-        if (bridge2) {
-          // stepIndex on the wire is 1-based for humans; the resume IPC
-          // expects 0-based. Lineage chains are always 1 step long, so
-          // 0 is correct regardless of what the wire says, but keep the
-          // payload defensive in case that invariant ever loosens.
-          const wireIdx = typeof p.stepIndex === 'number' ? p.stepIndex : 1;
-          const zeroBased = Math.max(0, wireIdx - 1);
-          bridge2.resumeToolboxChain(pendingChainId, zeroBased, {}).catch((err) => {
-            // Surface the resume failure as a step-level error so the
-            // modal stops spinning instead of pretending the work is
-            // still progressing.
-            const msg = err instanceof Error ? err.message : String(err);
-            const cur = pendingRef.current;
-            if (cur && cur.chainId === pendingChainId) {
-              cur.reject(new Error(`resume failed: ${msg}`));
-              pendingRef.current = null;
-            }
-            if (inflightChainIdRef.current === pendingChainId) {
-              inflightChainIdRef.current = null;
-            }
-            setIsRunning(false);
-            setCurrentProgress(null);
-            setError(`resume failed: ${msg}`);
-          });
-        }
-        // Keep the (stalled) progress visible until ffmpeg starts
-        // actually emitting non-zero percents.
-        setCurrentProgress(p);
-      } else {
-        // Intermediate status (downloading / probing / segmenting /
-        // converting / compressing / pending). Store the latest snapshot
-        // so the modal can render a real progress bar + secondary text.
-        // We store the entire TaskProgress object so the modal can pull
-        // percent / message / substep / stepIndex / segmentIndex /
-        // currentSizeMB / elapsedMs without coupling to the schema here.
-        setCurrentProgress(p);
-      }
+      // Strict equality keeps prefix-collisions impossible (R-TB-CHAIN R7).
+      if (p.taskId !== `${pending.ipcChainId}-s1`) return;
+      handleProgressEmit(p, pending);
     });
     return () => { off(); };
+    // The handler closes over local setters which are stable across
+    // renders, so we don't list them in deps. The pending lookup goes
+    // through the ref and is always current.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  function clearInflight(): void {
+    pendingRef.current = null;
+    inflightIpcChainIdRef.current = null;
+    setIsRunning(false);
+  }
+
+  function handleProgressEmit(p: TaskProgress, pending: PendingStep): void {
+    const status = p.status;
+    if (status === 'done') {
+      handleDoneEmit(p, pending);
+    } else if (status === 'failed' || status === 'cancelled') {
+      handleFailureEmit(p, pending, status);
+    } else if (status === 'awaiting-input') {
+      handleAwaitingInputEmit(p, pending);
+    } else {
+      // Intermediate status — just stash the latest snapshot for the UI.
+      setCurrentProgress(p);
+    }
+  }
+
+  function handleDoneEmit(p: TaskProgress, pending: PendingStep): void {
+    const out = (p.outputs ?? [])[0];
+    if (!out) {
+      const failed = buildTerminalRow(pending, 'failed', null, null, null);
+      persistRow(failed);
+      setTree((prev) => prev.map((n) => n.nodeId === pending.nodeId ? failed : n));
+      pending.reject(new Error('done emit had no outputs'));
+      clearInflight();
+      setCurrentProgress(null);
+      setError('done emit had no outputs');
+      return;
+    }
+    const reg = p.sizeRegression;
+    const sizeAfter = typeof reg?.afterBytes === 'number' ? reg.afterBytes : null;
+    const sizeBefore = typeof reg?.beforeBytes === 'number' ? reg.beforeBytes : pending.sizeBefore;
+    const ratio = typeof reg?.ratio === 'number'
+      ? reg.ratio
+      : (sizeAfter && sizeBefore && sizeBefore > 0 ? sizeAfter / sizeBefore : null);
+    const doneRow: LineageTreeNode = {
+      ...buildTerminalRow(pending, 'done', out, sizeAfter, ratio),
+      sizeBefore
+    };
+    persistRow(doneRow);
+    // Update the existing pending node in place (do NOT append) so the
+    // tree shape stays stable across the pending → done transition.
+    setTree((prev) => prev.map((n) => n.nodeId === pending.nodeId ? doneRow : n));
+    setFocusNodeId(pending.nodeId);
+    // R-SIZE-REGRESSION-V1 — keep the last frame visible so the row
+    // badge persists across the run.
+    setCurrentProgress(p.sizeRegression ? p : null);
+    clearInflight();
+    pending.resolve(asLineageNode(doneRow));
+  }
+
+  function handleFailureEmit(
+    p: TaskProgress,
+    pending: PendingStep,
+    status: 'failed' | 'cancelled'
+  ): void {
+    const msg = p.error ?? `step ${status}`;
+    const finalStatus: ChainLineageNodeStatus = status === 'failed' ? 'failed' : 'aborted';
+    const failed = buildTerminalRow(pending, finalStatus, null, null, null);
+    persistRow(failed);
+    setTree((prev) => prev.map((n) => n.nodeId === pending.nodeId ? failed : n));
+    pending.reject(new Error(msg));
+    clearInflight();
+    setCurrentProgress(null);
+    setError(msg);
+  }
+
+  function handleAwaitingInputEmit(p: TaskProgress, pending: PendingStep): void {
+    // R-TB-CHAIN-LINEAGE-RESUME-V1 — auto-resume on PAUSING_KINDS.
+    // The lineage modal bakes crop rect into params before the IPC
+    // fires, so we never need a follow-up UI gate.
+    const pendingIpcId = pending.ipcChainId;
+    let bridge2: ToolboxBridge | null = null;
+    try { bridge2 = getBridge(); } catch { bridge2 = null; }
+    if (bridge2) {
+      const wireIdx = typeof p.stepIndex === 'number' ? p.stepIndex : 1;
+      const zeroBased = Math.max(0, wireIdx - 1);
+      bridge2.resumeToolboxChain(pendingIpcId, zeroBased, {}).catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        const cur = pendingRef.current;
+        if (cur && cur.ipcChainId === pendingIpcId) {
+          cur.reject(new Error(`resume failed: ${msg}`));
+          pendingRef.current = null;
+        }
+        if (inflightIpcChainIdRef.current === pendingIpcId) {
+          inflightIpcChainIdRef.current = null;
+        }
+        setIsRunning(false);
+        setCurrentProgress(null);
+        setError(`resume failed: ${msg}`);
+      });
+    }
+    setCurrentProgress(p);
+  }
 
   const runNextStep = useCallback(
     async (kind: ToolboxKind, params: ToolboxParams): Promise<LineageNode> => {
@@ -388,37 +421,62 @@ export function useToolboxLineage(): UseToolboxLineageResult {
         setError(e.message);
         throw e;
       }
-      const focus = nodesRef.current[focusIndexRef.current];
-      if (!focus) {
+      const focusId = focusNodeIdRef.current;
+      const focusNodeOnTree = focusId ? treeRef.current.find((n) => n.nodeId === focusId) ?? null : null;
+      const treeChainId = chainIdRef.current;
+      if (!focusNodeOnTree || !treeChainId) {
         const e = new Error('lineage not initialised: call reset(inputPath) first');
         setError(e.message);
         throw e;
       }
-      const branchFromIndex = focusIndexRef.current;
-      const chainId = makeChainId();
-      const stepId = `${chainId}-s1`;
+      const ipcChainId = makeIpcChainId();
+      const stepId = `${ipcChainId}-s1`;
+      nodeCounterRef.current += 1;
+      const nodeId = `n-${treeChainId.slice(-6)}-${nodeCounterRef.current}`;
+      const focusPath = focusNodeOnTree.outputPath ?? focusNodeOnTree.inputPath;
+      const createdAt = Date.now();
+
+      const pendingNode: LineageTreeNode = {
+        nodeId,
+        parentNodeId: focusNodeOnTree.nodeId,
+        chainId: treeChainId,
+        ipcChainId,
+        kind,
+        params,
+        inputPath: focusPath,
+        outputPath: null,
+        sizeBefore: null,
+        sizeAfter: null,
+        sizeRegressionRatio: null,
+        status: 'pending',
+        createdAt,
+        doneAt: null
+      };
+
       setError(null);
       setIsRunning(true);
       setCurrentProgress(null);
-      inflightChainIdRef.current = chainId;
-      // Issue R5 — keep local references to the promise reject + the
-      // pending entry so the synchronous-IPC-failure path doesn't have
-      // to re-read pendingRef (which the listener might have already
-      // cleared) and doesn't need the unsound `as unknown as` cast.
-      //
-      // R-TB-CHAIN-V2.6 — explicit type annotation on `localReject`:
-      // TypeScript's CFA does NOT know that the Promise constructor
-      // callback runs synchronously, so it narrows `localReject` to
-      // `null` for the entire `catch` block. The annotation widens it
-      // to the full union, mirroring the actual runtime shape.
+      // Insert the pending node into the tree immediately so the UI
+      // can render a 'pending' indicator without waiting for the IPC
+      // round-trip. Stable createdAt-asc ordering helps TreeView
+      // render left-to-right deterministically.
+      setTree((prev) => [...prev, pendingNode]);
+      persistRow(pendingNode);
+      inflightIpcChainIdRef.current = ipcChainId;
+
       let localReject: ((e: Error) => void) | null = null;
       const promise = new Promise<LineageNode>((resolve, reject) => {
         localReject = reject as (e: Error) => void;
         pendingRef.current = {
-          chainId,
+          ipcChainId,
+          treeChainId,
+          nodeId,
+          parentNodeId: focusNodeOnTree.nodeId,
           kind,
           params,
-          branchFromIndex,
+          inputPath: focusPath,
+          sizeBefore: null,
+          createdAt,
           resolve,
           reject
         };
@@ -426,24 +484,28 @@ export function useToolboxLineage(): UseToolboxLineageResult {
       try {
         const bridge = getBridge();
         await bridge.startToolboxChain({
-          chainId,
-          inputPath: focus.path,
+          chainId: ipcChainId,
+          inputPath: focusPath,
           steps: [{ id: stepId, kind, params }]
         });
       } catch (err) {
-        // Synchronous IPC rejection (e.g. compatibility veto).
         const e = err instanceof Error ? err : new Error(String(err));
-        // Only clear the pending entry if it's still ours — the listener
-        // may have raced and already settled the same chainId for some
-        // reason; in that case we just bubble the error out without
-        // double-rejecting.
         const pending = pendingRef.current as PendingStep | null;
-        if (pending && pending.chainId === chainId) {
+        if (pending && pending.ipcChainId === ipcChainId) {
           pendingRef.current = null;
         }
-        if (inflightChainIdRef.current === chainId) {
-          inflightChainIdRef.current = null;
+        if (inflightIpcChainIdRef.current === ipcChainId) {
+          inflightIpcChainIdRef.current = null;
         }
+        // Synchronous IPC veto — flip the just-inserted pending row to
+        // failed so disk + memory both reflect the unrecoverable state.
+        const failedRow: LineageTreeNode = {
+          ...pendingNode,
+          status: 'failed',
+          doneAt: Date.now()
+        };
+        persistRow(failedRow);
+        setTree((prev) => prev.map((n) => n.nodeId === nodeId ? failedRow : n));
         setIsRunning(false);
         setCurrentProgress(null);
         setError(e.message);
@@ -456,6 +518,57 @@ export function useToolboxLineage(): UseToolboxLineageResult {
     []
   );
 
+  const hydrateFromChain = useCallback(async (cid: string): Promise<void> => {
+    const repo = getDbBridge();
+    if (!repo) return;
+    let rows: ChainLineageNodeRow[];
+    try {
+      rows = await repo.listByChain(cid);
+    } catch {
+      return;
+    }
+    if (!rows || rows.length === 0) return;
+    const projected = rows.map(fromSqlRow);
+    // createdAt-asc ordering — deterministic and matches runNextStep insert.
+    projected.sort((a, b) => a.createdAt - b.createdAt);
+    // Root is intentionally NOT persisted to sqlite (see runNextStep /
+    // reset header comment), so hydrate must synthesise one or the
+    // TreeView has no anchor to render from. We rebuild root from the
+    // earliest persisted row's inputPath (== root.inputPath, root being
+    // a no-op pass-through).
+    const earliest = projected[0];
+    const rootCreatedAt = Math.max(0, earliest.createdAt - 1);
+    const rootNode = makeRootNode(cid, earliest.inputPath, rootCreatedAt);
+    const treeWithRoot = [rootNode, ...projected];
+    const focusPick = pickHydrateFocus(projected);
+    setTree(treeWithRoot);
+    setChainId(cid);
+    setFocusNodeId(focusPick ? focusPick.nodeId : 'root');
+    setIsRunning(false);
+    setError(null);
+    setCurrentProgress(null);
+    // Re-seed the local id counter so future runNextStep ids don't
+    // collide with what's already on disk. Best-effort — unknown
+    // formats start fresh from N+1.
+    nodeCounterRef.current = maxNumericSuffix(projected);
+  }, []);
+
+  // Derived views — `nodes` and `pathToFocus` are the same data
+  // (root → focus chain). The flat `tree` field is exposed
+  // undecorated (no path getter, no chainId override) so new
+  // TreeView consumers see the SQL-shaped row directly.
+  const pathToFocus = useMemo<LineageTreeNode[]>(
+    () => ancestorsTo(tree, focusNodeId),
+    [tree, focusNodeId]
+  );
+  const nodes = useMemo<LineageNode[]>(
+    () => pathToFocus.map((n) => asLineageNode(n)),
+    [pathToFocus]
+  );
+  const focusIndex = useMemo<number>(() => {
+    if (!focusNodeId) return -1;
+    return nodes.findIndex((n) => n.nodeId === focusNodeId);
+  }, [nodes, focusNodeId]);
   const focus = focusIndex >= 0 && focusIndex < nodes.length ? nodes[focusIndex] : null;
   const nextKindOptions = useMemo(
     () => deriveNextKinds(focus ? focus.path : null),
@@ -463,16 +576,10 @@ export function useToolboxLineage(): UseToolboxLineageResult {
   );
 
   return {
-    nodes,
-    focusIndex,
-    focus,
-    isRunning,
-    error,
-    reset,
-    focusNode,
-    runNextStep,
-    cancel,
-    nextKindOptions,
-    currentProgress
+    nodes, focusIndex, focus, isRunning, error,
+    reset, focusNode, runNextStep, cancel,
+    nextKindOptions, currentProgress,
+    tree, chainId, focusNodeId, pathToFocus,
+    hydrateFromChain, branchFromNode
   };
 }

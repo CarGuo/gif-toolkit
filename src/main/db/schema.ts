@@ -133,6 +133,39 @@ CREATE INDEX IF NOT EXISTS toolbox_chain_history_finished_idx ON toolbox_chain_h
 ` as const;
 
 /**
+ * R-LINEAGE-TREE-V1 — persistent lineage tree for toolbox chains.
+ * Each row is one chain step (a "node") in a directed tree rooted
+ * at the chain's input file. `parent_node_id` references another
+ * node within the same `chain_id`, NULL for roots. We index on
+ * (chain_id) for whole-chain reads and on (chain_id, parent_node_id)
+ * for child lookups when rendering the tree view.
+ *
+ * Independent table from `toolbox_chain_history` (which keeps the
+ * flat per-chain audit row) because lineage nodes are per-step and
+ * outlive a single chain run — branching / re-runs append new nodes
+ * with the same chain_id but different parent_node_ids.
+ */
+export const CHAIN_LINEAGE_NODES_DDL = `
+CREATE TABLE IF NOT EXISTS chain_lineage_nodes (
+  node_id TEXT PRIMARY KEY,
+  chain_id TEXT NOT NULL,
+  parent_node_id TEXT,
+  kind TEXT,
+  params_json TEXT NOT NULL DEFAULT '{}',
+  input_path TEXT NOT NULL,
+  output_path TEXT,
+  size_before INTEGER,
+  size_after INTEGER,
+  size_regression_ratio REAL,
+  status TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  done_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS chain_lineage_nodes_chain_idx ON chain_lineage_nodes(chain_id);
+CREATE INDEX IF NOT EXISTS chain_lineage_nodes_parent_idx ON chain_lineage_nodes(chain_id, parent_node_id);
+` as const;
+
+/**
  * Per-session operation log family. Two tables:
  *
  *   - `session_logs`        — one row per session (sniff round / batch /
@@ -187,7 +220,8 @@ export type TableFamily =
   | 'sniff_history'
   | 'toolbox_history'
   | 'toolbox_chain_history'
-  | 'session_logs';
+  | 'session_logs'
+  | 'chain_lineage_nodes';
 
 /** Current head version per family. Bump and append a migrator in
  *  migrations.ts when changing the schema. */
@@ -197,5 +231,6 @@ export const HEAD_VERSIONS: Readonly<Record<TableFamily, number>> = {
   sniff_history: 1,
   toolbox_history: 1,
   toolbox_chain_history: 1,
-  session_logs: 1
+  session_logs: 1,
+  chain_lineage_nodes: 1
 };

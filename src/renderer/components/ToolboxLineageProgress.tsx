@@ -92,6 +92,16 @@ export function LineageProgressRow({ progress }: LineageProgressRowProps): JSX.E
         {progress?.message || progress?.status || '排队中'}
         {meta ? ` · ${meta}` : ''}
         {progress?.currentSizeMB ? ` · ${progress.currentSizeMB.toFixed(2)} MB` : ''}
+        {progress?.sizeRegression ? (
+          <span
+            className="tb-lineage-size-regression-warn"
+            data-testid="lineage-progress-size-regression-warn"
+            title={`体积反向增加 ${(((progress.sizeRegression.ratio) - 1) * 100).toFixed(1)}%（${(progress.sizeRegression.beforeBytes / 1024 / 1024).toFixed(2)} MB → ${(progress.sizeRegression.afterBytes / 1024 / 1024).toFixed(2)} MB）— 原文件可能已高度优化，原文件仍保留`}
+            style={{ marginLeft: 6, cursor: 'help' }}
+          >
+            ⚠️
+          </span>
+        ) : null}
       </div>
     </div>
   );
