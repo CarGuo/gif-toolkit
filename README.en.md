@@ -137,6 +137,8 @@ Every done row in the toolbox history sidebar shows a **「继续 →」(Continu
 
 History rows have been upgraded to a 4-col grid: a 56×56 thumbnail on the left (static first-frame poster by default; **hover** swaps the `<img>` src to a `giftk-local://` URL so animated GIF/WebP plays live during hover) + status/kind/time meta + a compact **「继续 →」** pill + remove.
 
+![Lineage modal + autoplay preview + 4-col history row](./docs/images/screenshots/05-toolbox-lineage-modal.png)
+
 Each step is a single-step `startToolboxChain` IPC, reusing the existing chain runner, cancellation propagation, and history contract (see [docs/ipc-contract.md](./docs/ipc-contract.md) and SUITE TB-CHAIN A/B/C/D/E). Crop in lineage mode reuses the batch CropForm and writes the rect directly into draft params; the legacy `awaiting-input` pause model is no longer triggered from the renderer.
 
 ---

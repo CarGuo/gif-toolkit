@@ -137,6 +137,8 @@ npm run package:linux   # Linux:AppImage / deb / tar.gz
 
 历史结果行也升级到 4-列布局：左侧 56×56 缩略图（默认显示静态首帧，**鼠标悬停**会切到 `giftk-local://` 真实文件让 GIF/WebP 自播）+ 状态/类型/时间元数据 + 「继续 →」紧凑按钮 + 删除。
 
+![Lineage 弹窗 + 自动播放预览 + 4-列历史行](./docs/images/screenshots/05-toolbox-lineage-modal.png)
+
 每一步实际上是单步 1-step `startToolboxChain` IPC，复用既有的链路运行器 / 取消传播 / 历史记录契约（详见 [docs/ipc-contract.md](./docs/ipc-contract.md) 与 SUITE TB-CHAIN A/B/C/D/E）。Crop 在链路模式下直接复用批量的 CropForm 把矩形写进 draft params，不再走 awaiting-input 暂停模型。
 
 ---

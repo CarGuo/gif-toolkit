@@ -9,6 +9,8 @@
 渲染端按"焦点产物 + 线性面包屑"组织 UI，每一步实际是一次单步 `startToolboxChain` IPC，
 继续复用 Phase 1 IPC 契约（取消 / 历史 / outputs[]）。
 
+![Lineage 弹窗 + 自动播放预览 + 4-列历史行（V2.6）](../../docs/images/screenshots/05-toolbox-lineage-modal.png)
+
 ## 实现位置
 
 - [src/renderer/components/useToolboxLineage.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/useToolboxLineage.ts)
@@ -89,9 +91,14 @@
 ## 验收
 
 - 单测：[tests/renderer/useToolboxLineage.test.ts](file:///Users/guoshuyu/workspace/gif-toolkit/tests/renderer/useToolboxLineage.test.ts)（12 用例：reset / focus / branch / cancel / running guard / next-kind filter）。
-- 集成：[tests/renderer/ToolboxPanel.test.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/tests/renderer/ToolboxPanel.test.tsx) 「lineage (R-TB-CHAIN-V2)」 8 用例
-  （继续处理 → 渲染 / chip 过滤 / 单步 chain payload / done emit 推进面包屑 / 退出链路）。
+- 集成：[tests/renderer/ToolboxPanel.test.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/tests/renderer/ToolboxPanel.test.tsx) 「lineage (R-TB-CHAIN)」 8 用例
+  （继续处理 → 弹出 modal `[role="dialog"]` / chip 过滤 / 单步 chain payload / done emit 推进面包屑 / 退出链路关闭弹窗 + 批量 UI 留存）。
 - e2e：[tests/e2e/realPipeline/suite-toolbox-chain.ts](file:///Users/guoshuyu/workspace/gif-toolkit/tests/e2e/realPipeline/suite-toolbox-chain.ts)
   - SUITE TB-CHAIN-A/B/C/D — Phase 1 IPC oracle
-  - SUITE TB-CHAIN-E — UI 真跑：history → 继续处理 → GIF Resize → 2 节点面包屑 → ffprobe 校验产物
+  - SUITE TB-CHAIN-E — V2.6 UI 真跑：history → 「继续 →」(aria-label=继续处理)
+    → 弹出 `.modal.tb-lineage-modal[role="dialog"]` → GIF Resize
+    → 2 节点面包屑 → ffprobe 校验产物
+- 截图脚本：[scripts/capture-screenshots.mjs](file:///Users/guoshuyu/workspace/gif-toolkit/scripts/capture-screenshots.mjs)
+  会先 seed 一条 toolboxHistory 行，然后顺序截 01-home / 02-toolbox（含 4-列历史行）
+  / 03-history / 04-uploads / 05-toolbox-lineage-modal（弹窗 + 自动播放预览）。
 - 三道闸：typecheck / lint / vitest 786+ 用例 / playwright 30+ 用例 全绿。
