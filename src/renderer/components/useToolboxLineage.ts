@@ -127,6 +127,11 @@ interface ToolboxBridge {
     outputDirOverride?: string;
   }): Promise<{ ok: boolean; chainId: string; outputDir: string }>;
   cancelToolboxChain(chainId: string): Promise<{ ok: boolean }>;
+  resumeToolboxChain(
+    chainId: string,
+    stepIndex: number,
+    paramsPatch: Partial<ToolboxParams>
+  ): Promise<{ ok: boolean }>;
   onProgress(cb: (p: TaskProgress) => void): () => void;
 }
 
@@ -319,6 +324,50 @@ export function useToolboxLineage(): UseToolboxLineageResult {
         setIsRunning(false);
         setCurrentProgress(null);
         setError(msg);
+      } else if (status === 'awaiting-input') {
+        // R-TB-CHAIN-LINEAGE-RESUME-V1 — the main-process chain runner
+        // pauses on PAUSING_KINDS (currently just 'crop') and waits for
+        // a follow-up `toolbox:resumeChain` IPC carrying the rect.
+        //
+        // The lineage modal is a single-step driver: by the time the
+        // user clicks "处理", the cropX/Y/W/H have already been baked
+        // into the params we sent to startToolboxChain. There is no
+        // additional UI gate to clear, so just resume immediately with
+        // an empty patch (params already complete) and unblock ffmpeg.
+        //
+        // Without this hop the modal sits forever at 0% / "awaiting-
+        // input" while the user thinks the app froze.
+        const pendingChainId = pending.chainId;
+        let bridge2: ToolboxBridge | null = null;
+        try { bridge2 = getBridge(); } catch { bridge2 = null; }
+        if (bridge2) {
+          // stepIndex on the wire is 1-based for humans; the resume IPC
+          // expects 0-based. Lineage chains are always 1 step long, so
+          // 0 is correct regardless of what the wire says, but keep the
+          // payload defensive in case that invariant ever loosens.
+          const wireIdx = typeof p.stepIndex === 'number' ? p.stepIndex : 1;
+          const zeroBased = Math.max(0, wireIdx - 1);
+          bridge2.resumeToolboxChain(pendingChainId, zeroBased, {}).catch((err) => {
+            // Surface the resume failure as a step-level error so the
+            // modal stops spinning instead of pretending the work is
+            // still progressing.
+            const msg = err instanceof Error ? err.message : String(err);
+            const cur = pendingRef.current;
+            if (cur && cur.chainId === pendingChainId) {
+              cur.reject(new Error(`resume failed: ${msg}`));
+              pendingRef.current = null;
+            }
+            if (inflightChainIdRef.current === pendingChainId) {
+              inflightChainIdRef.current = null;
+            }
+            setIsRunning(false);
+            setCurrentProgress(null);
+            setError(`resume failed: ${msg}`);
+          });
+        }
+        // Keep the (stalled) progress visible until ffmpeg starts
+        // actually emitting non-zero percents.
+        setCurrentProgress(p);
       } else {
         // Intermediate status (downloading / probing / segmenting /
         // converting / compressing / pending). Store the latest snapshot
