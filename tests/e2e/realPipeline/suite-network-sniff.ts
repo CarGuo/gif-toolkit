@@ -94,7 +94,7 @@ test('SUITE G — UI-driven system-chrome sniff full pipeline', async () => {
 
   await installRecorder();
   try {
-    const webviewSniffTrigger = page.locator('button', { hasText: /网页嗅探/ }).first();
+    const webviewSniffTrigger = page.getByTestId('webview-sniff-main');
     await expect(webviewSniffTrigger).toBeVisible();
     await webviewSniffTrigger.click();
 
@@ -145,7 +145,7 @@ test('SUITE H — UI-driven ytdlp-direct sniff full pipeline', async () => {
 
   await installRecorder();
   try {
-    const webviewSniffTrigger = page.locator('button', { hasText: /网页嗅探/ }).first();
+    const webviewSniffTrigger = page.getByTestId('webview-sniff-main');
     await expect(webviewSniffTrigger).toBeVisible();
     await webviewSniffTrigger.click();
 

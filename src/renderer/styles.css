@@ -3870,11 +3870,13 @@ button.hist-stage.is-clickable:active {
 }
 
 /* ----------------------- R-LINEAGE-TREE-V1 ----------------------- */
-/* Scrollable wrapper for the SVG tree; large lineages overflow both
-   axes so we let the user pan with native scroll instead of inventing
-   our own zoom UX. */
+/* Scrollable wrapper for the SVG tree. R-LINEAGE-TREE-V1.1 — the
+   tree is now laid out horizontally (depth → X axis), so wide
+   chains overflow on the X axis and the user pans with native
+   scroll. max-height is tuned to comfortably show ~2 sibling
+   bands without eating the rest of the modal. */
 .tb-lineage-tree-view {
-  max-height: 360px;
+  max-height: 220px;
   overflow: auto;
   border: 1px solid var(--border);
   border-radius: 8px;

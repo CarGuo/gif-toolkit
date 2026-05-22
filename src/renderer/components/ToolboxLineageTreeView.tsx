@@ -3,15 +3,26 @@
  *
  * Why a self-written SVG layout (no d3-hierarchy)
  * -----------------------------------------------
- * The lineage view only needs a small, deterministic top-down tree
+ * The lineage view only needs a small, deterministic horizontal tree
  * (typically <30 nodes per chain). Pulling in `d3-hierarchy` (and its
  * transitive d3-* graph) would add ~30+ KiB to the renderer bundle and
  * an external supply-chain surface (R-15) for what is, in practice, a
  * 40-line recursive DFS layout. The implementation below mirrors the
- * classic "Reingold-Tilford-lite" idea: each subtree owns a horizontal
- * width; a parent centers itself between the leftmost-root and
- * rightmost-root of its children. Stable child order is enforced via
- * `createdAt asc` so re-renders never reshuffle the canvas.
+ * classic "Reingold-Tilford-lite" idea, rotated 90° so depth grows
+ * left→right (X axis) and siblings stack top→bottom (Y axis). Each
+ * subtree owns a vertical "height band"; a parent centers itself
+ * vertically between the topmost-root and bottommost-root of its
+ * children. Stable child order is enforced via `createdAt asc` so
+ * re-renders never reshuffle the canvas.
+ *
+ * Why horizontal (R-LINEAGE-TREE-V1.1)
+ * ------------------------------------
+ * Vertical layout pushed every step further down the modal, eating
+ * vertical real-estate the user needs for the input form on the
+ * right. A horizontal tree fans branches out sideways so the typical
+ * 3–6 step chain stays in a single fold, with deeper branches simply
+ * scrolling right rather than vertically pushing the breadcrumb /
+ * step controls below the fold.
  *
  * Node visual contract
  * --------------------
@@ -36,8 +47,8 @@
  *
  * Edges
  * -----
- * Per-child cubic Bezier from parent's bottom-center to child's
- * top-center, stroke #888, strokeWidth 1.5, fill none.
+ * Per-child cubic Bezier from parent's right-center to child's
+ * left-center, stroke #888, strokeWidth 1.5, fill none.
  */
 import { useCallback, useMemo } from 'react';
 import type { ToolboxKind } from '../../shared/types';
@@ -88,29 +99,39 @@ const STATUS_FILLS: Record<LineageTreeNode['status'], string> = {
 
 const NODE_W = 140;
 const NODE_H = 64;
-const H_GAP = 24;
-const V_GAP = 40;
+// Sibling subtrees stack along the Y axis; STAGGER_GAP separates
+// adjacent subtrees vertically.
+const STAGGER_GAP = 24;
+// Each level grows along the X axis; LEVEL_GAP is the horizontal
+// distance between a parent's right edge and the child's left edge.
+const LEVEL_GAP = 60;
 const PADDING = 16;
 const REGRESSION_THRESHOLD = 1.05;
 
 interface Point { x: number; y: number; }
 interface SubtreeLayout {
-  width: number;
+  /** Vertical height occupied by the subtree (across siblings). */
+  height: number;
   positions: Map<string, Point>;
 }
 
-/** Recursive DFS layout — see file-level jsdoc for the algorithm. */
+/**
+ * Recursive DFS layout (rotated 90° from the classic top-down form):
+ *   - depth → x = depth * (NODE_W + LEVEL_GAP)
+ *   - siblings stack along y, each subtree owning a contiguous band
+ *   - a parent centers its y between its first and last child's y
+ */
 function layoutSubtree(
   nodeId: string,
   depth: number,
   childrenMap: Map<string | null, LineageTreeNode[]>
 ): SubtreeLayout {
-  const y = depth * (NODE_H + V_GAP);
+  const x = depth * (NODE_W + LEVEL_GAP);
   const children = childrenMap.get(nodeId) ?? [];
   if (children.length === 0) {
     const positions = new Map<string, Point>();
-    positions.set(nodeId, { x: 0, y });
-    return { width: NODE_W, positions };
+    positions.set(nodeId, { x, y: 0 });
+    return { height: NODE_H, positions };
   }
 
   // 1. Recursively lay out each child subtree.
@@ -118,34 +139,34 @@ function layoutSubtree(
     layoutSubtree(c.nodeId, depth + 1, childrenMap)
   );
 
-  // 2. Stitch children horizontally with H_GAP between subtrees.
+  // 2. Stitch children vertically with STAGGER_GAP between subtrees.
   const positions = new Map<string, Point>();
   let cursor = 0;
-  const childRootXs: number[] = [];
+  const childRootYs: number[] = [];
   childLayouts.forEach((cl, idx) => {
     const child = children[idx];
     const offset = cursor;
     for (const [id, pt] of cl.positions) {
-      positions.set(id, { x: pt.x + offset, y: pt.y });
+      positions.set(id, { x: pt.x, y: pt.y + offset });
     }
     const childRootPt = cl.positions.get(child.nodeId);
     // Defensive — childRootPt is guaranteed by the leaf base case.
-    childRootXs.push((childRootPt?.x ?? 0) + offset);
-    cursor += cl.width + H_GAP;
+    childRootYs.push((childRootPt?.y ?? 0) + offset);
+    cursor += cl.height + STAGGER_GAP;
   });
-  const childrenSpan = cursor - H_GAP; // remove trailing gap
+  const childrenSpan = cursor - STAGGER_GAP; // remove trailing gap
 
-  // 3. Center self over first/last child root x-coordinates.
-  const leftMostX = childRootXs[0];
-  const rightMostX = childRootXs[childRootXs.length - 1];
-  const selfX = (leftMostX + rightMostX) / 2;
-  positions.set(nodeId, { x: selfX, y });
+  // 3. Center self vertically over first/last child root y-coordinates.
+  const topMostY = childRootYs[0];
+  const bottomMostY = childRootYs[childRootYs.length - 1];
+  const selfY = (topMostY + bottomMostY) / 2;
+  positions.set(nodeId, { x, y: selfY });
 
-  const width = Math.max(NODE_W, childrenSpan);
-  return { width, positions };
+  const height = Math.max(NODE_H, childrenSpan);
+  return { height, positions };
 }
 
-/** Find max depth recursively to compute SVG height. */
+/** Find max depth recursively to compute SVG width. */
 function computeMaxDepth(
   nodeId: string,
   depth: number,
@@ -186,28 +207,29 @@ export function ToolboxLineageTreeView(props: ToolboxLineageTreeViewProps): JSX.
       };
     }
 
-    // Stitch root subtrees horizontally with the same H_GAP rule.
+    // Stitch root subtrees vertically with the same STAGGER_GAP rule.
     const positions = new Map<string, Point>();
     let cursor = 0;
     let maxDepth = 0;
     for (const r of roots) {
       const sub = layoutSubtree(r.nodeId, 0, childrenMap);
       for (const [id, pt] of sub.positions) {
-        positions.set(id, { x: pt.x + cursor, y: pt.y });
+        positions.set(id, { x: pt.x, y: pt.y + cursor });
       }
       const d = computeMaxDepth(r.nodeId, 0, childrenMap);
       if (d > maxDepth) maxDepth = d;
-      cursor += sub.width + H_GAP;
+      cursor += sub.height + STAGGER_GAP;
     }
-    const totalWidth = cursor - H_GAP;
+    const totalHeight = cursor - STAGGER_GAP;
 
-    // Add PADDING and shift positions so node bounds (not just root x)
-    // sit inside the viewBox. Node rects extend NODE_W to the right.
+    // Add PADDING and shift positions so node bounds (not just root)
+    // sit inside the viewBox. Node rects extend NODE_W to the right
+    // and NODE_H downward.
     for (const [id, pt] of positions) {
       positions.set(id, { x: pt.x + PADDING, y: pt.y + PADDING });
     }
-    const viewBoxW = totalWidth + NODE_W + PADDING * 2;
-    const viewBoxH = maxDepth * (NODE_H + V_GAP) + NODE_H + PADDING * 2;
+    const viewBoxW = maxDepth * (NODE_W + LEVEL_GAP) + NODE_W + PADDING * 2;
+    const viewBoxH = totalHeight + PADDING * 2;
     return { positions, viewBoxW, viewBoxH };
   }, [nodes]);
 
@@ -218,7 +240,9 @@ export function ToolboxLineageTreeView(props: ToolboxLineageTreeViewProps): JSX.
     [onSelect]
   );
 
-  // Build edges from child → parent using positions.
+  // Build edges from child → parent using positions. Horizontal cubic
+  // Bezier: parent right-center → child left-center, control points
+  // pushed half a level apart on the X axis to give the curve breath.
   const edges = useMemo(() => {
     const list: Array<{ key: string; d: string }> = [];
     for (const n of nodes) {
@@ -226,13 +250,13 @@ export function ToolboxLineageTreeView(props: ToolboxLineageTreeViewProps): JSX.
       const cp = layout.positions.get(n.nodeId);
       const pp = layout.positions.get(n.parentNodeId);
       if (!cp || !pp) continue;
-      const px = pp.x + NODE_W / 2;
-      const py = pp.y + NODE_H;
-      const cx = cp.x + NODE_W / 2;
-      const cy = cp.y;
-      const c1y = py + V_GAP / 2;
-      const c2y = cy - V_GAP / 2;
-      const d = `M ${px} ${py} C ${px} ${c1y}, ${cx} ${c2y}, ${cx} ${cy}`;
+      const px = pp.x + NODE_W;
+      const py = pp.y + NODE_H / 2;
+      const cx = cp.x;
+      const cy = cp.y + NODE_H / 2;
+      const c1x = px + LEVEL_GAP / 2;
+      const c2x = cx - LEVEL_GAP / 2;
+      const d = `M ${px} ${py} C ${c1x} ${py}, ${c2x} ${cy}, ${cx} ${cy}`;
       list.push({ key: `${n.parentNodeId}->${n.nodeId}`, d });
     }
     return list;

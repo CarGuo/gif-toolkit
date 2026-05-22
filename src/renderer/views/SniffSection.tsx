@@ -128,6 +128,7 @@ export function SniffSection(props: SniffSectionProps): JSX.Element {
         <div className="webview-sniff-split" style={{ position: 'relative', display: 'inline-flex' }}>
           <button
             className="ghost"
+            data-testid="webview-sniff-main"
             onClick={onPreferredWebviewSniff}
             disabled={sniffing}
             title={preferredWebviewMode === 'system-chrome'
@@ -139,11 +140,7 @@ export function SniffSection(props: SniffSectionProps): JSX.Element {
           >
             {sniffing
               ? '嗅探中…'
-              : preferredWebviewMode === 'system-chrome'
-                ? '🚀 真 Chrome 嗅探'
-                : preferredWebviewMode === 'ytdlp-direct'
-                  ? '⚡ yt-dlp 直接抓'
-                  : '🌐 网页嗅探'}
+              : '浏览器嗅探'}
           </button>
           <button
             ref={webviewCaretRef}
@@ -202,15 +199,12 @@ export function SniffSection(props: SniffSectionProps): JSX.Element {
                 }}
                 style={{
                   display: 'block', width: '100%', textAlign: 'left',
-                  padding: '8px 10px', whiteSpace: 'normal',
+                  padding: '8px 10px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
                   background: preferredWebviewMode === 'embed' ? 'rgba(42,170,119,0.12)' : 'transparent'
                 }}
               >
                 <div style={{ fontWeight: 600 }}>
-                  🌐 嵌入式嗅探(快){preferredWebviewMode === 'embed' ? ' ✓' : ''}
-                </div>
-                <div style={{ fontSize: 11, color: 'var(--muted, #9aa0aa)', marginTop: 2 }}>
-                  在 app 内置浏览器打开,适合普通需登录/交互的站点。
+                  嵌入式嗅探(快){preferredWebviewMode === 'embed' ? ' ·' : ''}
                 </div>
               </button>
               <button
@@ -226,15 +220,12 @@ export function SniffSection(props: SniffSectionProps): JSX.Element {
                 }}
                 style={{
                   display: 'block', width: '100%', textAlign: 'left',
-                  padding: '8px 10px', whiteSpace: 'normal', marginTop: 4,
+                  padding: '8px 10px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginTop: 4,
                   background: preferredWebviewMode === 'system-chrome' ? 'rgba(42,170,119,0.12)' : 'transparent'
                 }}
               >
                 <div style={{ fontWeight: 600 }}>
-                  🚀 真 Chrome 嗅探(过 Cloudflare){preferredWebviewMode === 'system-chrome' ? ' ✓' : ''}
-                </div>
-                <div style={{ fontSize: 11, color: 'var(--muted, #9aa0aa)', marginTop: 2 }}>
-                  启动你本机的 Chrome / Edge / Brave,真实浏览器握手,适合 OpenAI / Medium / Patreon 等高保护站点。
+                  真 Chrome 嗅探(过 Cloudflare){preferredWebviewMode === 'system-chrome' ? ' ·' : ''}
                 </div>
               </button>
               {preferredWebviewMode === 'system-chrome' ? (
@@ -294,15 +285,12 @@ export function SniffSection(props: SniffSectionProps): JSX.Element {
                 }}
                 style={{
                   display: 'block', width: '100%', textAlign: 'left',
-                  padding: '8px 10px', whiteSpace: 'normal', marginTop: 4,
+                  padding: '8px 10px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginTop: 4,
                   background: preferredWebviewMode === 'ytdlp-direct' ? 'rgba(42,170,119,0.12)' : 'transparent'
                 }}
               >
                 <div style={{ fontWeight: 600 }}>
-                  ⚡ yt-dlp 直接抓(YouTube / X / B站 等 1900+ 站点){preferredWebviewMode === 'ytdlp-direct' ? ' ✓' : ''}
-                </div>
-                <div style={{ fontSize: 11, color: 'var(--muted, #9aa0aa)', marginTop: 2 }}>
-                  无需打开任何浏览器,把 URL 交给 yt-dlp 直接解析。最快,但只支持已识别的视频站。
+                  yt-dlp 直接抓(YouTube / X / B站 等){preferredWebviewMode === 'ytdlp-direct' ? ' ·' : ''}
                 </div>
               </button>
             </div>
