@@ -3366,3 +3366,152 @@ details.advanced-gif > summary {
   background: rgba(255, 255, 255, 0.06);
   color: var(--text);
 }
+
+/* ==========================================================================
+   R-TB-CHAIN-V2 — progressive chain (`.tb-lineage`) section.
+   Replaces the batch jobs/params/footer block when a lineage is active.
+   Visual language deliberately echoes `.tb-jobs` / `.tb-chip` so the
+   transition between batch and chain modes feels like a focus shift, not
+   a different screen.
+   ========================================================================== */
+.tb-lineage {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+  margin: 8px 0;
+}
+.tb-lineage-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.tb-lineage-breadcrumb {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+}
+.tb-lineage-crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.tb-lineage-crumb-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 2px 8px;
+  font: inherit;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.tb-lineage-crumb-btn:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+}
+.tb-lineage-crumb.is-focus .tb-lineage-crumb-btn {
+  color: var(--text);
+  background: rgba(96, 165, 250, 0.12);
+  border-color: rgba(96, 165, 250, 0.3);
+  font-weight: 600;
+}
+.tb-lineage-crumb.is-abandoned .tb-lineage-crumb-btn {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+.tb-lineage-sep {
+  color: var(--muted);
+  opacity: 0.5;
+  user-select: none;
+}
+.tb-lineage-current {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 10px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 8px;
+}
+.tb-lineage-thumb {
+  flex: 0 0 96px;
+  width: 96px;
+  height: 96px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.tb-lineage-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.tb-lineage-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.tb-lineage-name {
+  font-weight: 600;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tb-lineage-meta-line {
+  font-size: 11px;
+  color: var(--muted);
+}
+.tb-lineage-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.tb-lineage-form,
+.tb-lineage-cropbox {
+  border-top: 1px dashed var(--border);
+  padding-top: 10px;
+}
+.tb-lineage-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+.tb-lineage-footer-right {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+}
+.tb-history-continue {
+  background: rgba(96, 165, 250, 0.12);
+  border: 1px solid rgba(96, 165, 250, 0.3);
+  color: var(--text);
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  flex: 0 0 auto;
+  transition: background 0.12s, border-color 0.12s;
+}
+.tb-history-continue:hover {
+  background: rgba(96, 165, 250, 0.22);
+  border-color: rgba(96, 165, 250, 0.55);
+}

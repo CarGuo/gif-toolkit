@@ -14,7 +14,7 @@
  */
 import React from 'react';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { ToolboxPanel } from '../../src/renderer/components/ToolboxPanel';
 
 interface FakeGiftk {
@@ -487,5 +487,252 @@ describe('ToolboxPanel', () => {
     });
     expect(screen.getByText(/历史结果 · 0/)).toBeInTheDocument();
     expect(fake.db.toolboxHistory.clear).toHaveBeenCalled();
+  });
+});
+
+// ============================================================================
+// R-TB-CHAIN-V2 — progressive chain ("lineage") section integration tests.
+//
+// These cover the renderer wiring exposed by V2.2. They do NOT exercise
+// the main-process pipeline; the in-flight `startToolboxChain` IPC is
+// resolved synchronously and a single `process:progress` `done` emit is
+// fed into the panel's onProgress listener. That's enough to drive every
+// observable lineage state transition: enter from history → render
+// breadcrumb → pick chip → run step → see new tail node → focus an
+// earlier crumb → exit.
+//
+// Coverage target: ≥ 8 tests, mirroring the V2.2 user-spec.
+// ============================================================================
+describe('ToolboxPanel — lineage (R-TB-CHAIN-V2)', () => {
+  // Bridge fake augmented with the chain IPC pair + a hook to push
+  // progress events back into the panel.
+  function installLineageGiftk(): {
+    fake: ReturnType<typeof installFakeGiftk>;
+    emitProgress: (p: Record<string, unknown>) => void;
+    startSpy: ReturnType<typeof vi.fn>;
+    cancelSpy: ReturnType<typeof vi.fn>;
+  } {
+    const fake = installFakeGiftk();
+    // Capture progress listeners so tests can synthesise a 'done' emit
+    // for whichever taskId the hook is awaiting.
+    const listeners: Array<(p: Record<string, unknown>) => void> = [];
+    fake.onProgress.mockImplementation((cb: (p: Record<string, unknown>) => void) => {
+      listeners.push(cb);
+      return () => {
+        const idx = listeners.indexOf(cb);
+        if (idx >= 0) listeners.splice(idx, 1);
+      };
+    });
+    const emitProgress = (p: Record<string, unknown>): void => {
+      // Snapshot to avoid mutation-during-iteration if listeners
+      // unsubscribe synchronously.
+      [...listeners].forEach((l) => l(p));
+    };
+    const startSpy = vi.fn(async (payload: { chainId: string; inputPath: string; steps: Array<unknown> }) => ({
+      ok: true,
+      chainId: payload.chainId,
+      outputDir: '/o'
+    }));
+    const cancelSpy = vi.fn(async () => ({ ok: true }));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (window as any).giftk.startToolboxChain = startSpy;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (window as any).giftk.cancelToolboxChain = cancelSpy;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (window as any).giftk.revealItem = vi.fn(async () => ({ ok: true }));
+    return { fake, emitProgress, startSpy, cancelSpy };
+  }
+
+  function seedDoneEntry(
+    fake: ReturnType<typeof installFakeGiftk>,
+    overrides: Record<string, unknown> = {}
+  ): void {
+    fake.__toolboxRows.push({
+      id: 'tb-le-1',
+      kind: 'video-to-gif',
+      inputPath: '/in/tiny.mp4',
+      displayName: 'tiny.mp4',
+      outputs: ['/out/tiny.gif'],
+      params: {},
+      status: 'done',
+      finishedAt: Date.now(),
+      ...overrides
+    });
+  }
+
+  it('renders 「继续处理 →」 button on done history rows with an output', async () => {
+    const { fake } = installLineageGiftk();
+    seedDoneEntry(fake);
+    await act(async () => {
+      render(<ToolboxPanel />);
+    });
+    const btn = await screen.findByRole('button', { name: /继续处理/ });
+    expect(btn).toBeInTheDocument();
+  });
+
+  it('does NOT render 「继续处理 →」 on failed rows (no output to chain from)', async () => {
+    const { fake } = installLineageGiftk();
+    fake.__toolboxRows.push({
+      id: 'tb-le-2',
+      kind: 'gif-optimize',
+      inputPath: '/in/x.gif',
+      displayName: 'x.gif',
+      outputs: [],
+      params: {},
+      status: 'failed',
+      error: 'boom',
+      finishedAt: Date.now()
+    });
+    await act(async () => {
+      render(<ToolboxPanel />);
+    });
+    expect(screen.queryByRole('button', { name: /继续处理/ })).toBeNull();
+  });
+
+  it('clicking 「继续处理 →」 switches the panel into lineage mode (breadcrumb + 退出链路 visible, batch body hidden)', async () => {
+    const { fake } = installLineageGiftk();
+    seedDoneEntry(fake);
+    await act(async () => {
+      render(<ToolboxPanel />);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /继续处理/ }));
+    });
+    // Lineage section shows up.
+    expect(screen.getByLabelText('链式处理')).toBeInTheDocument();
+    expect(screen.getByLabelText('链路面包屑')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '退出链路' })).toBeInTheDocument();
+    // Root crumb shows the kind label of the previous run as starting
+    // point — V2 implementation labels the root with '原始输入'.
+    expect(screen.getByText('原始输入')).toBeInTheDocument();
+    // Batch start button is gone (the entire tb-body / tb-footer is
+    // unmounted by the lineage ternary).
+    expect(screen.queryByRole('button', { name: /^开始$/ })).toBeNull();
+  });
+
+  it('lineage chips for a .gif focus EXCLUDE video-to-* kinds (extension-aware filter)', async () => {
+    const { fake } = installLineageGiftk();
+    seedDoneEntry(fake); // outputs[0] = '/out/tiny.gif'
+    await act(async () => {
+      render(<ToolboxPanel />);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /继续处理/ }));
+    });
+    const chipBar = screen.getByRole('tablist', { name: '下一步操作' });
+    // Chip for GIF Resize must exist, video-to-gif must not.
+    expect(chipBar.querySelector('button[title*="GIF"]') || chipBar.textContent).toBeTruthy();
+    expect(chipBar.textContent).toMatch(/GIF Resize/);
+    expect(chipBar.textContent).not.toMatch(/Video → GIF/);
+    expect(chipBar.textContent).not.toMatch(/Video → WebP/);
+  });
+
+  it('lineage chips for a .mp4 focus include only video-to-* kinds', async () => {
+    const { fake } = installLineageGiftk();
+    seedDoneEntry(fake, {
+      kind: 'gif-resize',
+      inputPath: '/in/orig.mp4',
+      displayName: 'orig.mp4',
+      // The "output" is itself an .mp4 — pretend a hypothetical mp4
+      // pass-through so the lineage focus is .mp4.
+      outputs: ['/out/clip.mp4']
+    });
+    await act(async () => {
+      render(<ToolboxPanel />);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /继续处理/ }));
+    });
+    const chipBar = screen.getByRole('tablist', { name: '下一步操作' });
+    expect(chipBar.textContent).toMatch(/Video → GIF/);
+    expect(chipBar.textContent).toMatch(/Video → WebP/);
+    expect(chipBar.textContent).not.toMatch(/GIF Resize/);
+    expect(chipBar.textContent).not.toMatch(/GIF Optimize/);
+  });
+
+  it('clicking 「继续 →」 calls startToolboxChain with a single-step payload addressing the focus path', async () => {
+    const { fake, startSpy } = installLineageGiftk();
+    seedDoneEntry(fake);
+    await act(async () => {
+      render(<ToolboxPanel />);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /继续处理/ }));
+    });
+    // Default-on-focus effect should auto-pick the first compatible
+    // chip; if it didn't, click GIF Resize explicitly. Scope the
+    // query to the lineage chip tablist so we don't collide with the
+    // batch kind chips (which would still be in the DOM if the
+    // lineage section hadn't taken over — they shouldn't be, but
+    // scoping makes the assertion robust).
+    const chipBar = screen.getByRole('tablist', { name: '下一步操作' });
+    const resizeChip = within(chipBar).getByRole('tab', { name: 'GIF Resize' });
+    if (resizeChip.getAttribute('aria-selected') !== 'true') {
+      fireEvent.click(resizeChip);
+    }
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^继续 →$/ }));
+    });
+    expect(startSpy).toHaveBeenCalledTimes(1);
+    const arg = startSpy.mock.calls[0]![0] as {
+      chainId: string;
+      inputPath: string;
+      steps: Array<{ id: string; kind: string; params: Record<string, unknown> }>;
+    };
+    expect(arg.inputPath).toBe('/out/tiny.gif');
+    expect(arg.steps).toHaveLength(1);
+    expect(arg.steps[0]!.kind).toBe('gif-resize');
+    expect(arg.steps[0]!.id).toBe(`${arg.chainId}-s1`);
+    expect(arg.steps[0]!.params).toMatchObject({ targetWidth: 480 });
+  });
+
+  it('after a done progress emit, the breadcrumb gains a second node and focus advances to it', async () => {
+    const { fake, startSpy, emitProgress } = installLineageGiftk();
+    seedDoneEntry(fake);
+    await act(async () => {
+      render(<ToolboxPanel />);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /继续处理/ }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^继续 →$/ }));
+    });
+    const arg = startSpy.mock.calls[0]![0] as { chainId: string };
+    // Synthesise the chain runner's terminal `done` emit.
+    await act(async () => {
+      emitProgress({
+        taskId: `${arg.chainId}-s1`,
+        status: 'done',
+        outputs: ['/out/tiny@320.gif']
+      });
+      // Let the hook's setState + post-resolve focus update flush.
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const crumbList = screen.getByLabelText('链路面包屑');
+    const crumbs = crumbList.querySelectorAll('.tb-lineage-crumb');
+    expect(crumbs.length).toBe(2);
+    // Focus moved to the new tail.
+    expect(crumbs[1]!.classList.contains('is-focus')).toBe(true);
+    expect(crumbs[0]!.classList.contains('is-focus')).toBe(false);
+  });
+
+  it('clicking 「退出链路」 unmounts the lineage section and restores batch UI', async () => {
+    const { fake } = installLineageGiftk();
+    seedDoneEntry(fake);
+    await act(async () => {
+      render(<ToolboxPanel />);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /继续处理/ }));
+    });
+    expect(screen.getByLabelText('链式处理')).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '退出链路' }));
+    });
+    expect(screen.queryByLabelText('链式处理')).toBeNull();
+    // Batch's 开始 button is back.
+    expect(screen.getByRole('button', { name: /^开始$/ })).toBeInTheDocument();
   });
 });

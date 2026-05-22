@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ToolboxKind, ToolboxOptimizeMethod, ToolboxParams, TaskProgress } from '../../shared/types';
 import { TOOLBOX_INPUT_EXTENSIONS } from '../../shared/types';
-import { useToolbox } from './useToolbox';
+import { defaultParamsFor, useToolbox } from './useToolbox';
 import { CropBox, type CropRect } from './CropBox';
+import { useToolboxLineage, type LineageNode } from './useToolboxLineage';
 
 /**
  * R-35 / R-36 — ToolboxPanel.
@@ -683,8 +684,21 @@ function ParamForm({ kind, params, setParams, mediaInfo, onTargetFormatTouch }: 
 
 export function ToolboxPanel(): JSX.Element {
   const tb = useToolbox();
+  // R-TB-CHAIN-V2 — progressive (one-step-at-a-time) chain. The hook
+  // owns its own lineage state; the panel only renders the breadcrumb,
+  // the chip menu, the per-kind ParamForm, and a single "继续 →" button.
+  // The lineage is dormant (`nodes.length===0`) on a fresh panel mount;
+  // entering chain mode is triggered by clicking 「继续处理 →」 on a
+  // *done* history row, which seeds the lineage with that row's primary
+  // output as the root node.
+  const lineage = useToolboxLineage();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [pickError, setPickError] = useState<string | null>(null);
+  // The lineage section keeps its own "draft" of the next kind + params
+  // so the user can change their mind before clicking 「继续 →」 without
+  // touching tb.kind / tb.params (which still drive the batch flow).
+  const [lineageDraftKind, setLineageDraftKind] = useState<ToolboxKind | null>(null);
+  const [lineageDraftParams, setLineageDraftParams] = useState<ToolboxParams>({});
 
   const accept = useMemo(() => TOOLBOX_INPUT_EXTENSIONS[tb.kind].join(','), [tb.kind]);
   const allowedExts = useMemo(
@@ -714,7 +728,20 @@ export function ToolboxPanel(): JSX.Element {
   const [jobMedia, setJobMedia] = useState<Record<string, JobMedia>>({});
 
   const previewPath = tb.jobs[0]?.inputPath ?? null;
-  const queuePaths = useMemo(() => tb.jobs.map((j) => j.inputPath), [tb.jobs]);
+  const queuePaths = useMemo(() => {
+    // R-TB-CHAIN-V2 — also probe every lineage node path so the
+    // breadcrumb's current-product preview (thumb + meta line) shares
+    // the same jobMedia cache as the batch jobs queue. The probe loop
+    // dedupes by path so a file in both contexts is fetched once.
+    const fromJobs = tb.jobs.map((j) => j.inputPath);
+    const fromLineage = lineage.nodes.map((n) => n.path);
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const p of [...fromJobs, ...fromLineage]) {
+      if (!seen.has(p)) { seen.add(p); out.push(p); }
+    }
+    return out;
+  }, [tb.jobs, lineage.nodes]);
 
   // R-39 — probe + thumbnail every queued job (newest first). We process
   // sequentially to avoid spawning N ffmpeg children at once for a large
@@ -968,6 +995,107 @@ export function ToolboxPanel(): JSX.Element {
     }
   }, []);
 
+  // R-TB-CHAIN-V2 — derived state for the lineage section.
+  // `isLineageActive` is true once at least one node exists; lineage
+  // operations (probe/seed/run) are otherwise no-ops.
+  const isLineageActive = lineage.nodes.length > 0;
+  const lineageFocus = lineage.focus;
+  const lineageFocusMedia = lineageFocus ? jobMedia[lineageFocus.path] : undefined;
+
+  // Local dormancy override: lets the user dismiss the lineage section
+  // even though the hook still has nodes (e.g. they want to start a
+  // brand-new batch without losing the lineage history). Cleared the
+  // moment they re-enter via handleEnterLineageFromHistory.
+  const [lineageDormant, setLineageDormant] = useState(false);
+  const showLineageSection = isLineageActive && !lineageDormant;
+
+  // Whenever the focused node changes, default the draft kind to the
+  // first compatible chip and seed the params with that kind's defaults.
+  // This avoids the "click a chip and stare at empty form" friction —
+  // the user always lands on a fillable form straight after focus.
+  useEffect(() => {
+    if (!isLineageActive) {
+      // Lineage exited — drop the draft so a future re-entry starts fresh.
+      setLineageDraftKind(null);
+      setLineageDraftParams({});
+      return;
+    }
+    setLineageDraftKind((prev) => {
+      // If the previous draft kind is still a valid option keep it,
+      // otherwise pick the first option (or null when none).
+      const opts = lineage.nextKindOptions;
+      if (prev && opts.includes(prev)) return prev;
+      const next = opts[0] ?? null;
+      if (next) setLineageDraftParams(defaultParamsFor(next));
+      return next;
+    });
+  }, [isLineageActive, lineage.nextKindOptions]);
+
+  // R-TB-CHAIN-V2 — entry point #1: 「继续处理 →」 on a done history row.
+  // Seeds the lineage with that row's primary output and clears any
+  // prior dormancy flag so a previously-dismissed lineage re-enters.
+  const handleEnterLineageFromHistory = useCallback((entryOutput: string) => {
+    if (!entryOutput) return;
+    setLineageDormant(false);
+    lineage.reset(entryOutput);
+    setPickError(null);
+  }, [lineage]);
+
+  // Click a breadcrumb segment to jump back to that node. The hook
+  // doesn't drop the abandoned tail until the next runNextStep — until
+  // then the segments after the focus stay visible (greyed in CSS) so
+  // the user can navigate forward again without having to re-run.
+  const handleFocusLineageNode = useCallback((nodeId: string) => {
+    lineage.focusNode(nodeId);
+    // Reset draft because the new focus may have different compatible
+    // kinds. The default-on-focus effect above will pick a chip.
+    setLineageDraftKind(null);
+    setLineageDraftParams({});
+  }, [lineage]);
+
+  const handleSelectLineageKind = useCallback((k: ToolboxKind) => {
+    setLineageDraftKind(k);
+    setLineageDraftParams(defaultParamsFor(k));
+  }, []);
+
+  const handleExitLineage = useCallback(async () => {
+    // If a step is mid-flight cancel it first so the IPC promise
+    // settles cleanly before the section unmounts.
+    if (lineage.isRunning) {
+      try { await lineage.cancel(); } catch { /* ignore */ }
+    }
+    setLineageDormant(true);
+  }, [lineage]);
+
+  // R-TB-CHAIN-V2 — crop in lineage mode reuses the batch CropForm,
+  // which writes cropX/Y/W/H directly into our draftParams. So we
+  // derive the "ready?" check from draftParams instead of carrying a
+  // separate intermediate rect state.
+  const lineageCropBlocked = lineageDraftKind === 'crop' && (
+    typeof lineageDraftParams.cropX !== 'number' ||
+    typeof lineageDraftParams.cropY !== 'number' ||
+    typeof lineageDraftParams.cropW !== 'number' ||
+    typeof lineageDraftParams.cropH !== 'number' ||
+    (lineageDraftParams.cropW ?? 0) <= 0 ||
+    (lineageDraftParams.cropH ?? 0) <= 0
+  );
+
+  const handleRunLineageStep = useCallback(async () => {
+    if (!lineageDraftKind) return;
+    try {
+      await lineage.runNextStep(lineageDraftKind, lineageDraftParams);
+      // After success, the focus auto-advances to the new tail; the
+      // default-on-focus effect picks a fresh chip + draft params.
+    } catch {
+      // Error already surfaced via lineage.error; the section renders it.
+    }
+  }, [lineage, lineageDraftKind, lineageDraftParams]);
+
+  const handleRevealLineageOutput = useCallback(async (p: string) => {
+    if (!p || !window.giftk?.revealItem) return;
+    try { await window.giftk.revealItem(p); } catch { /* ignore */ }
+  }, []);
+
   return (
     <div className="toolbox">
       <header className="tb-header">
@@ -1020,6 +1148,165 @@ export function ToolboxPanel(): JSX.Element {
         <div className="tb-notice tb-notice-error" role="alert">{pickError}</div>
       ) : null}
 
+      {showLineageSection ? (
+        /* R-TB-CHAIN-V2 — progressive chain section. Replaces the batch
+           jobs/params/footer block while a lineage is active. The user
+           still sees the dropzone (above) and the history (below) so
+           starting a fresh batch / re-entering a different lineage is
+           one click away. */
+        <section className="tb-lineage" aria-label="链式处理">
+          <header className="tb-lineage-header">
+            <ol className="tb-lineage-breadcrumb" aria-label="链路面包屑">
+              {lineage.nodes.map((n: LineageNode, i: number) => {
+                const isFocus = i === lineage.focusIndex;
+                const isAfterFocus = i > lineage.focusIndex;
+                const label = n.kind ? (KIND_LABELS[n.kind] ?? n.kind) : '原始输入';
+                return (
+                  <li
+                    key={n.nodeId}
+                    className={`tb-lineage-crumb${isFocus ? ' is-focus' : ''}${isAfterFocus ? ' is-abandoned' : ''}`}
+                  >
+                    <button
+                      type="button"
+                      className="tb-lineage-crumb-btn"
+                      onClick={() => handleFocusLineageNode(n.nodeId)}
+                      title={n.path}
+                      aria-current={isFocus ? 'step' : undefined}
+                    >
+                      {label}
+                    </button>
+                    {i < lineage.nodes.length - 1 ? (
+                      <span className="tb-lineage-sep" aria-hidden="true">→</span>
+                    ) : null}
+                  </li>
+                );
+              })}
+            </ol>
+            <button type="button" className="tb-link" onClick={handleExitLineage}>
+              退出链路
+            </button>
+          </header>
+
+          {lineageFocus ? (
+            <div className="tb-lineage-current">
+              <div className="tb-lineage-thumb" aria-hidden="true">
+                {lineageFocusMedia?.previewDataUrl ? (
+                  <img src={lineageFocusMedia.previewDataUrl} alt="" loading="lazy" />
+                ) : (
+                  <span className="tb-job-thumb-fallback">🎞️</span>
+                )}
+              </div>
+              <div className="tb-lineage-meta">
+                <div className="tb-lineage-name" title={lineageFocus.path}>
+                  {(/[^/\\]+$/.exec(lineageFocus.path)?.[0] ?? lineageFocus.path)}
+                </div>
+                <div className="tb-lineage-meta-line">
+                  {(() => {
+                    const parts: string[] = [];
+                    if (lineageFocusMedia?.sizeBytes) parts.push(`File size: ${fmtSize(lineageFocusMedia.sizeBytes)}`);
+                    if (lineageFocusMedia?.width && lineageFocusMedia?.height) parts.push(`${lineageFocusMedia.width}×${lineageFocusMedia.height}`);
+                    if (lineageFocusMedia?.nbFrames) parts.push(`${lineageFocusMedia.nbFrames} frames`);
+                    parts.push(`type: ${fmtType(lineageFocus.path)}`);
+                    if (lineageFocusMedia?.durationSec) parts.push(`length: ${fmtDuration(lineageFocusMedia.durationSec)}`);
+                    return parts.join(' · ');
+                  })()}
+                </div>
+                <button
+                  type="button"
+                  className="tb-link"
+                  onClick={() => handleRevealLineageOutput(lineageFocus.path)}
+                >
+                  在文件管理器中显示
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          <div className="tb-lineage-chips" role="tablist" aria-label="下一步操作">
+            {lineage.nextKindOptions.length === 0 ? (
+              <span className="tb-muted">当前产物没有可用的后续工具(链路终点)</span>
+            ) : null}
+            {lineage.nextKindOptions.map((k) => (
+              <button
+                key={k}
+                type="button"
+                role="tab"
+                aria-selected={lineageDraftKind === k}
+                className={`tb-chip${lineageDraftKind === k ? ' is-active' : ''}`}
+                onClick={() => handleSelectLineageKind(k)}
+                disabled={lineage.isRunning}
+                title={KIND_OPTIONS.find((o) => o.kind === k)?.hint ?? ''}
+              >
+                {KIND_LABELS[k] ?? k}
+              </button>
+            ))}
+          </div>
+
+          {lineageDraftKind && lineageDraftKind !== 'crop' ? (
+            <div className="tb-lineage-form">
+              <ParamForm
+                kind={lineageDraftKind}
+                params={lineageDraftParams}
+                setParams={setLineageDraftParams}
+                mediaInfo={lineageFocusMedia ? {
+                  width: lineageFocusMedia.width,
+                  height: lineageFocusMedia.height,
+                  durationSec: lineageFocusMedia.durationSec,
+                  previewDataUrl: lineageFocusMedia.previewDataUrl
+                } : null}
+              />
+            </div>
+          ) : null}
+
+          {lineageDraftKind === 'crop' && lineageFocus ? (
+            <div className="tb-lineage-cropbox">
+              {/* R-TB-CHAIN-V2 — reuse the same CropForm the batch flow
+                  uses; it owns the <img> + CropBox wiring and writes the
+                  rect back into our draftParams via cropX/Y/W/H so we
+                  don't need a separate lineageCropRect intermediate. */}
+              <CropForm
+                params={lineageDraftParams}
+                setParams={setLineageDraftParams}
+                mediaInfo={lineageFocusMedia ? {
+                  width: lineageFocusMedia.width,
+                  height: lineageFocusMedia.height,
+                  durationSec: lineageFocusMedia.durationSec,
+                  previewDataUrl: lineageFocusMedia.previewDataUrl
+                } : null}
+              />
+            </div>
+          ) : null}
+
+          <footer className="tb-lineage-footer">
+            {lineage.error ? (
+              <div className="tb-notice tb-notice-error" role="alert">{lineage.error}</div>
+            ) : null}
+            <div className="tb-lineage-footer-right">
+              <button
+                type="button"
+                className="btn"
+                onClick={() => { void lineage.cancel(); }}
+                disabled={!lineage.isRunning}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="btn primary"
+                onClick={handleRunLineageStep}
+                disabled={
+                  !lineageDraftKind ||
+                  lineage.isRunning ||
+                  lineageCropBlocked
+                }
+              >
+                {lineage.isRunning ? '处理中…' : '继续 →'}
+              </button>
+            </div>
+          </footer>
+        </section>
+      ) : (
+      <>
       <div className="tb-body">
         <div className="tb-jobs">
           <div className="tb-jobs-head">
@@ -1137,6 +1424,8 @@ export function ToolboxPanel(): JSX.Element {
           </button>
         </div>
       </footer>
+      </>
+      )}
 
       {/* R-39 — History section. Sits below the footer (i.e. always
           visible at the very bottom of the panel) so completed runs are
@@ -1194,6 +1483,20 @@ export function ToolboxPanel(): JSX.Element {
                       <div className="tb-history-error">{entry.error}</div>
                     ) : null}
                   </button>
+                  {/* R-TB-CHAIN-V2 — 「继续处理 →」 entry point. Only
+                      shown for done entries with a primary output; click
+                      seeds the lineage with that output as the root and
+                      switches the panel into chain mode. */}
+                  {canReveal ? (
+                    <button
+                      type="button"
+                      className="tb-history-continue"
+                      title="基于此结果继续链式处理"
+                      onClick={() => handleEnterLineageFromHistory(out)}
+                    >
+                      继续处理 →
+                    </button>
+                  ) : null}
                   <button
                     type="button"
                     className="tb-history-remove"
