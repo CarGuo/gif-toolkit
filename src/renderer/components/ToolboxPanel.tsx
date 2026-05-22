@@ -1,8 +1,35 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ToolboxKind, ToolboxOptimizeMethod, ToolboxParams, TaskProgress } from '../../shared/types';
+import type {
+  ToolboxKind,
+  ToolboxOptimizeMethod,
+  ToolboxParams,
+  TaskProgress,
+  ToolboxMode
+} from '../../shared/types';
 import { TOOLBOX_INPUT_EXTENSIONS } from '../../shared/types';
 import { useToolbox } from './useToolbox';
 import { CropBox, type CropRect } from './CropBox';
+import { useToolboxChain } from './useToolboxChain';
+import { useChainDrafts } from './useChainDrafts';
+import { ChainStepRow } from './ChainStepRow';
+import { CropPauseModal } from './CropPauseModal';
+
+/** R-TB-CHAIN Phase 2.2 — kinds the chain mode is allowed to compose.
+ *  Excludes 'video-to-gif' / 'video-to-webp' because those produce a
+ *  format-shift in the first step that the chain runner doesn't yet
+ *  guarantee compatibility for downstream of (decoder/encoder mix).
+ *  Keeping the panel-side allow-list narrow protects against runtime
+ *  validateChainCompatibility surprises during early UX. */
+const CHAIN_KIND_OPTIONS: ReadonlyArray<{ kind: ToolboxKind; label: string }> = [
+  { kind: 'gif-resize', label: 'GIF Resize' },
+  { kind: 'gif-optimize', label: 'GIF Optimize' },
+  { kind: 'crop', label: 'Crop (暂停选区)' },
+  { kind: 'speed', label: 'Speed' },
+  { kind: 'reverse', label: 'Reverse' },
+  { kind: 'rotate', label: 'Rotate' },
+  { kind: 'trim', label: 'Trim' },
+  { kind: 'gif-webp-convert', label: 'GIF ↔ WebP' }
+];
 
 /**
  * R-35 / R-36 — ToolboxPanel.
@@ -686,6 +713,24 @@ export function ToolboxPanel(): JSX.Element {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [pickError, setPickError] = useState<string | null>(null);
 
+  // R-TB-CHAIN Phase 2.2 — toolbox mode toggle. Defaults to 'batch' to
+  // preserve existing UX; switching to 'chain' is opt-in and only
+  // valid when the queue contains exactly one input.
+  const [mode, setMode] = useState<ToolboxMode>('batch');
+  const chain = useToolboxChain();
+  const chainDrafts = useChainDrafts();
+
+  // Multi-input lock-back: chain semantics are undefined for >1 input,
+  // so any moment the queue length goes above 1 we hard-snap mode to
+  // 'batch' and clear pending chain drafts. Mirrors the spec line
+  // "只在单个图片有效，批量不行" from R-TB-CHAIN.
+  useEffect(() => {
+    if (mode === 'chain' && tb.jobs.length > 1) {
+      setMode('batch');
+      chainDrafts.clear();
+    }
+  }, [mode, tb.jobs.length, chainDrafts]);
+
   const accept = useMemo(() => TOOLBOX_INPUT_EXTENSIONS[tb.kind].join(','), [tb.kind]);
   const allowedExts = useMemo(
     () => new Set(TOOLBOX_INPUT_EXTENSIONS[tb.kind].map((e) => e.toLowerCase())),
@@ -907,12 +952,62 @@ export function ToolboxPanel(): JSX.Element {
   }, []);
 
   const handleStart = useCallback(async () => {
+    if (mode === 'chain') {
+      const head = tb.jobs[0];
+      if (!head) {
+        // eslint-disable-next-line no-alert
+        window.alert('链路模式需要先选择 1 个文件');
+        return;
+      }
+      if (tb.jobs.length > 1) {
+        // eslint-disable-next-line no-alert
+        window.alert('链路模式仅支持单文件，请删除多余文件后再开始');
+        return;
+      }
+      if (!chainDrafts.allValid) {
+        // eslint-disable-next-line no-alert
+        window.alert('链路至少需要 1 个步骤，且每个步骤参数都必须有效');
+        return;
+      }
+      const r = await chain.start({
+        inputPath: head.inputPath,
+        drafts: chainDrafts.drafts
+      });
+      if (!r.ok && r.error) {
+        // eslint-disable-next-line no-alert
+        window.alert(`启动链路失败:${r.error}`);
+      }
+      return;
+    }
     const r = await tb.start();
     if (!r.ok && r.error) {
       // eslint-disable-next-line no-alert
       window.alert(`启动失败:${r.error}`);
     }
-  }, [tb]);
+  }, [mode, tb, chain, chainDrafts]);
+
+  const handleChainResume = useCallback(
+    async (patch: Partial<ToolboxParams>): Promise<void> => {
+      const r = await chain.resume(patch);
+      if (!r.ok && r.error) {
+        // eslint-disable-next-line no-alert
+        window.alert(`恢复链路失败:${r.error}`);
+      }
+    },
+    [chain]
+  );
+
+  const handleChainCancel = useCallback(async (): Promise<void> => {
+    await chain.cancel();
+  }, [chain]);
+
+  const handleCancel = useCallback(async (): Promise<void> => {
+    if (mode === 'chain') {
+      await chain.cancel();
+      return;
+    }
+    tb.cancel();
+  }, [mode, chain, tb]);
 
   const handleOpenOutputDir = useCallback(async () => {
     if (!tb.lastOutputDir || !window.giftk) return;
@@ -970,6 +1065,47 @@ export function ToolboxPanel(): JSX.Element {
 
   return (
     <div className="toolbox">
+      {/* R-TB-CHAIN Phase 2.2 — mode toggle. Renders above the kind
+          tabs so the user grasps "this whole panel switches lanes"
+          before fiddling with kind chips. The chain button is
+          disabled while a batch is running (and vice-versa) to
+          prevent cross-lane state races. */}
+      <div
+        className="tb-mode-toggle"
+        role="radiogroup"
+        aria-label="工具箱链路"
+        style={{ display: 'flex', gap: 8, padding: '6px 8px', alignItems: 'center' }}
+      >
+        <button
+          type="button"
+          role="radio"
+          aria-checked={mode === 'batch'}
+          aria-label="batch-mode"
+          className={`tb-mode-btn${mode === 'batch' ? ' is-active' : ''}`}
+          onClick={() => setMode('batch')}
+          disabled={tb.isRunning || chain.isRunning}
+        >
+          批量模式
+        </button>
+        <button
+          type="button"
+          role="radio"
+          aria-checked={mode === 'chain'}
+          aria-label="chain-mode"
+          className={`tb-mode-btn${mode === 'chain' ? ' is-active' : ''}`}
+          onClick={() => setMode('chain')}
+          disabled={tb.isRunning || chain.isRunning || tb.jobs.length > 1}
+          title={tb.jobs.length > 1 ? '链路模式仅支持单文件' : '对单图依次执行多个步骤'}
+        >
+          链路模式 (单图)
+        </button>
+        {mode === 'chain' && tb.jobs.length > 1 ? (
+          <span className="tb-warn" style={{ fontSize: 12 }}>
+            链路模式仅支持单文件，已自动切回批量模式
+          </span>
+        ) : null}
+      </div>
+
       <header className="tb-header">
         <div className="tb-tabs" role="tablist" aria-label="工具箱模式">
           {KIND_OPTIONS.map((opt) => (
@@ -1100,14 +1236,74 @@ export function ToolboxPanel(): JSX.Element {
         </div>
 
         <aside className="tb-side">
-          <div className="tb-side-head">参数</div>
-          <ParamForm
-            kind={tb.kind}
-            params={tb.params}
-            setParams={tb.setParams}
-            mediaInfo={mediaInfo}
-            onTargetFormatTouch={() => { userTouchedTargetRef.current = true; }}
-          />
+          <div className="tb-side-head">{mode === 'chain' ? '链路步骤' : '参数'}</div>
+          {mode === 'chain' ? (
+            <div
+              className="tb-chain-editor"
+              style={{ display: 'flex', flexDirection: 'column', gap: 8 }}
+            >
+              {chainDrafts.drafts.length === 0 ? (
+                <div style={{ fontSize: 12, color: 'var(--muted, #8a8f97)' }}>
+                  尚无步骤。点击下方「+ 添加步骤」开始。
+                </div>
+              ) : (
+                chainDrafts.drafts.map((d, i) => {
+                  // R-TB-CHAIN — runtime step id 与 useToolboxChain
+                  // 内部 stepIdFor 一致：${chain.chainId}-s${i+1}
+                  const runtimeId = chain.chainId
+                    ? `${chain.chainId}-s${i + 1}`
+                    : null;
+                  const stepView = runtimeId
+                    ? chain.steps.find((s) => s.id === runtimeId)
+                    : undefined;
+                  return (
+                    <ChainStepRow
+                      key={d.draftId}
+                      index={i}
+                      total={chainDrafts.drafts.length}
+                      draft={d}
+                      progress={stepView?.progress}
+                      isRunning={chain.isRunning}
+                      kindOptions={CHAIN_KIND_OPTIONS}
+                      onKindChange={(k) => chainDrafts.setStepKind(d.draftId, k)}
+                      onParamsChange={(p) => chainDrafts.setStepParams(d.draftId, p)}
+                      onRemove={() => chainDrafts.removeStep(d.draftId)}
+                      onMoveUp={() => chainDrafts.moveStepUp(d.draftId)}
+                      onMoveDown={() => chainDrafts.moveStepDown(d.draftId)}
+                    />
+                  );
+                })
+              )}
+              <button
+                type="button"
+                className="tb-link"
+                aria-label="add-chain-step"
+                onClick={() => chainDrafts.addStep('gif-resize')}
+                disabled={chain.isRunning}
+                style={{ alignSelf: 'flex-start' }}
+              >
+                + 添加步骤
+              </button>
+              {chain.error ? (
+                <div className="tb-notice tb-notice-error" role="alert">
+                  {chain.error}
+                </div>
+              ) : null}
+              {chain.finalStatus === 'done' && chain.outputDir ? (
+                <div className="tb-notice" style={{ fontSize: 12 }}>
+                  链路完成,输出目录:{chain.outputDir}
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <ParamForm
+              kind={tb.kind}
+              params={tb.params}
+              setParams={tb.setParams}
+              mediaInfo={mediaInfo}
+              onTargetFormatTouch={() => { userTouchedTargetRef.current = true; }}
+            />
+          )}
         </aside>
       </div>
 
@@ -1126,14 +1322,34 @@ export function ToolboxPanel(): JSX.Element {
           ) : null}
         </div>
         <div className="tb-footer-right">
-          <button type="button" className="btn" onClick={tb.cancel} disabled={!tb.isRunning}>取消</button>
+          <button
+            type="button"
+            className="btn"
+            onClick={handleCancel}
+            disabled={mode === 'chain' ? !chain.isRunning : !tb.isRunning}
+          >
+            取消
+          </button>
           <button
             type="button"
             className="btn primary"
             onClick={handleStart}
-            disabled={tb.isRunning || tb.jobs.length === 0 || cropBlocked}
+            disabled={
+              mode === 'chain'
+                ? chain.isRunning ||
+                  tb.jobs.length === 0 ||
+                  tb.jobs.length > 1 ||
+                  !chainDrafts.allValid
+                : tb.isRunning || tb.jobs.length === 0 || cropBlocked
+            }
           >
-            {tb.isRunning ? '处理中…' : '开始'}
+            {mode === 'chain'
+              ? chain.isRunning
+                ? '链路运行中…'
+                : '开始链路'
+              : tb.isRunning
+                ? '处理中…'
+                : '开始'}
           </button>
         </div>
       </footer>
@@ -1206,6 +1422,18 @@ export function ToolboxPanel(): JSX.Element {
           </ul>
         )}
       </section>
+
+      {/* R-TB-CHAIN Phase 2.2 — Crop pause modal. Mounted at panel
+          root so the backdrop overlays the entire toolbox view. The
+          modal returns null until chain.awaitingInput becomes
+          non-null (the chain runner emits 'awaiting-input' when it
+          reaches a pausing kind), at which point the user sees the
+          previous step's output and selects a crop rect. */}
+      <CropPauseModal
+        awaiting={chain.awaitingInput}
+        onResume={handleChainResume}
+        onCancel={handleChainCancel}
+      />
     </div>
   );
 }
