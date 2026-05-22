@@ -32,6 +32,8 @@ import { usePreviewState } from './components/usePreviewState';
 import { WorkspaceTabs } from './components/WorkspaceTabs';
 import { ModalsHost } from './views/ModalsHost';
 import { TopBar } from './views/TopBar';
+import { UpdateModal } from './components/UpdateModal';
+import type { UpdateCheckResult } from '../shared/types';
 import { SecondaryViews } from './views/SecondaryViews';
 import { SniffSection } from './views/SniffSection';
 import { MediaGridPane } from './views/MediaGridPane';
@@ -326,6 +328,19 @@ const App: React.FC = () => {
   const recordOutputDirRef = useRef<Map<string, string>>(new Map());
   const [view, setView] = useState<'home' | 'history' | 'toolbox' | 'uploads'>('home');
 
+  // R-UPDATE — Update-check modal state. Three pieces:
+  //   - `updateOpen` controls visibility of UpdateModal.
+  //   - `updateResult` is the latest probe payload (from manual recheck
+  //     or the silent startup push). null while a manual recheck is in
+  //     flight to render the "loading" branch.
+  //   - `updateLoading` mirrors the in-flight IPC roundtrip so the
+  //     primary CTAs disable correctly without flicker.
+  // The startup-push event is wired below in a useEffect that calls
+  // `window.giftk.updater.onUpdateAvailable`.
+  const [updateOpen, setUpdateOpen] = useState(false);
+  const [updateResult, setUpdateResult] = useState<UpdateCheckResult | null>(null);
+  const [updateLoading, setUpdateLoading] = useState(false);
+
   // R-45 — image-host upload state. Settings are loaded once at mount via
   // ipc; the modal updates them in place. The upload-history hook owns
   // localStorage persistence; we only forward main-process progress
@@ -371,6 +386,60 @@ const App: React.FC = () => {
       setHistoryDetail(null);
     }
   }, [history, historyDetail]);
+
+  // R-UPDATE — Subscribe to the silent startup update push.
+  // [Main process](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/index.ts)
+  // fires `updater:available` exactly once, ~5s after `app.whenReady()`,
+  // and ONLY when a strictly-newer release is detected. We respond by:
+  //   1. caching the payload into `updateResult` so the modal renders
+  //      the correct branch immediately when the user opens it (no
+  //      second IPC roundtrip needed);
+  //   2. auto-opening the modal — the user explicitly opted into "every
+  //      launch checks once" in the AskUserQuestion round, so a popup
+  //      is the contract, not a surprise.
+  // The unsubscribe is critical to avoid leaking listeners across HMR
+  // cycles in dev (preload's `ipcRenderer.on` would otherwise stack
+  // every Fast-Refresh).
+  useEffect(() => {
+    if (!giftk?.updater?.onUpdateAvailable) return;
+    const off = giftk.updater.onUpdateAvailable((result) => {
+      setUpdateResult(result);
+      if (result.hasUpdate) {
+        setUpdateOpen(true);
+      }
+    });
+    return off;
+  }, []);
+
+  // R-UPDATE — Manual recheck. Always force=true so the user gets a
+  // fresh roundtrip when they explicitly tap "关于/更新" or "重新检查";
+  // the 6h cache only protects the silent startup probe path. Errors
+  // are surfaced via `updateResult.error` (rendered by UpdateModal),
+  // never thrown.
+  const onCheckForUpdates = useCallback(async () => {
+    if (!giftk?.updater?.checkForUpdates) return;
+    setUpdateOpen(true);
+    setUpdateLoading(true);
+    try {
+      const r = await giftk.updater.checkForUpdates(true);
+      setUpdateResult(r);
+    } catch (e) {
+      setUpdateResult({
+        current: '',
+        latest: null,
+        hasUpdate: false,
+        htmlUrl: null,
+        publishedAt: null,
+        releaseName: null,
+        body: null,
+        error: e instanceof Error ? e.message : String(e),
+        cached: false,
+        fetchedAt: Date.now(),
+      });
+    } finally {
+      setUpdateLoading(false);
+    }
+  }, []);
 
   // Bottom panel (TaskTable + LogBox) resizable height.
   // Persisted in localStorage so the user's preference survives reloads.
@@ -1172,6 +1241,15 @@ const App: React.FC = () => {
           // 详情、history-card 行级「打开目录」语义一致。
           giftk.openOutputDir(baseOutputDir).catch(() => { /* ignore */ });
         } : undefined}
+        onCheckForUpdates={onCheckForUpdates}
+      />
+
+      <UpdateModal
+        open={updateOpen}
+        result={updateResult}
+        loading={updateLoading}
+        onRecheck={onCheckForUpdates}
+        onClose={() => setUpdateOpen(false)}
       />
 
       {view === 'home' ? (

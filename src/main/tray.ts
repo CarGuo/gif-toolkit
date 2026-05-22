@@ -1,6 +1,7 @@
-import { app, Tray, Menu, nativeImage, shell, clipboard, BrowserWindow, MenuItemConstructorOptions } from 'electron';
+import { app, Tray, Menu, nativeImage, shell, clipboard, dialog, BrowserWindow, MenuItemConstructorOptions } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
+import { checkLatestRelease } from './updater';
 
 export interface TrayDeps {
   getMainWindow: () => BrowserWindow | null;
@@ -142,6 +143,63 @@ function buildContextMenu(deps: TrayDeps): Menu {
     {
       label: `关于 Gif Toolkit ${app.getVersion()}`,
       click: () => { app.showAboutPanel(); },
+    },
+    {
+      // R-UPDATE — Tray-menu update check. Self-contained: hits the
+      // same `checkLatestRelease` shared with the IPC + startup probe
+      // (so the 6h cache is unified), then surfaces a modal dialog
+      // because the tray flow has no webContents to fan out to. The
+      // dialog has a "下载最新版" button only when an update actually
+      // exists; on the latest version we still show a friendly OK
+      // dialog (the user explicitly clicked, they deserve feedback).
+      label: '检查更新…',
+      click: async () => {
+        deps.log('tray menu click: 检查更新');
+        try {
+          const r = await checkLatestRelease({ force: true });
+          if (r.error) {
+            await dialog.showMessageBox({
+              type: 'warning',
+              title: '检查更新失败',
+              message: '无法获取最新版本信息',
+              detail: `${r.error}\n\n当前版本: v${r.current}\n请确认网络可访问 api.github.com,或稍后再试。`,
+              buttons: ['确定'],
+              defaultId: 0,
+            });
+            return;
+          }
+          if (r.hasUpdate && r.htmlUrl) {
+            const choice = await dialog.showMessageBox({
+              type: 'info',
+              title: '发现新版本',
+              message: `Gif Toolkit v${r.latest} 已发布`,
+              detail: [
+                `当前版本: v${r.current}`,
+                `最新版本: v${r.latest}`,
+                r.releaseName ? `发布: ${r.releaseName}` : '',
+                r.publishedAt ? `时间: ${r.publishedAt}` : '',
+              ].filter(Boolean).join('\n'),
+              buttons: ['下载最新版', '稍后'],
+              defaultId: 0,
+              cancelId: 1,
+            });
+            if (choice.response === 0) {
+              shell.openExternal(r.htmlUrl).catch(() => undefined);
+            }
+          } else {
+            await dialog.showMessageBox({
+              type: 'info',
+              title: '已是最新版',
+              message: `当前版本 v${r.current} 已是最新。`,
+              detail: r.latest ? `已检查 GitHub Releases（最新 v${r.latest}）。` : '',
+              buttons: ['确定'],
+              defaultId: 0,
+            });
+          }
+        } catch (e) {
+          deps.log(`tray check update failed: ${(e as Error).message}`);
+        }
+      },
     },
     {
       label: '退出',

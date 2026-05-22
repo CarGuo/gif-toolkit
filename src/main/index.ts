@@ -51,6 +51,7 @@ import {
 import { setupTray, destroyTray, sniffClipboardURL, type TrayDeps } from './tray';
 import { registerShortcuts, unregisterAllShortcuts } from './globalShortcut';
 import { sweepTmpDir, sessionTmpRegistry } from './tmpCleanup';
+import { checkLatestRelease, type UpdateCheckResult } from './updater';
 import os from 'node:os';
 
 // Some networks block UDP/QUIC which makes Chromium's TLS over QUIC fall back
@@ -1377,6 +1378,32 @@ ipcMain.handle('app:openDir', async (_e, p: unknown) => {
 });
 
 /**
+ * R-UPDATE — Narrow `shell.openExternal` bridge for the UpdateModal
+ * "下载最新版" button. We accept ONLY http(s) URLs; everything else
+ * (file://, javascript:, custom schemes) is rejected so the bridge
+ * can't be turned into a generic "launch arbitrary URI handler" by a
+ * compromised renderer. The match is case-insensitive on the scheme
+ * and uses URL parsing (not regex) to avoid `https://evil@good.com`
+ * style spoofs being accepted as "https".
+ */
+ipcMain.handle('app:openExternal', async (_e, url: unknown): Promise<{ ok: true }> => {
+  if (typeof url !== 'string' || url.length === 0 || url.length > 2048) {
+    throw new Error('url must be a non-empty string under 2048 chars');
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error('url is not a valid URL');
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new Error(`url scheme not allowed: ${parsed.protocol}`);
+  }
+  await shell.openExternal(parsed.toString());
+  return { ok: true };
+});
+
+/**
  * R-39 — app:revealItem
  *
  * Opens the OS file manager (Finder on macOS, Explorer on Windows) and
@@ -1430,6 +1457,19 @@ ipcMain.handle('system:capabilities', async () => {
  */
 ipcMain.handle('app:buildInfo', async () => {
   return BUILD_INFO;
+});
+
+/**
+ * R-UPDATE — Update check IPC. Always returns a well-formed
+ * UpdateCheckResult; on network/timeout/JSON failure the result has
+ * `error` set and `hasUpdate=false`, so the renderer never has to
+ * try/catch this call. `force=true` (the default for manual taps from
+ * the TopBar / tray) bypasses the in-memory 6h cache so the user
+ * isn't lied to when they explicitly ask "is there anything new?".
+ */
+ipcMain.handle('updater:checkForUpdates', async (_e, opts?: unknown): Promise<UpdateCheckResult> => {
+  const force = !!(opts && typeof opts === 'object' && (opts as { force?: unknown }).force);
+  return checkLatestRelease({ force });
 });
 
 /**
@@ -2106,6 +2146,31 @@ if (!gotLock) {
     } catch (e) {
       log(`tray/shortcut bootstrap failed: ${(e as Error).message}`);
     }
+
+    // R-UPDATE — Silent startup update check. Fires once, 5s after
+    // the tray/shortcuts have settled, to avoid competing with the
+    // first-paint critical path. We don't await it (network can be
+    // slow / offline); instead we hand the result off to the
+    // renderer via `updater:available`. The renderer side decides
+    // whether to surface a modal — see [TopBar update listener].
+    // Failures are logged and swallowed: this is a *check*, not a
+    // critical task, and a wifi blip on launch should never produce
+    // a visible error.
+    setTimeout(() => {
+      void checkLatestRelease().then((result) => {
+        log(
+          `updater: startup check current=${result.current} latest=${result.latest ?? 'n/a'} ` +
+          `hasUpdate=${result.hasUpdate} error=${result.error ?? 'none'}`
+        );
+        const w = mainWindow;
+        if (w && !w.isDestroyed()) {
+          try { w.webContents.send('updater:available', result); }
+          catch (e) { log(`updater: send failed: ${(e as Error).message}`); }
+        }
+      }).catch((e) => {
+        log(`updater: startup check threw: ${(e as Error).message}`);
+      });
+    }, 5_000);
 
     // R-87 — Reap stale tmp dirs (giftk-mhtml-*, giftk-offline-test-*,
     // giftk-e2e-*, giftk-in-*, giftk-out-*, giftk-fake-*) older than 1h.

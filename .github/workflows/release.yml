@@ -41,6 +41,18 @@
 #     auto-provisioned `GITHUB_TOKEN` can create the release and
 #     upload assets. Without it, electron-builder's publish step
 #     fails with 403.
+#   * R-UPDATE — Client-side check for updates. The published draft
+#     release is consumed by the in-app updater
+#     ([src/main/updater.ts](../../src/main/updater.ts)), which polls
+#     `GET /repos/CarGuo/gif-toolkit/releases/latest` 5s after launch
+#     (and on demand from the TopBar / tray menu). This deliberately
+#     does NOT use electron-updater: the unsigned-binary stance above
+#     is incompatible with electron-updater's auto-install path on
+#     macOS / Windows, and a "open browser → download manually" flow
+#     keeps the trust model simple. To make a release visible to
+#     users, REMEMBER TO PROMOTE THE DRAFT TO PUBLISHED — drafts are
+#     not returned by `/releases/latest` and the updater will report
+#     "no release" until the draft is flipped public.
 #
 # How to trigger a real release (operator's runbook):
 #   $ git tag v0.1.0

@@ -30,3 +30,4 @@ export * from './toolbox';
 export * from './upload';
 export * from './system';
 export * from './log';
+export * from './update';

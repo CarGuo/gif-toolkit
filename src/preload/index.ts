@@ -24,7 +24,8 @@ import type {
   CapabilityReport,
   SessionLogEntry,
   SessionLogSnapshot,
-  SessionLogExportFormat
+  SessionLogExportFormat,
+  UpdateCheckResult
 } from '../shared/types';
 import type { BuildInfo } from '../shared/buildInfo';
 
@@ -428,6 +429,44 @@ const api = {
       ipcRenderer.removeListener('session:log:append', onAppend);
       ipcRenderer.removeListener('session:log:close', onClose);
     };
+  },
+
+  /**
+   * R-UPDATE — Client-side update check bridge. Two surfaces:
+   *
+   *   - `checkForUpdates(force?)` — explicit pull (TopBar 「关于/更新」
+   *     button, About modal "立即检查"). Default `force=true` so a
+   *     manual tap always bypasses the in-process 6h cache; otherwise
+   *     users would mash the button and get the same stale result.
+   *
+   *   - `onUpdateAvailable(cb)` — push channel. Main fires this exactly
+   *     once, ~5s after `app.whenReady()`, when (and only when) a
+   *     newer release is detected. Renderer subscribes early (App
+   *     mount) so the notification can pop even if the user hasn't
+   *     opened the menu yet. Returns an unsubscribe function the
+   *     caller MUST invoke on unmount to avoid leaking listeners
+   *     across HMR / window-recreate cycles.
+   *
+   *   - `openExternal(url)` — narrow shell.openExternal wrapper used
+   *     by the UpdateModal "下载最新版" button. We funnel it through
+   *     the existing IPC namespace rather than exposing the full shell
+   *     module to keep the renderer attack surface tiny.
+   */
+  updater: {
+    checkForUpdates(force = true): Promise<UpdateCheckResult> {
+      return ipcRenderer.invoke('updater:checkForUpdates', { force });
+    },
+    onUpdateAvailable(cb: (result: UpdateCheckResult) => void): () => void {
+      const handler = (_: unknown, result: UpdateCheckResult): void => {
+        try { cb(result); } catch { /* swallow renderer-side errors */ }
+      };
+      ipcRenderer.on('updater:available', handler);
+      return () => ipcRenderer.removeListener('updater:available', handler);
+    },
+    openExternal(url: string): Promise<void> {
+      ensureString(url, 'url');
+      return ipcRenderer.invoke('app:openExternal', url);
+    },
   },
 
   /**

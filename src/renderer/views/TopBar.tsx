@@ -41,12 +41,19 @@ export interface TopBarProps {
    */
   onOpenCurrentDir?: () => void;
   hasBaseOutputDir?: boolean;
+  /**
+   * R-UPDATE — 「关于/更新」按钮回调。点击后由 App 层负责调
+   * `window.giftk.updater.checkForUpdates(true)` 并打开 UpdateModal。
+   * 设计上把按钮放在 `.actions` 最左侧（root-dir 按钮之前），托盘
+   * 菜单 / About 面板各走自己的入口；这里是主窗口可见入口。
+   */
+  onCheckForUpdates?: () => void;
 }
 
 export const TopBar: React.FC<TopBarProps> = ({
   view, setView, reloadHistory, historyCount, uploadHistoryCount,
   outputDirLabel, outputDirTitle, onPickDir,
-  onOpenCurrentDir, hasBaseOutputDir
+  onOpenCurrentDir, hasBaseOutputDir, onCheckForUpdates
 }) => {
   return (
     <div className="titlebar">
@@ -108,6 +115,18 @@ export const TopBar: React.FC<TopBarProps> = ({
       </div>
       <div className="spacer" />
       <div className="actions">
+        {onCheckForUpdates ? (
+          <button
+            type="button"
+            className="ghost"
+            onClick={onCheckForUpdates}
+            title="检查更新"
+            aria-label="检查更新"
+            style={{ padding: '0 10px' }}
+          >
+            ⬆ 关于/更新
+          </button>
+        ) : null}
         {hasBaseOutputDir && onOpenCurrentDir ? (
           <>
             {/* R-WS-90 P5i — 主按钮 = 在文件管理器里打开当前根目录;

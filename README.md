@@ -111,6 +111,10 @@ npm run package:linux   # Linux:AppImage / deb / tar.gz
 
 > 当前未配置 Apple 公证 / Authenticode / Linux 代码签名,首次运行会有"未知开发者"提示,App 内会通过 toast 给出"右键打开 / 跳过 SmartScreen"指引。
 
+### 客户端检查更新（R-UPDATE）
+
+App 启动后约 5 秒会静默查询一次 GitHub Releases；发现严格更高的稳定版本会自动弹出「检查更新」对话框。也可以随时手动触发：主窗口右上「⬆ 关于/更新」按钮、托盘菜单「检查更新…」、或 macOS 应用菜单「Help → About」。「下载最新版」会调用系统浏览器跳到对应 release 页（不引入 electron-updater，签名链路保持当前的 unsigned 状态）。结果在内存里缓存 6 小时；手动按钮始终强刷。
+
 ---
 
 ## 工具箱(10 个独立工具)
