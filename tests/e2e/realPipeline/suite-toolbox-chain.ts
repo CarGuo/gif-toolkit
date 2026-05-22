@@ -570,3 +570,195 @@ test('SUITE TB-CHAIN-D — crop pause-at-step + resumeToolboxChain settles the c
     await clearChainHistory().catch(() => undefined);
   }
 });
+
+/**
+ * SUITE TB-CHAIN-E — UI-driven progressive lineage (R-TB-CHAIN-V2).
+ *
+ * What this proves end-to-end against the packaged Electron app
+ * --------------------------------------------------------------
+ * 1. The user navigates to the 工具箱 tab via a real DOM click.
+ * 2. We seed ONE 'done' row into `db.toolboxHistory` whose `outputs[0]`
+ *    points at the real tests/fixtures/tiny.gif. That mimics "user
+ *    just finished a video-to-gif batch" without spending 10s actually
+ *    running ffmpeg twice — that path is already covered by SUITE E.
+ *    The crucial assertion is that the V2.2 lineage UI takes a real
+ *    artifact and chains a real follow-up step on it.
+ * 3. Click the row's 「继续处理 →」 button → assert the lineage section
+ *    mounts (面包屑 visible, batch 开始 button gone).
+ * 4. Verify the chip filter (extension-aware): .gif focus must show
+ *    GIF Resize and must NOT show Video → GIF.
+ * 5. Click GIF Resize → click 「继续 →」 → wait for the chain runner's
+ *    terminal `done` emit (single-step chain, totalSteps=1).
+ * 6. Assert: the new tail-node path exists on disk + non-empty .gif.
+ *    Breadcrumb DOM now shows TWO `.tb-lineage-crumb` entries with
+ *    `is-focus` on the second one.
+ * 7. Click the first crumb → focus walks back to root.
+ * 8. Click 「退出链路」 → lineage section unmounts, batch UI returns.
+ *
+ * This SUITE deliberately does NOT call `window.giftk.startToolboxChain`
+ * directly; every transition is triggered by a DOM event, exactly as a
+ * human user would. The only test-only escape hatch is the history
+ * seed — a single IPC call that mirrors what the real batch flow would
+ * have written anyway.
+ */
+test('SUITE TB-CHAIN-E — UI lineage: history → 继续处理 → GIF Resize → 2-node breadcrumb', async () => {
+  const { page } = getHarness();
+  test.setTimeout(120_000);
+
+  // Reset clean — both legacy chain history (TB-CHAIN A-D wrote rows)
+  // and tb history (any earlier suite may have left rows behind).
+  await clearChainHistory().catch(() => undefined);
+  await page.evaluate(async () => {
+    const w = window as unknown as {
+      giftk: { db: { toolboxHistory: { clear(): Promise<void> } } };
+    };
+    await w.giftk.db.toolboxHistory.clear();
+  });
+
+  // Switch to the 工具箱 view — the panel mounts only when this tab is
+  // active, so every subsequent locator query depends on this click.
+  const toolboxTab = page.locator('button.tab-btn', { hasText: '工具箱' });
+  await expect(toolboxTab).toBeVisible({ timeout: 10_000 });
+  await toolboxTab.click();
+  await expect(toolboxTab).toHaveAttribute('aria-pressed', 'true');
+
+  // Seed history with one row whose primary output IS the real
+  // tiny.gif fixture. The subsequent chain step (GIF Resize) will
+  // read it via ffmpeg, so this must be a path that actually exists.
+  const seedId = `tbchain-e-seed-${Date.now()}`;
+  const finishedAt = Date.now();
+  await page.evaluate(
+    async (args: { id: string; output: string; finishedAt: number }) => {
+      const w = window as unknown as {
+        giftk: { db: { toolboxHistory: { upsert(entry: unknown): Promise<void> } } };
+      };
+      await w.giftk.db.toolboxHistory.upsert({
+        id: args.id,
+        kind: 'video-to-gif',
+        inputPath: '/synthetic/source.mp4',
+        displayName: 'source.mp4',
+        outputs: [args.output],
+        params: { fps: 10, maxWidth: 200 },
+        status: 'done',
+        finishedAt: args.finishedAt
+      });
+    },
+    { id: seedId, output: FIXTURE_GIF, finishedAt }
+  );
+
+  // The panel reads db.toolboxHistory on mount, so we have to nudge a
+  // re-read by bouncing tabs.
+  await page.locator('button.tab-btn', { hasText: '主页' }).click().catch(() => undefined);
+  await page.waitForTimeout(150);
+  await toolboxTab.click();
+
+  // The seeded row should now be visible.
+  const continueBtn = page.locator('button.tb-history-continue').first();
+  await expect(continueBtn).toBeVisible({ timeout: 10_000 });
+  await expect(continueBtn).toHaveText(/继续处理/);
+
+  await installRecorder();
+  let lineageOutputPath: string | null = null;
+  try {
+    // === Step 1 — enter lineage from history ============================
+    await continueBtn.click();
+    const lineageSection = page.locator('section.tb-lineage');
+    await expect(lineageSection).toBeVisible({ timeout: 5_000 });
+    await expect(page.locator('button', { hasText: '退出链路' })).toBeVisible();
+    // Batch mode's 开始 button must be unmounted — proves the ternary
+    // really swapped sections (not just stacked them).
+    const batchStart = page.locator('footer.tb-footer button.primary', { hasText: '开始' });
+    await expect(batchStart).toHaveCount(0);
+
+    // === Step 2 — verify breadcrumb at 1 node + chip filter ============
+    let crumbs = lineageSection.locator('.tb-lineage-crumb');
+    await expect(crumbs).toHaveCount(1, { timeout: 5_000 });
+    const chipBar = lineageSection.locator('.tb-lineage-chips');
+    await expect(chipBar).toBeVisible();
+    // .gif focus → MUST show GIF Resize, MUST NOT show Video → GIF.
+    await expect(chipBar.locator('button[role="tab"]', { hasText: /GIF Resize/ })).toBeVisible();
+    await expect(chipBar.locator('button[role="tab"]', { hasText: 'Video → GIF' })).toHaveCount(0);
+
+    // === Step 3 — explicitly select GIF Resize so width is deterministic ===
+    const resizeChip = chipBar.locator('button[role="tab"]', { hasText: /^GIF Resize$/ });
+    await resizeChip.click();
+    await expect(resizeChip).toHaveAttribute('aria-selected', 'true');
+    await expect(lineageSection.locator('.tb-lineage-form')).toBeVisible();
+
+    // === Step 4 — fire 「继续 →」 and rendezvous on the terminal emit ===
+    const baselineProgress = (await snapshotRecorder()).progress.length;
+    const continueStepBtn = lineageSection.locator('button.btn.primary', { hasText: /^继续 →/ });
+    await expect(continueStepBtn).toBeEnabled();
+    await continueStepBtn.click();
+    // The hook generates its own chainId — we don't know it up front.
+    // Wait for ANY single-step chain terminal emit emitted after our
+    // baseline. Single-step chains emit stepIndex===1, totalSteps===1.
+    let final: ChainTerminalProgress | null = null;
+    const startWait = Date.now();
+    while (Date.now() - startWait < 60_000) {
+      const snap = await snapshotRecorder();
+      const candidates = snap.progress.slice(baselineProgress);
+      const last = [...candidates].reverse().find((p) => {
+        const cp = p as unknown as ChainTerminalProgress;
+        if (cp.totalSteps !== 1 || cp.stepIndex !== 1) return false;
+        return cp.status === 'done' || cp.status === 'failed' || cp.status === 'cancelled';
+      });
+      if (last) {
+        final = last as unknown as ChainTerminalProgress;
+        break;
+      }
+      await page.waitForTimeout(200);
+    }
+    if (!final) throw new Error('SUITE TB-CHAIN-E: lineage step did not emit a terminal status within 60s');
+    expect(final.status).toBe('done');
+    const outs = final.outputs ?? [];
+    expect(outs.length).toBeGreaterThanOrEqual(1);
+    lineageOutputPath = outs[0];
+    expect(existsSync(lineageOutputPath)).toBe(true);
+    expect(statSync(lineageOutputPath).size).toBeGreaterThan(0);
+    expect(/\.gif$/i.test(lineageOutputPath)).toBe(true);
+
+    // === Step 5 — breadcrumb now has 2 nodes, focus on the new tail ===
+    // The hook calls setNodes synchronously inside its progress
+    // listener, but React batches. Allow a small flush window.
+    await page.waitForTimeout(300);
+    crumbs = lineageSection.locator('.tb-lineage-crumb');
+    await expect(crumbs).toHaveCount(2, { timeout: 5_000 });
+    await expect(crumbs.nth(1)).toHaveClass(/is-focus/);
+    await expect(crumbs.nth(0)).not.toHaveClass(/is-focus/);
+
+    // === Step 6 — click the first crumb → focus walks back ============
+    const firstCrumbBtn = crumbs.nth(0).locator('button.tb-lineage-crumb-btn');
+    await firstCrumbBtn.click();
+    await expect(crumbs.nth(0)).toHaveClass(/is-focus/);
+    await expect(crumbs.nth(1)).not.toHaveClass(/is-focus/);
+
+    // === Step 7 — exit chain → batch UI back ==========================
+    await page.locator('button', { hasText: '退出链路' }).click();
+    await expect(lineageSection).toHaveCount(0);
+    await expect(page.locator('footer.tb-footer button.primary', { hasText: '开始' })).toBeVisible();
+
+    // eslint-disable-next-line no-console
+    console.log(
+      '\n[SUITE TB-CHAIN-E artifact]\n' +
+      `  source gif         : ${FIXTURE_GIF}\n` +
+      `  resize output      : ${lineageOutputPath}\n` +
+      `  output size bytes  : ${statSync(lineageOutputPath).size}\n`
+    );
+  } finally {
+    await tearDownRecorder();
+    if (lineageOutputPath) {
+      try {
+        const dir = path.dirname(lineageOutputPath);
+        rmSync(dir, { recursive: true, force: true });
+      } catch { /* ignore */ }
+    }
+    await clearChainHistory().catch(() => undefined);
+    await page.evaluate(async () => {
+      const w = window as unknown as {
+        giftk: { db: { toolboxHistory: { clear(): Promise<void> } } };
+      };
+      await w.giftk.db.toolboxHistory.clear();
+    }).catch(() => undefined);
+  }
+});
