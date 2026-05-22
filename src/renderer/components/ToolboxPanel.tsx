@@ -855,7 +855,25 @@ function TbHistoryThumb({
   );
 }
 
-export function ToolboxPanel(): JSX.Element {
+/** R-COMPRESS-V1 #5 — pendingPreset prop is a "drop-in seed" handed
+ *  down from App.tsx whenever the user clicks a 「推荐预设」chip on
+ *  a sniff-history card. Because `useToolbox()` is instantiated
+ *  HERE (not in App.tsx), App.tsx cannot directly call
+ *  `tb.applyPreset(...)`; it instead bumps a monotonically-keyed
+ *  prop and we react to the key change inside an effect.
+ *
+ *  Why a `key` field instead of a structural diff: two consecutive
+ *  clicks on the SAME chip should both seed the queue, but a
+ *  shallow `{ inputPath, kind, params }` triple would compare equal
+ *  by identity if App.tsx accidentally re-used the same object.
+ *  An incrementing string makes "fire on every click" unambiguous
+ *  while still supporting React's "props are values" model. */
+export interface ToolboxPanelProps {
+  pendingPreset?: { key: string; inputPath: string; kind: ToolboxKind; params: ToolboxParams } | null;
+}
+
+export function ToolboxPanel(props: ToolboxPanelProps = {}): JSX.Element {
+  const { pendingPreset } = props;
   const tb = useToolbox();
   // R-TB-CHAIN-V2 — progressive (one-step-at-a-time) chain. The hook
   // owns its own lineage state; the panel only renders the breadcrumb,
@@ -924,6 +942,27 @@ export function ToolboxPanel(): JSX.Element {
     }
     return out;
   }, [tb.jobs, lineage.nodes, tb.toolboxHistory]);
+
+  // R-COMPRESS-V1 #5 — react to a sniff-history「推荐预设」chip click.
+  // The parent (App.tsx) bumps `pendingPreset.key` whenever the user
+  // clicks a chip; we mirror that key in a ref so a fresh click with
+  // identical (inputPath, kind, params) still re-seeds the queue.
+  // tb.applyPreset is intentionally NOT in the dep list (it's a
+  // useCallback with [] deps so its identity is stable, but adding it
+  // would mask any future regression where it isn't). We only fire
+  // on key transitions.
+  const lastAppliedPresetKey = useRef<string | null>(null);
+  useEffect(() => {
+    if (!pendingPreset) return;
+    if (lastAppliedPresetKey.current === pendingPreset.key) return;
+    lastAppliedPresetKey.current = pendingPreset.key;
+    tb.applyPreset({
+      inputPath: pendingPreset.inputPath,
+      kind: pendingPreset.kind,
+      params: pendingPreset.params
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingPreset?.key]);
 
   // R-39 — probe + thumbnail every queued job (newest first). We process
   // sequentially to avoid spawning N ffmpeg children at once for a large

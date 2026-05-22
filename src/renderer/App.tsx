@@ -33,8 +33,9 @@ import { WorkspaceTabs } from './components/WorkspaceTabs';
 import { ModalsHost } from './views/ModalsHost';
 import { TopBar } from './views/TopBar';
 import { UpdateModal } from './components/UpdateModal';
-import type { UpdateCheckResult } from '../shared/types';
+import type { UpdateCheckResult, ToolboxKind, ToolboxParams } from '../shared/types';
 import { SecondaryViews } from './views/SecondaryViews';
+import { pickFirstDoneOutput } from './components/HistoryPanel';
 import { SniffSection } from './views/SniffSection';
 import { MediaGridPane } from './views/MediaGridPane';
 import { OptionsSection } from './views/OptionsSection';
@@ -327,6 +328,36 @@ const App: React.FC = () => {
   // user-visible "我四个任务最后落进了两个目录" bug.
   const recordOutputDirRef = useRef<Map<string, string>>(new Map());
   const [view, setView] = useState<'home' | 'history' | 'toolbox' | 'uploads'>('home');
+
+  // R-COMPRESS-V1 #5 — sniff-history「推荐预设」chip → toolbox prefill.
+  // useToolbox is instantiated INSIDE ToolboxPanel (not here), so we
+  // can't call applyPreset directly. Instead we publish a synthetic
+  // prop with a monotonically-increasing key; ToolboxPanel listens to
+  // key transitions and forwards to tb.applyPreset. Two consecutive
+  // clicks on the SAME chip both bump the key (so the queue is re-
+  // seeded each time), while a remount of ToolboxPanel — e.g. after
+  // tab-flipping back from 'home' — will see the latest pendingPreset
+  // and re-apply once because lastAppliedPresetKey starts null.
+  const [pendingPreset, setPendingPreset] = useState<{
+    key: string;
+    inputPath: string;
+    kind: ToolboxKind;
+    params: ToolboxParams;
+  } | null>(null);
+  const onApplyPresetFromHistory = useCallback(
+    (rec: HistoryRecord, preset: { kind: ToolboxKind; params: ToolboxParams }): void => {
+      const inputPath = pickFirstDoneOutput(rec);
+      if (!inputPath) return;
+      setView('toolbox');
+      setPendingPreset({
+        key: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        inputPath,
+        kind: preset.kind,
+        params: preset.params
+      });
+    },
+    []
+  );
 
   // R-UPDATE — Update-check modal state. Three pieces:
   //   - `updateOpen` controls visibility of UpdateModal.
@@ -1371,6 +1402,8 @@ const App: React.FC = () => {
           isUploadHistoryLoading={isUploadHistoryLoading}
           setView={setView}
           setUploadResult={setUploadResult}
+          pendingPreset={pendingPreset}
+          onApplyPreset={onApplyPresetFromHistory}
         />
       )}
 

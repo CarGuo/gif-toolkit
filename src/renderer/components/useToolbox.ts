@@ -101,6 +101,17 @@ export interface UseToolboxResult {
    *  Used post-bootstrap so a hook that mounted before the import
    *  finished surfaces freshly-imported rows. */
   reloadToolboxHistory: () => void;
+  /** R-COMPRESS-V1 #5 — atomically prefill the toolbox from a sniff
+   *  history "推荐预设" chip click. Clears the current queue + progress,
+   *  sets `kind` and `params` to the preset values (replacing — NOT
+   *  merging — the previous params so a chip click yields the exact
+   *  intended config), then enqueues exactly one job sourced from
+   *  `inputPath`. The caller (App.tsx) is responsible for switching
+   *  the active tab to 工具箱 before calling so the user sees the
+   *  result. The whole operation is synchronous and idempotent: a
+   *  second click with the same args is a no-op except for re-seeding
+   *  the queue with a fresh job id. */
+  applyPreset: (args: { inputPath: string; kind: ToolboxKind; params: ToolboxParams }) => void;
 }
 
 /** Default params per kind. Mirrors processor.ts defaults so the renderer
@@ -502,6 +513,45 @@ export function useToolbox(): UseToolboxResult {
     }
   }, []);
 
+  // R-COMPRESS-V1 #5 — sniff-history「推荐预设」chip → toolbox prefill.
+  // The flow is intentionally surgical: clear whatever the user had
+  // queued, set the preset kind+params verbatim (NOT merged with the
+  // current params; a chip click means "I want exactly this config"),
+  // then enqueue ONE job for the chosen input path. We bypass
+  // `addJobsFromPaths` because that helper filters against the
+  // CURRENT kind's whitelist via React-batched setState, which means
+  // a same-tick "set kind to video-to-gif AND queue clip.mp4" race
+  // would drop the job when the previous kind disallowed .mp4. By
+  // building the row inline against the *new* kind we keep the chip
+  // contract atomic and survivable across tab switches.
+  const applyPreset = useCallback(
+    (args: { inputPath: string; kind: ToolboxKind; params: ToolboxParams }): void => {
+      const { inputPath, kind: nextKind, params: nextParams } = args;
+      if (typeof inputPath !== 'string' || !inputPath) return;
+      const dot = inputPath.lastIndexOf('.');
+      if (dot < 0) return;
+      const ext = inputPath.slice(dot).toLowerCase();
+      const allowed = new Set<string>(
+        TOOLBOX_INPUT_EXTENSIONS[nextKind].map((e) => e.toLowerCase())
+      );
+      if (!allowed.has(ext)) return;
+      setKindInner(nextKind);
+      setParamsInner(nextParams);
+      setProgress({});
+      setLastOutputDir(null);
+      setJobs([
+        {
+          id: genJobId(),
+          kind: nextKind,
+          inputPath,
+          params: {},
+          displayName: basenameFromPath(inputPath)
+        }
+      ]);
+    },
+    []
+  );
+
   return {
     kind,
     setKind,
@@ -520,6 +570,7 @@ export function useToolbox(): UseToolboxResult {
     isHistoryLoading,
     removeHistoryEntry,
     clearToolboxHistory,
-    reloadToolboxHistory
+    reloadToolboxHistory,
+    applyPreset
   };
 }

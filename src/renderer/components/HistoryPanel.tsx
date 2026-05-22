@@ -33,6 +33,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import type { HistoryRecord } from './useHistory';
 import { paginateHistory } from './useUploadHistory';
+import type { ToolboxKind, ToolboxParams } from '../../shared/types';
 
 /** R-84 — Default page size for the snapshot history grid.
  *
@@ -73,12 +74,74 @@ export interface HistoryPanelProps {
    *  集合相交策略；HistoryPanel 不直接读 uploadHistory，依旧保持
    *  单向数据流。可选 prop — 旧 caller 不传则胶囊回退为纯展示。 */
   onJumpToUploadHistory?: (rec: HistoryRecord) => void;
+  /** R-COMPRESS-V1 #5 — 「推荐预设」chip 行的回调。当用户在嗅探历史
+   *  卡片上点击「转 GIF · 快速」「转 GIF · 高质量」「压到 <5MB」
+   *  「压到 <2MB」中的任意一个时，HistoryPanel 把 (rec, preset)
+   *  抛给 caller，由 App.tsx 负责：
+   *    1) 取 rec 第一个 done output 路径作为 inputPath；
+   *    2) 切换 activeTab → '工具箱'；
+   *    3) 调 toolbox.applyPreset({ inputPath, kind, params })。
+   *  本组件仅决定 chip 集合（按第一个 done output 的扩展名分流：
+   *  video → 转 GIF 两挡；gif/webp → 压到 5MB / 2MB），并在
+   *  click 时 e.stopPropagation 防止误触整张卡片的 onOpenDetail。
+   *  可选 prop —— 没传则不渲染 chip 行（旧 caller 兼容）。 */
+  onApplyPreset?: (rec: HistoryRecord, preset: { kind: ToolboxKind; params: ToolboxParams }) => void;
 }
 
 function fmtTime(ts: number): string {
   const d = new Date(ts);
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** R-COMPRESS-V1 #5 — chip descriptor; `label` doubles as aria-label. */
+interface PresetChip {
+  label: string;
+  kind: ToolboxKind;
+  params: ToolboxParams;
+}
+
+const VIDEO_EXTS_FOR_PRESET = new Set(['.mp4', '.mov', '.webm', '.mkv', '.m4v']);
+const GIF_FAMILY_EXTS_FOR_PRESET = new Set(['.gif', '.webp']);
+
+/** Decide chip set by inputPath extension. video → 转 GIF 两挡;
+ *  gif/webp → 压到 5MB / 2MB; anything else → []. The two families
+ *  are mutually exclusive: a chip click means "I want this exact
+ *  kind+params", so we don't mix‐and‐match. */
+export function pickPresetChipsForPath(inputPath: string | undefined | null): PresetChip[] {
+  if (!inputPath || typeof inputPath !== 'string') return [];
+  const dot = inputPath.lastIndexOf('.');
+  if (dot < 0) return [];
+  const ext = inputPath.slice(dot).toLowerCase();
+  if (VIDEO_EXTS_FOR_PRESET.has(ext)) {
+    return [
+      { label: '转 GIF · 快速', kind: 'video-to-gif', params: { engine: 'ffmpeg' } },
+      { label: '转 GIF · 高质量', kind: 'video-to-gif', params: { engine: 'gifski' } }
+    ];
+  }
+  if (GIF_FAMILY_EXTS_FOR_PRESET.has(ext)) {
+    return [
+      { label: '压到 <5MB', kind: 'gif-optimize', params: { method: 'budget', maxBytes: 5 * 1024 * 1024 } },
+      { label: '压到 <2MB', kind: 'gif-optimize', params: { method: 'budget', maxBytes: 2 * 1024 * 1024 } }
+    ];
+  }
+  return [];
+}
+
+/** Pick the first done output path on a record, or null if none.
+ *  Re-exported so App.tsx can mirror the same heuristic when
+ *  forwarding chip clicks to toolbox.applyPreset. */
+export function pickFirstDoneOutput(rec: HistoryRecord): string | null {
+  const outputs = rec.outputsByTaskId || {};
+  const status = rec.taskStatus || {};
+  for (const taskId of Object.keys(outputs)) {
+    if (status[taskId] !== 'done') continue;
+    const list = outputs[taskId];
+    if (Array.isArray(list) && list.length > 0 && typeof list[0] === 'string' && list[0]) {
+      return list[0];
+    }
+  }
+  return null;
 }
 
 /** R-34 — fixed decorative cover. Pure presentational, no per-record
@@ -107,14 +170,51 @@ function FixedCover(): React.ReactElement {
   );
 }
 
+/** R-COMPRESS-V1 #5 — Renders the「推荐预设」chip strip. Returns null
+ *  when caller didn't wire onApplyPreset, when the record has no done
+ *  outputs, or when the first done output's extension doesn't map to
+ *  any preset family. Each chip stops propagation so a click never
+ *  also triggers the surrounding card's onOpenDetail. */
+function PresetChipStrip(props: {
+  rec: HistoryRecord;
+  onApplyPreset?: HistoryPanelProps['onApplyPreset'];
+}): React.ReactElement | null {
+  const { rec, onApplyPreset } = props;
+  if (!onApplyPreset) return null;
+  const firstOutput = pickFirstDoneOutput(rec);
+  if (!firstOutput) return null;
+  const chips = pickPresetChipsForPath(firstOutput);
+  if (chips.length === 0) return null;
+  return (
+    <div className="hist-card-presets" role="group" aria-label="推荐预设">
+      <span className="hist-card-presets-label muted" aria-hidden="true">推荐预设</span>
+      {chips.map((chip) => (
+        <button
+          key={chip.label}
+          type="button"
+          className="hist-preset-chip"
+          data-testid="hist-preset-chip"
+          aria-label={`推荐预设:${chip.label}`}
+          title={`一键预填工具箱:${chip.label}`}
+          onClick={(e) => { e.stopPropagation(); onApplyPreset(rec, { kind: chip.kind, params: chip.params }); }}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation(); }}
+        >
+          {chip.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function HistoryCard(props: {
   rec: HistoryRecord;
   onOpenDetail: HistoryPanelProps['onOpenDetail'];
   onOpenOutputDir: HistoryPanelProps['onOpenOutputDir'];
   onRemove: HistoryPanelProps['onRemove'];
   onJumpToUploadHistory?: HistoryPanelProps['onJumpToUploadHistory'];
+  onApplyPreset?: HistoryPanelProps['onApplyPreset'];
 }): React.ReactElement {
-  const { rec, onOpenDetail, onOpenOutputDir, onRemove, onJumpToUploadHistory } = props;
+  const { rec, onOpenDetail, onOpenOutputDir, onRemove, onJumpToUploadHistory, onApplyPreset } = props;
   // R-27 (post-review): single-pass tally so big histories stay snappy.
   let totalDone = 0;
   let totalFailed = 0;
@@ -244,6 +344,8 @@ function HistoryCard(props: {
             {totalDone === 0 && totalFailed === 0 ? <span className="muted">未处理</span> : null}
           </span>
         </div>
+        {/* R-COMPRESS-V1 #5 — 「推荐预设」chip strip above the stepper. */}
+        <PresetChipStrip rec={rec} onApplyPreset={onApplyPreset} />
         {/* R-WS-90 P5g — 3-stage stepper. 用户一眼可读最远阶段。
             R-COMPRESS-V1 — 上传段在「已成功上传 ≥1 项 且 caller 提供
             onJumpToUploadHistory」时升级为可点 button,直接跳转到上传
@@ -347,7 +449,8 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
   onClear,
   isLoading,
   pageSize = HISTORY_PAGE_SIZE,
-  onJumpToUploadHistory
+  onJumpToUploadHistory,
+  onApplyPreset
 }) => {
   // R-84 — pagination state.
   // Local-only (resets on remount) — when the user reopens the
@@ -413,6 +516,7 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
             onOpenOutputDir={onOpenOutputDir}
             onRemove={onRemove}
             onJumpToUploadHistory={onJumpToUploadHistory}
+            onApplyPreset={onApplyPreset}
           />
         ))}
       </div>

@@ -590,3 +590,142 @@ test('SUITE RCV1-E: toolbox.trialRun produces a real 0.5s gif and trialCleanup r
   // synchronously inside the IPC handler before it resolved).
   await expect(fs.stat(result.tmpRoot!)).rejects.toThrow();
 });
+
+/* --------------------------- SUITE RCV1-F --------------------------- */
+/**
+ * RCV1-F — R-COMPRESS-V1 #5 sniff history recommended-preset row.
+ *
+ * What this proves
+ * ----------------
+ * 1. HistoryPanel renders a `[role="group"][aria-label="推荐预设"]` row
+ *    on cards whose first done output is .gif/.webp, with the two
+ *    "压到 <NMB>" chips visible.
+ * 2. Clicking the 压到 <5MB chip:
+ *    - Switches the active tab to 工具箱 (App.tsx setView('toolbox')).
+ *    - Calls toolbox.applyPreset, which clears the queue, sets
+ *      kind='gif-optimize' + params={ method:'budget', maxBytes:5MB },
+ *      and enqueues the chosen output path as the only job.
+ * 3. The renderer's gif-optimize chip becomes aria-selected=true and
+ *    the target-bytes chip strip's `< 5 MB` button is aria-pressed.
+ *    These are the same DOM markers RCV1-B asserts, so we know the
+ *    preset wired through to the *exact* same render path the user
+ *    would otherwise reach by hand.
+ *
+ * Why a real DOM SUITE here
+ * -------------------------
+ * The chip strip is renderer-only; nothing about it crosses a preload
+ * bridge. But the click → activeTab → useToolbox.applyPreset →
+ * paramsByKind chain spans four files (HistoryPanel → SecondaryViews
+ * → App.tsx → useToolbox), so a unit test that mocks any layer in
+ * between would hide a real wiring bug. The full DOM round-trip is
+ * the cheapest thing that proves all five changed files agreed on a
+ * shared shape.
+ */
+test('SUITE RCV1-F — sniff card 压到 <5MB preset jumps to 工具箱 + sets gif-optimize budget', async () => {
+  const { page } = getHarness();
+  test.setTimeout(60_000);
+
+  const TASK_ID = `rcv1-f-task-${Date.now()}`;
+  const OUTPUT_PATH = FIXTURE_GIF;
+  const sniffId = `rcv1-f-sniff-${Date.now()}`;
+  const now = Date.now();
+
+  // Wipe the two tables we own then seed exactly ONE done .gif row.
+  await page.evaluate(async () => {
+    const w = window as unknown as {
+      giftk: {
+        db: {
+          history: { clear(): Promise<void> };
+          uploadHistory: { clear(): Promise<void> };
+        };
+      };
+    };
+    await w.giftk.db.history.clear();
+    await w.giftk.db.uploadHistory.clear();
+  });
+
+  const histRec: SeededHistoryRecord = {
+    id: sniffId,
+    createdAt: now,
+    pageUrl: 'https://rcv1-f.test.example/page',
+    title: 'RCV1-F preset test',
+    items: [{
+      id: TASK_ID,
+      kind: 'image',
+      url: 'https://rcv1-f.test.example/source.gif',
+      pageUrl: 'https://rcv1-f.test.example/page',
+      tab: 'images'
+    }],
+    options: {},
+    outputDir: '',
+    outputsByTaskId: { [TASK_ID]: [OUTPUT_PATH] },
+    taskStatus: { [TASK_ID]: 'done' },
+    uploadsByOutputPath: {}
+  };
+  await page.evaluate(async (rec: SeededHistoryRecord) => {
+    const w = window as unknown as {
+      giftk: { db: { history: { upsert(r: unknown): Promise<void> } } };
+    };
+    await w.giftk.db.history.upsert(rec);
+  }, histRec);
+
+  // Reload so the App's useHistory re-reads SQLite and HistoryPanel
+  // mounts with the seeded row visible.
+  await page.reload();
+  await page.waitForLoadState('domcontentloaded');
+  await page.waitForSelector('.app', { timeout: 30_000 });
+
+  // Switch to 历史 tab via exact-match regex (same trick as RCV1-A —
+  // 历史 is a substring of 上传历史 so the simple hasText would pick
+  // both buttons in strict mode).
+  const historyTab = page.getByRole('button', { name: /^历史( \(\d+\))?$/ });
+  await expect(historyTab).toBeVisible({ timeout: 10_000 });
+  await historyTab.click();
+  await expect(historyTab).toHaveAttribute('aria-pressed', 'true', { timeout: 5_000 });
+
+  // The seeded card should mount with a preset row. The chip strip
+  // exposes data-testid="hist-preset-chip" on each chip and lives
+  // inside [role="group"][aria-label="推荐预设"].
+  const presetGroup = page.locator('[role="group"][aria-label="推荐预设"]').first();
+  await expect(presetGroup).toBeVisible({ timeout: 5_000 });
+
+  // Find the 压到 <5MB chip via aria-label and click it. The
+  // production chip uses the literal "压到 <5MB" label spelling per
+  // the subagent C's chip-design summary.
+  const fiveMbChip = page.locator('[data-testid="hist-preset-chip"]', {
+    hasText: /压到\s*<\s*5\s*MB/
+  });
+  await expect(fiveMbChip).toBeVisible({ timeout: 3_000 });
+  await fiveMbChip.click();
+
+  // Assertion 1 — the active tab swaps to 工具箱.
+  const toolboxTab = page.locator('button.tab-btn', { hasText: '工具箱' });
+  await expect(toolboxTab).toHaveAttribute('aria-pressed', 'true', { timeout: 5_000 });
+
+  // Assertion 2 — kind chip switched to GIF Optimize. The
+  // applyPreset call atomically setKind+setParams.
+  const gifOptimizeChip = page.locator('button.tb-chip', { hasText: 'GIF Optimize' });
+  await expect(gifOptimizeChip).toHaveAttribute('aria-selected', 'true', { timeout: 5_000 });
+
+  // Assertion 3 — the target-bytes chip strip's < 5 MB button is
+  // aria-pressed. Re-uses the same selector RCV1-B uses, proving the
+  // preset wired through to the very same DOM the user reaches by
+  // hand.
+  const targetBytesStrip = page.locator('div[aria-label="目标体积快捷条"]');
+  await expect(targetBytesStrip).toBeVisible({ timeout: 5_000 });
+  const fiveMbBtn = targetBytesStrip.locator('button.tb-target-bytes-chip', {
+    hasText: /^<\s*5\s*MB$/
+  });
+  await expect(fiveMbBtn).toHaveAttribute('aria-pressed', 'true', { timeout: 5_000 });
+
+  // Assertion 4 — the queue should hold exactly one job (the seeded
+  // OUTPUT_PATH). We assert via the rendered job list which lives at
+  // .tb-job-list li (same selector RCV1-C uses).
+  const jobItems = page.locator('.tb-job-list li');
+  await expect(jobItems).toHaveCount(1, { timeout: 5_000 });
+
+  // Cleanup — clear the queue and bounce back to 主页 so downstream
+  // SUITES start clean.
+  await page.locator('button.tb-link', { hasText: '清空' }).click().catch(() => undefined);
+  await page.locator('button.tab-btn', { hasText: '主页' }).click().catch(() => undefined);
+});

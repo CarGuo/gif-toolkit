@@ -11,9 +11,10 @@
 import React from 'react';
 import { HistoryPanel } from '../components/HistoryPanel';
 import { ToolboxPanel } from '../components/ToolboxPanel';
+import type { ToolboxPanelProps } from '../components/ToolboxPanel';
 import { UploadHistoryPanel } from '../components/UploadHistoryPanel';
 import type { HistoryRecord } from '../components/useHistory';
-import type { UploadHistoryRecord } from '../../shared/types';
+import type { ToolboxKind, ToolboxParams, UploadHistoryRecord } from '../../shared/types';
 
 export type SecondaryViewKind = 'history' | 'toolbox' | 'uploads';
 
@@ -38,13 +39,30 @@ export interface SecondaryViewsProps {
    *  UploadResultModal owned by ModalsHost. Caller is App.tsx where
    *  the modal state lives. */
   setUploadResult: (batchId: string) => void;
+  /** R-COMPRESS-V1 #5 — when a 「推荐预设」chip is clicked on a sniff
+   *  history card, App.tsx packs the (rec, preset) into a synthetic
+   *  prop and switches the view to 'toolbox'. We forward this prop
+   *  to <ToolboxPanel/> which seeds itself via tb.applyPreset on
+   *  every key change. Null means "no preset pending". */
+  pendingPreset?: ToolboxPanelProps['pendingPreset'];
+  /** R-COMPRESS-V1 #5 — handler invoked when the user clicks any
+   *  preset chip on a sniff history card. App.tsx wires this to:
+   *    1) compute first-done-output-path,
+   *    2) setView('toolbox'),
+   *    3) setPendingPreset({ key, inputPath, kind, params }).
+   *  Optional so legacy tests rendering SecondaryViews without it
+   *  still type-check. */
+  onApplyPreset?: (
+    rec: HistoryRecord,
+    preset: { kind: ToolboxKind; params: ToolboxParams }
+  ) => void;
 }
 
 export const SecondaryViews: React.FC<SecondaryViewsProps> = ({
   view, history, setHistoryDetail, onOpenHistoryDir,
   removeHistory, clearHistory, isHistoryLoading,
   uploadHistory, removeUploadHistory, clearUploadHistory, isUploadHistoryLoading,
-  setView, setUploadResult
+  setView, setUploadResult, pendingPreset, onApplyPreset
 }) => {
   // R-COMPRESS-V1 — the user reported that sniff-history cards already
   // show a「☁ 上传 N」status pill but had no way to jump to the actual
@@ -83,6 +101,7 @@ export const SecondaryViews: React.FC<SecondaryViewsProps> = ({
           onClear={clearHistory}
           isLoading={isHistoryLoading}
           onJumpToUploadHistory={onJumpToUploadHistory}
+          onApplyPreset={onApplyPreset}
         />
       </div>
     );
@@ -90,7 +109,7 @@ export const SecondaryViews: React.FC<SecondaryViewsProps> = ({
   if (view === 'toolbox') {
     return (
       <div className="body body-toolbox" role="region" aria-label="toolbox">
-        <ToolboxPanel />
+        <ToolboxPanel pendingPreset={pendingPreset} />
       </div>
     );
   }
