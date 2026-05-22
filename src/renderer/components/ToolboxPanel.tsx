@@ -401,7 +401,10 @@ function CropForm({ params, setParams, mediaInfo }: {
   );
 }
 
-function ParamForm({ kind, params, setParams, mediaInfo, onTargetFormatTouch }: {
+// R-COMPRESS-V1 — exported so tests can mount ParamForm with a static
+// MediaInfo and assert the new chip strip / smart-fps hint behavior in
+// isolation, without standing up the full ToolboxPanel + IPC scaffold.
+export function ParamForm({ kind, params, setParams, mediaInfo, onTargetFormatTouch }: {
   kind: ToolboxKind;
   params: ToolboxParams;
   setParams: (p: ToolboxParams | ((prev: ToolboxParams) => ToolboxParams)) => void;

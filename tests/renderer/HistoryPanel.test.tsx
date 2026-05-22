@@ -198,6 +198,100 @@ describe('HistoryPanel (R-28)', () => {
   });
 });
 
+/**
+ * R-COMPRESS-V1 wave 1 — sniff history card「☁ 上传 N」pill becomes
+ * a clickable button when the record has at least one done upload AND
+ * the panel is given an onJumpToUploadHistory callback. Clicking it
+ * routes to the upload-history tab without also opening the detail
+ * modal (the underlying card click). Three regressions guarded:
+ *
+ *   1. With `uploadedDone === 0` (no uploads yet) the upload pill stays
+ *      a plain <span> — i.e. NOT a <button> — so the user never sees a
+ *      dead-end clickable affordance.
+ *   2. With `uploadedDone > 0` AND callback provided the upload pill
+ *      becomes a <button>, clicking it fires onJumpToUploadHistory(rec)
+ *      exactly once and does NOT also fire onOpenDetail (the surrounding
+ *      card click).
+ *   3. With `uploadedDone > 0` but NO onJumpToUploadHistory prop the
+ *      pill stays a <span> — feature is opt-in, callers that haven't
+ *      wired the route yet keep the old behavior.
+ */
+describe('HistoryPanel — sniff→upload jump (R-COMPRESS-V1)', () => {
+  function fixtureWithUpload(): HistoryRecord {
+    const rec = fixture();
+    // Mark the video task done with one output, then attach a done upload
+    // for that output. uploadedDone counter on the card scans this map.
+    rec.taskStatus = { 'v-1': 'done' };
+    rec.outputsByTaskId = { 'v-1': ['/out/clip.gif'] };
+    rec.uploadsByOutputPath = {
+      '/out/clip.gif': {
+        url: 'https://cdn.test/clip.gif',
+        status: 'done',
+        uploadedAt: 1700000001000,
+        backend: 'github'
+      }
+    };
+    return rec;
+  }
+
+  it('keeps upload pill non-clickable when uploadedDone === 0', () => {
+    render(
+      <HistoryPanel
+        history={[fixture()]}
+        onOpenDetail={() => undefined}
+        onOpenOutputDir={() => undefined}
+        onRemove={() => undefined}
+        onClear={() => undefined}
+        onJumpToUploadHistory={() => undefined}
+      />
+    );
+    // Upload pill exists (every card renders three stages) but is a span.
+    const uploadPills = document.querySelectorAll('.hist-stage-upload');
+    expect(uploadPills.length).toBe(1);
+    expect(uploadPills[0].tagName).toBe('SPAN');
+  });
+
+  it('upload pill is a clickable button + jump fires + no onOpenDetail', () => {
+    const onJumpToUploadHistory = vi.fn();
+    const onOpenDetail = vi.fn();
+    const rec = fixtureWithUpload();
+    render(
+      <HistoryPanel
+        history={[rec]}
+        onOpenDetail={onOpenDetail}
+        onOpenOutputDir={() => undefined}
+        onRemove={() => undefined}
+        onClear={() => undefined}
+        onJumpToUploadHistory={onJumpToUploadHistory}
+      />
+    );
+    const pill = document.querySelector('button.hist-stage.hist-stage-upload');
+    expect(pill).toBeTruthy();
+    expect(pill?.classList.contains('is-clickable')).toBe(true);
+    fireEvent.click(pill!);
+    expect(onJumpToUploadHistory).toHaveBeenCalledTimes(1);
+    expect(onJumpToUploadHistory.mock.calls[0][0].id).toBe(rec.id);
+    // Critical: must not also bubble to the surrounding card onClick
+    // (which would open HistoryDetailModal). stopPropagation in the
+    // button handler is what guarantees this.
+    expect(onOpenDetail).not.toHaveBeenCalled();
+  });
+
+  it('upload pill stays non-clickable when no onJumpToUploadHistory prop is given', () => {
+    render(
+      <HistoryPanel
+        history={[fixtureWithUpload()]}
+        onOpenDetail={() => undefined}
+        onOpenOutputDir={() => undefined}
+        onRemove={() => undefined}
+        onClear={() => undefined}
+      />
+    );
+    const pill = document.querySelector('.hist-stage-upload');
+    expect(pill?.tagName).toBe('SPAN');
+  });
+});
+
 describe('HistoryPanel stage stepper (R-WS-90 P5g)', () => {
   /**
    * R-WS-90 P5g — three-stage status stepper on each card:
