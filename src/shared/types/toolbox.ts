@@ -295,3 +295,107 @@ export interface ToolboxChainHistoryEntry {
   /** First-failure error string when status='failed', else absent. */
   error?: string;
 }
+
+/* --------------------- R-TB-CHAIN: renderer-side draft state --------------------- */
+
+/**
+ * R-TB-CHAIN Phase 2 — Toolbox panel mode toggle.
+ *
+ * - 'batch': the legacy mode. ToolboxPanel collects N input files and
+ *   submits one parallel batch via `toolbox:start` (PQueue inside
+ *   processor.ts). Same kind for every input.
+ * - 'chain': single-input multi-step pipeline. ToolboxPanel collects
+ *   exactly ONE input file plus an ordered list of ChainStepDraft
+ *   entries. The renderer hard-locks the mode back to 'batch' the
+ *   moment the queue length goes above 1, because chain semantics are
+ *   undefined for multiple heterogeneous inputs (decision: "只在单个
+ *   图片有效，批量不行").
+ */
+export type ToolboxMode = 'batch' | 'chain';
+
+/**
+ * R-TB-CHAIN Phase 2 — renderer-only draft for one chain step.
+ *
+ * Distinct from {@link ToolboxChainStep} (which is the IPC contract
+ * shape that crosses the preload bridge): a draft carries UI-only
+ * metadata that has no place in the main process — most importantly a
+ * separate `id` (a stable React key) and a `valid` flag computed by
+ * the panel from the user's current params (e.g. crop steps don't
+ * need cropX/Y/W/H to be valid yet because the chain runner pauses
+ * and asks via {@link ToolboxChainResumePatch}; gif-resize on the
+ * other hand requires `targetWidth >= 64`).
+ *
+ * The renderer maps drafts → ToolboxChainStep[] right before invoking
+ * `startToolboxChain`: a fresh per-step id is allocated there
+ * (typically `${chainId}-s${i+1}`) so the chain runner's progress
+ * `taskId === step.id` invariant holds.
+ */
+export interface ChainStepDraft {
+  /** Stable React key for the draft row. NOT the IPC step id — that
+   *  one is allocated when the chain is submitted. */
+  draftId: string;
+  /** The toolbox kind this step will run. */
+  kind: ToolboxKind;
+  /** Current user-edited params for this step. May be incomplete for
+   *  pausing kinds (crop) — the chain runner asks for the missing
+   *  fields via the awaiting-input flow. */
+  params: ToolboxParams;
+  /** Whether this draft can be submitted as-is. The panel uses this
+   *  to enable / disable the Run button; pausing kinds are 'true'
+   *  even with empty rect because the runner will pause and ask. */
+  valid: boolean;
+}
+
+/**
+ * R-TB-CHAIN Phase 2 — kinds whose ChainStepDraft is allowed to ship
+ * with empty / partial rect-style params because the chain runner
+ * pauses and asks the renderer for the missing fields. Kept in sync
+ * with the main-process PAUSING_KINDS set in [processor.ts].
+ *
+ * Exporting this from shared/types means renderer code (the hook,
+ * the panel, unit tests) and renderer-side validation can decide
+ * "submit as-is vs require user input" without re-importing main
+ * process modules into the renderer bundle.
+ */
+export const CHAIN_PAUSING_KINDS: ReadonlySet<ToolboxKind> = new Set<ToolboxKind>(['crop']);
+
+/**
+ * R-TB-CHAIN Phase 2 — renderer-side draft validity check. Pure,
+ * synchronous, no IPC. The panel calls this on every keystroke to
+ * recompute ChainStepDraft.valid; tests assert behaviour per kind.
+ *
+ * Rules
+ * -----
+ * - gif-resize: targetWidth must be >= 64 (the same floor enforced
+ *   by sanitizeToolboxParams; below that gifsicle/sharp would be
+ *   asked to upscale tiny widths and the result is unusable).
+ * - gif-optimize: when method is set it must be a known method; when
+ *   method is omitted the runner falls back to lossy with defaults
+ *   so an empty params object is valid.
+ * - crop: ALWAYS valid in chain mode — the rect comes from the
+ *   pause-resume flow, not the draft.
+ * - all other kinds: valid by default; missing fields fall back to
+ *   sanitizeToolboxParams defaults.
+ */
+export function isChainStepDraftValid(kind: ToolboxKind, params: ToolboxParams): boolean {
+  if (CHAIN_PAUSING_KINDS.has(kind)) return true;
+  switch (kind) {
+    case 'gif-resize':
+      return typeof params.targetWidth === 'number' && params.targetWidth >= 64;
+    case 'gif-optimize':
+      if (params.method === undefined) return true;
+      return (
+        params.method === 'lossy' ||
+        params.method === 'color-reduction' ||
+        params.method === 'color-dither' ||
+        params.method === 'drop-every-nth' ||
+        params.method === 'drop-duplicates' ||
+        params.method === 'optimize-transparency' ||
+        params.method === 'wechat-safe' ||
+        params.method === 'budget'
+      );
+    default:
+      return true;
+  }
+}
+
