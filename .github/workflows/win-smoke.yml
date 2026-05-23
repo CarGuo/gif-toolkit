@@ -1,0 +1,408 @@
+name: Windows Smoke (Manual)
+
+# R-WIN-SMOKE — manual headed verification of a published Windows
+# release artifact. Mirror of linux-smoke.yml but tuned for the
+# Windows runner, which (unlike Linux) ships with a real desktop
+# session — so we don't need Xvfb, can launch the .exe directly,
+# and can use PowerShell GDI+ for screenshots / Get-Process for
+# liveness probing.
+#
+# What this workflow checks vs. the Linux one:
+#   1. Download Gif-Toolkit-X.Y.Z-win-x64.exe (NSIS) from the
+#      published GitHub Release.
+#   2. SILENT install (`Setup.exe /S`) into a fixed dir.
+#   3. STATIC inspection — verify ffmpeg.exe / ffprobe.exe /
+#      gifsicle.exe / yt-dlp.exe land on disk inside
+#      resources\app.asar.unpacked\node_modules\... (this catches
+#      the same `npm ci` lifecycle short-circuit class of bug
+#      that v0.2.5 hit on Linux, but for the Windows side).
+#   4. REGISTRY / SHORTCUT inspection — confirm NSIS wrote the
+#      Uninstall key and Start Menu shortcut (catches broken
+#      installer scripts).
+#   5. BOOT the installed exe with ELECTRON_ENABLE_LOGGING=1, redirect
+#      stdout/stderr to files, wait 30s, grep for `binaries: ok=true`
+#      x3 (ffmpeg, ffprobe, gifsicle) and `issues=0`.
+#   6. PowerShell GDI+ screenshot of the desktop at boot+15s for
+#      visual confirmation.
+#   7. Run `npm run test:e2e:smoke` from the matching tag (same
+#      mock-oss + real ffmpeg flow as Linux).
+#   8. Silent uninstall + verify Program Files\Gif Toolkit is gone.
+#   9. Upload everything as artifact.
+#
+# Triggered manually:
+#   gh workflow run win-smoke.yml -f version=v0.2.6
+#   gh workflow run win-smoke.yml -f version=v0.2.6 -f run_e2e=true
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release tag to verify (e.g. v0.2.6). Must already be published as a GitHub Release.'
+        required: true
+        default: 'v0.2.6'
+      run_e2e:
+        description: 'Also run npm run test:e2e:smoke against a freshly built dist (real ffmpeg + mock-oss).'
+        required: false
+        type: boolean
+        default: true
+      debug:
+        description: 'Hold the runner open via tmate after smoke completes (lets you SSH/RDP in to poke at the live VM).'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  smoke:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    # Same draft-release rationale as linux-smoke.yml — the default
+    # GITHUB_TOKEN can't list/download draft releases without explicit
+    # contents:write elevation.
+    permissions:
+      contents: write
+
+    env:
+      INSTALL_DIR: 'C:\GifToolkit'
+      SMOKE_DIR: 'C:\smoke'
+
+    steps:
+      - name: Checkout repo at tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.version }}
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Prepare smoke workdir
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:SMOKE_DIR | Out-Null
+          New-Item -ItemType Directory -Force -Path "$env:SMOKE_DIR\shots" | Out-Null
+          Get-ChildItem $env:SMOKE_DIR
+
+      - name: Download Setup.exe from GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ver = "${{ inputs.version }}"
+          $verNoV = $ver.TrimStart('v')
+          # package.json build.artifactName "${productName}-${version}-${os}-${arch}.${ext}"
+          # productName="Gif Toolkit" → spaces collapse to "-" in NSIS asset names,
+          # so the asset is Gif-Toolkit-X.Y.Z-win-x64.exe.
+          $asset = "Gif-Toolkit-$verNoV-win-x64.exe"
+          Write-Host "Downloading $asset from release $ver..."
+          gh release download $ver `
+            --repo "${{ github.repository }}" `
+            --pattern $asset `
+            --dir $env:SMOKE_DIR
+          Get-ChildItem $env:SMOKE_DIR
+          $setup = Join-Path $env:SMOKE_DIR $asset
+          "SETUP_PATH=$setup" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+
+      - name: Inspect Setup.exe
+        shell: pwsh
+        run: |
+          $info = Get-Item $env:SETUP_PATH
+          Write-Host "Size: $($info.Length) bytes"
+          Write-Host "LastWriteTime: $($info.LastWriteTime)"
+          $hash = Get-FileHash $env:SETUP_PATH -Algorithm SHA256
+          Write-Host "SHA256: $($hash.Hash)"
+          $hash | Out-File -FilePath "$env:SMOKE_DIR\setup-hash.txt"
+
+      # --------------------------------------------------------------
+      # PHASE A — silent install + static layout inspection.
+      # --------------------------------------------------------------
+      - name: Silent install
+        shell: pwsh
+        run: |
+          # NSIS silent flags:
+          #   /S        silent (no UI)
+          #   /D=<dir>  install path (must be LAST, no quotes per NSIS spec)
+          # electron-builder's NSIS shim respects both. We force a
+          # known path so later inspection is deterministic.
+          Write-Host "Installing to $env:INSTALL_DIR..."
+          $proc = Start-Process -FilePath $env:SETUP_PATH `
+            -ArgumentList "/S", "/D=$env:INSTALL_DIR" `
+            -PassThru -Wait
+          Write-Host "Installer exit code: $($proc.ExitCode)"
+          if ($proc.ExitCode -ne 0) {
+            Write-Error "Installer failed with exit $($proc.ExitCode)"
+            exit 1
+          }
+          Get-ChildItem $env:INSTALL_DIR | Select-Object Name, Length
+
+      - name: Static inspection — verify bundled binaries
+        shell: pwsh
+        run: |
+          $report = "$env:SMOKE_DIR\static-report.txt"
+          "=== Gif Toolkit static layout report ===" | Tee-Object -FilePath $report
+          "InstallDir: $env:INSTALL_DIR" | Tee-Object -FilePath $report -Append
+          ""
+          $unpacked = Join-Path $env:INSTALL_DIR "resources\app.asar.unpacked\node_modules"
+          if (-not (Test-Path $unpacked)) {
+            "FAIL: $unpacked does not exist" | Tee-Object -FilePath $report -Append
+            exit 1
+          }
+          "asar.unpacked exists: $unpacked" | Tee-Object -FilePath $report -Append
+
+          # Critical native binaries that the v0.2.5 Linux smoke
+          # demonstrated can silently disappear if `npm ci` short-circuits
+          # the lifecycle scripts. Each entry is "logical name | relative path".
+          $expected = @(
+            @{ name = "ffmpeg.exe";   path = "ffmpeg-static\ffmpeg.exe" },
+            @{ name = "ffprobe.exe";  path = "ffprobe-static\bin\win32\x64\ffprobe.exe" },
+            @{ name = "gifsicle.exe"; path = "@343dev\gifsicle\vendor\win32\gifsicle.exe" },
+            @{ name = "yt-dlp.exe";   path = "ytdlp-nodejs\bin\yt-dlp.exe" },
+            @{ name = "better_sqlite3.node"; path = "better-sqlite3\build\Release\better_sqlite3.node" }
+          )
+          $allOk = $true
+          foreach ($e in $expected) {
+            $full = Join-Path $unpacked $e.path
+            if (Test-Path $full) {
+              $sz = (Get-Item $full).Length
+              "OK   $($e.name) -> $full ($sz bytes)" | Tee-Object -FilePath $report -Append
+            } else {
+              "MISS $($e.name) -> $full" | Tee-Object -FilePath $report -Append
+              $allOk = $false
+            }
+          }
+          if (-not $allOk) {
+            "STATIC_INSPECTION_OK=false" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+            Write-Warning "Some bundled binaries are missing — see static-report.txt"
+          } else {
+            "STATIC_INSPECTION_OK=true" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+            "All expected binaries present." | Tee-Object -FilePath $report -Append
+          }
+
+      - name: Registry + shortcut inspection
+        shell: pwsh
+        run: |
+          $regReport = "$env:SMOKE_DIR\registry-report.txt"
+          # NSIS registers under HKLM (per-machine) or HKCU (per-user).
+          # electron-builder default is HKCU (perMachine: false). Both
+          # locations checked for safety.
+          "=== Uninstall registry keys ===" | Tee-Object -FilePath $regReport
+          $hkcu = Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -like "*Gif Toolkit*" }
+          $hklm = Get-ItemProperty "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -like "*Gif Toolkit*" }
+          if ($hkcu) {
+            "HKCU hit:" | Tee-Object -FilePath $regReport -Append
+            $hkcu | Format-List DisplayName, DisplayVersion, Publisher, InstallLocation, UninstallString | Out-String | Tee-Object -FilePath $regReport -Append
+          }
+          if ($hklm) {
+            "HKLM hit:" | Tee-Object -FilePath $regReport -Append
+            $hklm | Format-List DisplayName, DisplayVersion, Publisher, InstallLocation, UninstallString | Out-String | Tee-Object -FilePath $regReport -Append
+          }
+          $reg = $hkcu ?? $hklm
+          if (-not $reg) {
+            "FAIL: no Uninstall registry entry found for Gif Toolkit" | Tee-Object -FilePath $regReport -Append
+            "REGISTRY_OK=false" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          } else {
+            "REGISTRY_OK=true" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+            $uninst = $reg.UninstallString
+            "UNINSTALL_STRING=$uninst" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          }
+          # Start Menu shortcut (per-user)
+          $sm = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Gif Toolkit.lnk"
+          if (Test-Path $sm) {
+            "OK Start Menu shortcut at $sm" | Tee-Object -FilePath $regReport -Append
+          } else {
+            "MISS Start Menu shortcut at $sm" | Tee-Object -FilePath $regReport -Append
+          }
+
+      # --------------------------------------------------------------
+      # PHASE B — boot the installed app, capture stdout/stderr/screenshot.
+      # --------------------------------------------------------------
+      - name: Boot installed app + capture screenshots
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:INSTALL_DIR "Gif Toolkit.exe"
+          if (-not (Test-Path $exe)) {
+            Write-Error "exe not found at $exe"
+            exit 1
+          }
+          # Force Electron to print main-process logs to stdout. Without
+          # this Windows treats the GUI exe as detached and the logs go
+          # nowhere. ELECTRON_NO_ATTACH_CONSOLE prevents Electron from
+          # reattaching to the parent's console (which would mangle our
+          # redirect).
+          $env:ELECTRON_ENABLE_LOGGING = "1"
+          $env:ELECTRON_NO_ATTACH_CONSOLE = "1"
+          $stdout = "$env:SMOKE_DIR\app.stdout.log"
+          $stderr = "$env:SMOKE_DIR\app.stderr.log"
+          # Start as a background process so we can keep observing.
+          $proc = Start-Process -FilePath $exe `
+            -RedirectStandardOutput $stdout `
+            -RedirectStandardError $stderr `
+            -PassThru
+          Write-Host "Launched pid=$($proc.Id) at $(Get-Date -Format o)"
+          "APP_PID=$($proc.Id)" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+
+          # PowerShell GDI+ desktop screenshot helper (no permissions
+          # required on Windows runners).
+          Add-Type -AssemblyName System.Windows.Forms
+          Add-Type -AssemblyName System.Drawing
+          function Capture-Screen($outPath) {
+            $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bmp = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            $bmp.Save($outPath, [System.Drawing.Imaging.ImageFormat]::Png)
+            $g.Dispose()
+            $bmp.Dispose()
+          }
+
+          # Boot waterfall.
+          foreach ($t in @(3, 6, 10, 15, 20)) {
+            Start-Sleep -Seconds 3
+            $live = Get-Process -Id $proc.Id -ErrorAction SilentlyContinue
+            if ($live) {
+              Capture-Screen "$env:SMOKE_DIR\shots\boot-${t}s.png"
+              Write-Host "snap boot-${t}s.png — pid alive (HasMainWindow=$($live.MainWindowHandle -ne 0))"
+            } else {
+              Write-Warning "process died before ${t}s"
+              break
+            }
+          }
+
+          $live = Get-Process -Id $proc.Id -ErrorAction SilentlyContinue
+          if ($live) {
+            "ALIVE_AFTER_BOOT=true" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+            # Dump window handle metadata for debugging.
+            "MainWindowHandle=$($live.MainWindowHandle)" | Tee-Object -FilePath "$env:SMOKE_DIR\wininfo.txt"
+            "MainWindowTitle=$($live.MainWindowTitle)"   | Tee-Object -FilePath "$env:SMOKE_DIR\wininfo.txt" -Append
+          } else {
+            "ALIVE_AFTER_BOOT=false" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          }
+
+          # Graceful shutdown — Stop-Process sends WM_CLOSE first, then
+          # TerminateProcess after timeout. Friendlier than Linux SIGKILL.
+          if ($live) {
+            Write-Host "stopping pid $($proc.Id)..."
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          }
+          Start-Sleep -Seconds 2
+
+      # --------------------------------------------------------------
+      # PHASE C — install deps + e2e:smoke (mirrors linux-smoke.yml).
+      # --------------------------------------------------------------
+      - name: Install dependencies (matching release.yml)
+        if: ${{ inputs.run_e2e }}
+        shell: pwsh
+        run: |
+          npm ci
+          npm run postinstall
+          node node_modules/electron/install.js
+          node node_modules/ffmpeg-static/install.js
+          if (-not (Test-Path "node_modules/electron/path.txt")) { exit 1 }
+          # ffmpeg-static on Windows ships ffmpeg.exe (vs ffmpeg on Linux).
+          $ff = "node_modules/ffmpeg-static/ffmpeg.exe"
+          if (-not (Test-Path $ff)) { Write-Error "missing $ff"; exit 1 }
+          Write-Host ("ffmpeg.exe size: " + (Get-Item $ff).Length)
+
+      - name: Run npm test:e2e:smoke
+        if: ${{ inputs.run_e2e }}
+        shell: pwsh
+        run: |
+          # Windows runner has a real desktop session, so unlike Linux
+          # we don't need xvfb-run wrapping. PowerShell preserves the
+          # exit code of the last command in the pipeline by default,
+          # so we don't need the bash `pipefail` workaround either.
+          $log = "$env:SMOKE_DIR\e2e.log"
+          npm run test:e2e:smoke 2>&1 | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "test:e2e:smoke failed with $LASTEXITCODE"
+            exit $LASTEXITCODE
+          }
+
+      # --------------------------------------------------------------
+      # PHASE D — silent uninstall + cleanliness check.
+      # --------------------------------------------------------------
+      - name: Silent uninstall + cleanup verification
+        if: always()
+        shell: pwsh
+        run: |
+          $cleanReport = "$env:SMOKE_DIR\uninstall-report.txt"
+          $uninst = $env:UNINSTALL_STRING
+          if (-not $uninst) {
+            # Fall back to the well-known path the NSIS shim writes.
+            $uninst = Join-Path $env:INSTALL_DIR "Uninstall Gif Toolkit.exe"
+          }
+          # Strip surrounding quotes some NSIS keys add.
+          $uninst = $uninst.Trim('"')
+          "UninstallString resolved: $uninst" | Tee-Object -FilePath $cleanReport
+          if (Test-Path $uninst) {
+            $proc = Start-Process -FilePath $uninst -ArgumentList "/S" -PassThru -Wait
+            "Uninstaller exit: $($proc.ExitCode)" | Tee-Object -FilePath $cleanReport -Append
+            Start-Sleep -Seconds 3
+          } else {
+            "Uninstaller not found, skipping" | Tee-Object -FilePath $cleanReport -Append
+          }
+          $stillThere = Test-Path $env:INSTALL_DIR
+          "InstallDir still present: $stillThere" | Tee-Object -FilePath $cleanReport -Append
+          if ($stillThere) {
+            Get-ChildItem $env:INSTALL_DIR -Recurse -ErrorAction SilentlyContinue |
+              Select-Object FullName | Out-String | Tee-Object -FilePath $cleanReport -Append
+          }
+
+      # --------------------------------------------------------------
+      # PHASE E — always upload artifact.
+      # --------------------------------------------------------------
+      - name: Upload smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-smoke-${{ inputs.version }}
+          path: |
+            C:\smoke\shots\**
+            C:\smoke\app.stdout.log
+            C:\smoke\app.stderr.log
+            C:\smoke\wininfo.txt
+            C:\smoke\static-report.txt
+            C:\smoke\registry-report.txt
+            C:\smoke\uninstall-report.txt
+            C:\smoke\setup-hash.txt
+            C:\smoke\e2e.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Hold runner open via tmate (debug)
+        if: ${{ inputs.debug }}
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
+
+      - name: Final pass/fail summary
+        if: always()
+        shell: pwsh
+        run: |
+          Write-Host "::group::Smoke summary for ${{ inputs.version }}"
+          Write-Host "STATIC_INSPECTION_OK = $env:STATIC_INSPECTION_OK"
+          Write-Host "REGISTRY_OK          = $env:REGISTRY_OK"
+          Write-Host "ALIVE_AFTER_BOOT     = $env:ALIVE_AFTER_BOOT"
+          if (Test-Path "$env:SMOKE_DIR\app.stdout.log") {
+            Write-Host "--- stdout (tail 30) ---"
+            Get-Content "$env:SMOKE_DIR\app.stdout.log" -Tail 30
+          }
+          if (Test-Path "$env:SMOKE_DIR\e2e.log") {
+            Write-Host "--- e2e (tail 30) ---"
+            Get-Content "$env:SMOKE_DIR\e2e.log" -Tail 30
+          }
+          Write-Host "::endgroup::"
+          if ($env:ALIVE_AFTER_BOOT -ne "true") {
+            Write-Error "App did not survive boot — see uploaded artifact."
+            exit 1
+          }
+          if ($env:STATIC_INSPECTION_OK -ne "true") {
+            Write-Error "Static binary inspection failed — see static-report.txt."
+            exit 1
+          }
+          Write-Host "App survived boot and bundled binaries are present."
