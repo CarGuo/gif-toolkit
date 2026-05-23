@@ -83,8 +83,146 @@ npm run package:win     # Windows: NSIS x64
 npm run package:linux   # Linux: AppImage / deb / tar.gz
 ```
 
-> Apple notarization / Authenticode / Linux code-signing are not configured. First launch may show "unidentified developer"; the app surfaces a toast with the right-click / SmartScreen-bypass instructions.
 > About 5 s after launch, the app silently checks GitHub Releases and pops the **Check for updates** dialog if a strictly higher stable version is available. You can also trigger it manually from the top-right ⬆ button, the tray menu, or the macOS application menu.
+
+---
+
+## Install & first launch (what to do when it won't open)
+
+Gif Toolkit is **not** Apple-notarized, **not** Authenticode-signed, and **not** Linux-package-signed — code signing is a paid legal commitment that does not pencil out for a single-author MIT project. So all three platforms will block the **first** launch with a "is this malware?" dialog. **This is expected, not a bug.** Follow the steps below to allow it.
+
+### 🍎 macOS
+
+#### What you see
+
+> **"Gif Toolkit" is damaged and can't be opened. You should move it to the Trash.**
+
+⚠️ **Do NOT click "Move to Trash".** The app is fine — Safari / Chrome stamped a `com.apple.quarantine` extended attribute on the download, and macOS Gatekeeper now blocks every unsigned binary that carries that flag.
+
+#### Fix
+
+Open **Terminal** (`/Applications/Utilities/Terminal.app`, or Spotlight ⌘+Space → "Terminal") and run:
+
+```bash
+xattr -cr "/Applications/Gif Toolkit.app"
+```
+
+> If the dmg is not in `/Applications` yet, drag the app there first.
+
+Then double-click the app normally. The first run may show one more "unidentified developer" prompt — click **Open** once and you are done forever.
+
+#### How it works
+
+`xattr -cr` is **clear recursive**: it strips every extended attribute from every file inside the app bundle, including `com.apple.quarantine`. From macOS's point of view the app now looks like it was **not** downloaded from a browser. **The app's contents are untouched.**
+
+#### "I already tried right-click → Open and it still won't open"
+
+Old tutorials tell you to right-click → Open → confirm in the dialog. That path **stopped working** on **macOS Sequoia (15.0+)**:
+
+| macOS version | Symptom | Working route |
+| --- | --- | --- |
+| ≤ 14.x (Sonoma) | "unidentified developer" gray button | Right-click → Open ✅ |
+| 15.0 | "is damaged" dialog | Right-click is gone; **System Settings → Privacy & Security**, scroll to bottom, click **Open Anyway** |
+| 15.1+ | "is damaged" dialog | Both right-click and the System Settings button are gone — **`xattr -cr` is the only path** |
+
+So "right-click won't open it either" is Apple's design choice, **not a broken app**. On modern macOS, `xattr -cr "/Applications/Gif Toolkit.app"` is the only reliable way through.
+
+#### Alternative: System Settings (only on macOS 15.0)
+
+1. Double-click the app → see "is damaged" → click **Cancel** (never **Move to Trash**).
+2. Open **System Settings** → **Privacy & Security**.
+3. Scroll to the bottom, find `"Gif Toolkit" was blocked ...`, click **Open Anyway**.
+4. Authenticate with Touch ID / password, then double-click the app again.
+
+If step 3 doesn't show the prompt, you're on 15.1+ — use `xattr -cr` instead.
+
+---
+
+### 🪟 Windows
+
+#### What you see
+
+Big blue dialog when you double-click `Gif-Toolkit-1.0.0-win-x64.exe`:
+
+> **Windows protected your PC**
+>
+> Microsoft Defender SmartScreen prevented an unrecognized app from starting. Running this app might put your PC at risk.
+
+#### Fix
+
+1. Click **More info**.
+2. A new **Run anyway** button appears — click it.
+3. The NSIS installer launches normally; install to `C:\GifToolkit`.
+
+> SmartScreen scores executables by **download volume + signature reputation**. A freshly published unsigned installer scores 0; over time, reputation builds and the warning fades.
+
+#### If antivirus deletes the exe outright
+
+Some Chinese AV vendors (360 / 火绒) and certain Defender configurations are more aggressive against unsigned installers. Restore the file from **Quarantine / Trusted Zone**, **whitelist** it, or temporarily disable real-time protection just for the install. You can re-enable real-time protection afterwards — installed binaries are not re-scanned with the same aggression.
+
+---
+
+### 🐧 Linux
+
+It depends on which artifact you downloaded:
+
+#### AppImage (recommended, portable)
+
+```bash
+chmod +x Gif-Toolkit-1.0.0-linux-x86_64.AppImage
+./Gif-Toolkit-1.0.0-linux-x86_64.AppImage
+```
+
+If you see `dlopen(): error loading libfuse.so.2`, the AppImage needs FUSE 2 but newer distros (Ubuntu 22.04+ / Fedora 36+) only ship FUSE 3. Install the compat package:
+
+```bash
+# Debian / Ubuntu
+sudo apt install libfuse2
+
+# Fedora
+sudo dnf install fuse-libs
+
+# Arch
+sudo pacman -S fuse2
+```
+
+#### .deb (Debian / Ubuntu)
+
+```bash
+sudo apt install ./Gif-Toolkit-1.0.0-linux-amd64.deb
+# Then from the app menu, or:
+gif-toolkit
+```
+
+#### .tar.gz (any distro)
+
+```bash
+tar -xzf Gif-Toolkit-1.0.0-linux-x64.tar.gz
+cd gif-toolkit-1.0.0
+./gif-toolkit
+```
+
+#### Sandbox error: `SUID sandbox helper binary was found, but is not configured correctly`
+
+Some distros (notably certain Ubuntu 24.04 configurations) restrict user namespaces, breaking Electron's sandbox. **Temporary** workaround:
+
+```bash
+./Gif-Toolkit-1.0.0-linux-x86_64.AppImage --no-sandbox
+```
+
+> ⚠️ `--no-sandbox` removes one layer of renderer-process isolation; use it only for troubleshooting. For a permanent fix, upgrade your kernel or install the `.deb` (the system package handles SUID permissions correctly).
+
+---
+
+### Why not just sign the binaries?
+
+| Platform | Yearly cost (USD) | Notes |
+| --- | --- | --- |
+| Apple Developer Program (notarization) | $99 | Requires a USD credit card and a globally unique Team ID |
+| Authenticode (OV cert) | ~$200 | Requires business-entity verification; EV certs are $300+ and need a USB hardware token |
+| Linux | Free but fragmented | Each distro has its own signing expectations |
+
+For an MIT solo-author project, **asking users to type one extra command** is a better trade-off than **paying every signing authority every year**. Should the project ever gain a corporate entity or sponsor, **macOS notarization will be the first to land** (largest UX win).
 
 ---
 

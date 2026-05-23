@@ -83,8 +83,150 @@ npm run package:win     # Windows：NSIS x64
 npm run package:linux   # Linux：AppImage / deb / tar.gz
 ```
 
-> 当前未配置 Apple 公证 / Authenticode / Linux 代码签名，首次运行会有"未知开发者"提示，App 内会通过 toast 给出"右键打开 / 跳过 SmartScreen"指引。
 > 启动 5 秒会静默查询 GitHub Releases；发现严格更高的稳定版本会弹「检查更新」对话框。也可在右上「⬆ 关于/更新」/ 托盘 / macOS 应用菜单手动触发。
+
+---
+
+## 安装与首次启动（无法打开怎么办）
+
+Gif Toolkit 当前**没有配置 Apple 公证（notarization） / Windows Authenticode / Linux 代码签名**——签名是收费的法律义务，对一个 MIT 个人项目来说性价比太低。所以三大系统在第一次打开时都会有一道「这是不是恶意软件」的拦截。**这是预期行为，不是 bug**，按下面操作放行即可。
+
+### 🍎 macOS
+
+#### 症状
+
+弹窗写：
+
+> **"Gif Toolkit" is damaged and can't be opened. You should move it to the Trash.**
+>
+> "Gif Toolkit"已损坏，无法打开。你应该将它移到废纸篓。
+
+⚠️ **不要点 "Move to Trash"**。这不是 App 真的坏了，是 Safari / Chrome 给下载文件打的 `com.apple.quarantine` 扩展属性，被 macOS Gatekeeper 拦死了。
+
+#### 解决
+
+打开「终端」（`/Applications/Utilities/Terminal.app` 或聚焦搜索 Terminal），运行：
+
+```bash
+xattr -cr "/Applications/Gif Toolkit.app"
+```
+
+> 如果 dmg 还没拖到 Applications，先拖过去再跑这行。
+
+然后正常双击打开即可。第一次启动可能再弹一次「未知开发者」对话框，按一次 **「打开」/ Open** 就过了，以后都不会再问。
+
+#### 原理
+
+`xattr -cr` 是 **clear recursive**：把 App bundle 内所有文件的所有扩展属性清掉，包括 `com.apple.quarantine`。等价于 macOS 把这个 App 当作"不是从浏览器下载的"。**不会修改 App 内容本身**。
+
+#### 已经试过"右键打开"但仍然不行？
+
+老教程经常告诉你「右键 App → 打开 → 在弹窗点打开」就能放行——这套路在 **macOS Sonoma (14.x) 之前**还有效。从 **macOS Sequoia (15.0+)** 起 Apple 收紧了 Gatekeeper：
+
+| 系统版本 | 表现 | 通路 |
+| --- | --- | --- |
+| macOS ≤ 14.x | 弹「未识别开发者」灰按钮 | 右键 → 打开 → 确认 ✅ |
+| macOS 15.0 | 直接弹 "is damaged" | 右键失效；要去**系统设置 → 隐私与安全性**最底部点「仍要打开」 |
+| macOS 15.1+ | 直接弹 "is damaged" | 右键 + 系统设置都不再出现放行按钮，**只能用 `xattr -cr`** |
+
+所以「右键打不开」是 Apple 的设计，**不是 App 本身坏了**。新版 macOS 上 `xattr -cr "/Applications/Gif Toolkit.app"` 是唯一稳定的解法。
+
+#### 备选：从「系统设置」放行（仅 macOS 15.0 有效）
+
+1. 双击 App → 看到 "is damaged" → 点 **Cancel**（**千万别点 Move to Trash**）。
+2. 打开「系统设置」 → 「隐私与安全性」。
+3. 滚到最下面，找到 `"Gif Toolkit" was blocked ...`，点旁边的 **仍要打开 / Open Anyway**。
+4. 输 Touch ID / 密码确认，再双击 App 即可。
+
+如果第 3 步看不到那行提示，说明你的系统是 15.1+，请直接用 `xattr -cr` 那一条命令。
+
+---
+
+### 🪟 Windows
+
+#### 症状
+
+双击 `Gif-Toolkit-1.0.0-win-x64.exe` 时蓝底大字：
+
+> **Windows protected your PC**
+>
+> Microsoft Defender SmartScreen prevented an unrecognized app from starting. Running this app might put your PC at risk.
+
+#### 解决
+
+1. 在弹窗里点 **More info**（更多信息）。
+2. 出现新的按钮 **Run anyway**（仍要运行），点它。
+3. NSIS 安装器正常启动，按提示装到 `C:\GifToolkit` 即可。
+
+> SmartScreen 是看「下载量 + 数字签名」的可信度评分。一个新发布的 unsigned 安装器评分是 0，跑得多了反而会自然被洗白。
+
+#### 如果 360 / 火绒 / Defender 直接删了 exe
+
+部分国产杀软对 unsigned 安装器有更激进的策略。请到杀软的「隔离区 / 信任区」里把它**恢复并加入白名单**，或临时关闭实时保护后再装一次。安装完成后可以重新打开实时保护，已装的可执行文件不会再被打扰。
+
+---
+
+### 🐧 Linux
+
+按你下载的格式不同，操作不同：
+
+#### AppImage（推荐，免安装绿色版）
+
+```bash
+chmod +x Gif-Toolkit-1.0.0-linux-x86_64.AppImage
+./Gif-Toolkit-1.0.0-linux-x86_64.AppImage
+```
+
+如果报错 `dlopen(): error loading libfuse.so.2`：AppImage 依赖 FUSE 2，部分新版发行版（Ubuntu 22.04+ / Fedora 36+）默认只有 FUSE 3。装上兼容包：
+
+```bash
+# Debian / Ubuntu
+sudo apt install libfuse2
+
+# Fedora
+sudo dnf install fuse-libs
+
+# Arch
+sudo pacman -S fuse2
+```
+
+#### .deb（Debian / Ubuntu）
+
+```bash
+sudo apt install ./Gif-Toolkit-1.0.0-linux-amd64.deb
+# 之后从应用菜单或：
+gif-toolkit
+```
+
+#### .tar.gz（任意发行版）
+
+```bash
+tar -xzf Gif-Toolkit-1.0.0-linux-x64.tar.gz
+cd gif-toolkit-1.0.0
+./gif-toolkit
+```
+
+#### 沙箱报错 `SUID sandbox helper binary was found, but is not configured correctly`
+
+少数发行版（含部分 Ubuntu 24.04 配置）会因为内核 user namespace 限制导致 Electron 沙箱启动不了。**临时**绕过：
+
+```bash
+./Gif-Toolkit-1.0.0-linux-x86_64.AppImage --no-sandbox
+```
+
+> ⚠️ `--no-sandbox` 会牺牲一层渲染进程隔离，仅作 troubleshooting 使用。长期建议升级内核或用 `.deb` 安装版（系统会正确处理 SUID 权限）。
+
+---
+
+### 为什么不直接签名？
+
+| 平台 | 一年成本（USD） | 备注 |
+| --- | --- | --- |
+| Apple Developer Program（公证） | $99 | 必须美元信用卡 + 全球唯一 Team ID |
+| Authenticode（OV 证书） | ~$200 | 需要营业执照核验；EV 证书要 $300+ 还要 USB 硬件 token |
+| Linux | 免费但生态分裂 | 各发行版对包签名要求都不一样 |
+
+对一个 MIT 开源项目来说，**让用户多敲一行命令** 比 **替每个签名厂打钱** 是更合理的权衡。如果未来项目有公司主体或赞助，会优先把 macOS 公证补上（用户体验提升最大）。
 
 ---
 
