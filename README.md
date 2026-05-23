@@ -326,6 +326,20 @@ A:不会。GitHub Contents API 返回的是 raw URL,可以直接嵌入 Markdown,
 
 每个新功能 / bug fix 都需随测试一同提交。
 
+### 测试三档（fast / smoke / all）
+
+为了在「快速反馈」和「真实场景覆盖」之间取得平衡，测试入口分三档:
+
+| 命令 | 范围 | 时长 | 适用场景 |
+| ---- | ---- | ---- | -------- |
+| `npm run test:fast` | vitest 单测（main/renderer/shared 全契约层） | ~6s | 本地写代码、commit 前 |
+| `npm run test:e2e:smoke` | 真实 Electron 启动 + offline-import → process → mock-oss 上传 → SQLite 回写整链 | ~10s（含 build） | PR 自检、改 IPC/uploader/processor 时 |
+| `npm run test:e2e` | 完整 playwright 122 用例（realPipeline 全契约 + UI 回归） | ~1.5min | 发版前、改 renderer 主流程时 |
+| `npm run test:all` | 三档串跑 | ~2min | 最严格本地全闸 |
+
+`smoke` 档使用 [`playwright.smoke.config.ts`](./playwright.smoke.config.ts)，testDir 指向 `tests/e2e-smoke/`，与 `tests/e2e/` 隔离;
+关键产物上传走 `mock-oss://<sha8>.<ext>` 短路（`GIFTK_E2E_MOCK_UPLOAD=1` env + `!app.isPackaged` 双守卫，release 包永远不命中）。
+
 ---
 
 ## 致谢
