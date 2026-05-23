@@ -105,6 +105,9 @@ import './realPipeline/suite-r-compress-v1-ui';         // SUITE RCV1 A/B/C (R-C
 import './realPipeline/suite-history-detail-upload-entry-ui'; // SUITE HD-UP A/B (R-WS-90 P5i header 上传历史 entry)
 import './realPipeline/suite-size-regression-ui';      // SUITE SIZE-REGRESSION-UI (R-SIZE-REGRESSION-V1)
 import './realPipeline/suite-toolbox-lineage-tree-ui'; // SUITE TB-LINEAGE-TREE-UI (R-LINEAGE-TREE-V1)
+import './realPipeline/suite-upload-full';              // SUITE UPLOAD-FULL A..E (R-UPLOAD-FULL-V1)
+import './realPipeline/suite-lifecycle';                // SUITE LIFE A..D (R-LIFECYCLE-V1)
+import './realPipeline/suite-cancel-robust';            // SUITE CANCEL A..D (R-CANCEL-ROBUST-V1)
 
 test.describe.configure({ timeout: 90_000 });
 
