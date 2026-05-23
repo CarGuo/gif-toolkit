@@ -206,7 +206,7 @@ e2e 不真正下载完整文件，只发 `Range: bytes=0-1023` 探测前 1 KB：
 实现：
 - [src/main/resolver/ytdlp.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/resolver/ytdlp.ts)
 - [src/main/resolver/index.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/resolver/index.ts)
-- [src/shared/types.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types.ts) `ResolvedMedia`
+- [src/shared/types/](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types/) `ResolvedMedia`
 - [src/main/ffmpeg.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/ffmpeg.ts) `buildHttpInputArgs`
 - [src/main/processor.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor.ts) embed-only check
 - [src/main/index.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/index.ts) `resolve:*` IPC

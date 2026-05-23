@@ -11,27 +11,9 @@
 ```
 harness/
 ├── README.md             ← 你正在看的(这套 harness 怎么读 / 怎么用)
-├── run-harness.md        ← 怎么跑一遍(本地手动 + 半自动)
-├── rules/                ← R-01..R-12 每条一个 markdown
-│   ├── R-01-sniff-must-go-through-main.md
-│   ├── R-02-no-host-whitelist.md
-│   ├── R-03-maxside-applies-to-both-axes.md
-│   ├── R-04-four-phase-compression.md
-│   ├── R-05-soft-and-hard-target.md
-│   ├── R-06-shortside-floor.md
-│   ├── R-07-pqueue-concurrency.md
-│   ├── R-08-progress-richness.md
-│   ├── R-09-iframe-embed-detect-only.md
-│   ├── R-10-electron-isolation.md
-│   ├── R-11-preload-whitelist.md
-│   └── R-12-do-not-evade-tests.md
-├── scenarios/            ← SC-01..SC-N 历史问题对应的回归场景
-│   ├── SC-01-dedup-key-generic.md
-│   ├── SC-02-aspect-ratio-early-fail.md
-│   ├── SC-03-soft-vs-hard-target.md
-│   ├── SC-04-iframe-embed-vimeo.md
-│   ├── SC-05-progress-richness.md
-│   └── SC-06-concurrency-default-3.md
+├── run-harness.md        ← 怎么跑一遍(测试三档 + 手动复演)
+├── rules/                ← R-* 每条一个 markdown(R-01..R-16 + R-22..R-27 + R-80..R-87 + R-COMPRESS-V1 + R-TB-CHAIN)
+├── scenarios/            ← SC-01..SC-22 历史问题对应的回归场景
 ├── checklists/
 │   ├── pr-checklist.md             ← 提交 PR 前自检
 │   └── new-feature-checklist.md    ← 新增功能前要回答的 12 个问题
@@ -39,6 +21,8 @@ harness/
     ├── README.md
     └── fixtures.json
 ```
+
+> 实际文件清单以目录为准（不在文档里维护逐项列表，避免再次出现"目录树过气"），新增 R-* / SC-* 后请在 [AGENTS.md §1](file:///Users/guoshuyu/workspace/gif-toolkit/AGENTS.md) 索引表里补一行。
 
 ---
 
@@ -58,17 +42,17 @@ harness/
 
 ### 我是新来的协作者
 
-1. 先读 [AGENTS.md](file:///Users/guoshuyu/workspace/gif-toolkit/AGENTS.md) — 12 条硬规则
-2. 浏览 [scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/) — 看历史踩过的坑
+1. 先读 [AGENTS.md](file:///Users/guoshuyu/workspace/gif-toolkit/AGENTS.md) — §1 是 R-* 索引表（30+ 条硬规则）
+2. 浏览 [scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/) — 看历史踩过的坑（SC-01..SC-22）
 3. 改前对照 [checklists/new-feature-checklist.md](file:///Users/guoshuyu/workspace/gif-toolkit/harness/checklists/new-feature-checklist.md)
-4. 提交前对照 [checklists/pr-checklist.md](file:///Users/guoshuyu/workspace/gif-toolkit/harness/checklists/pr-checklist.md)
+4. 提交前对照 [checklists/pr-checklist.md](file:///Users/guoshuyu/workspace/gif-toolkit/harness/checklists/pr-checklist.md) + 跑测试三档（见 [run-harness.md §2](file:///Users/guoshuyu/workspace/gif-toolkit/harness/run-harness.md)）
 
 ### 我在做日常迭代
 
 1. 接到需求 → 先 grep `harness/scenarios/` 关键词
 2. 命中已有 SC → 直接复用规则,**不再二次发明**
-3. 修完后跑 `npm run typecheck && npm run lint && npm run build`
-4. 影响 R-XX 的话,把对应 SC 跑一遍(见 [run-harness.md](file:///Users/guoshuyu/workspace/gif-toolkit/harness/run-harness.md))
+3. 修完后跑 `npm run typecheck && npm run lint && npm run test:fast`（必跑），改了 IPC / uploader / processor 顺手 `npm run test:e2e:smoke`
+4. 影响 R-XX 的话，把对应 SUITE / SC 跑一遍（见 [run-harness.md §3](file:///Users/guoshuyu/workspace/gif-toolkit/harness/run-harness.md)）
 
 ### 我刚修了一个新发现的 bug
 

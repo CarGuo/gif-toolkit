@@ -322,6 +322,20 @@ Issues and PRs welcome. Before submitting please read:
 
 Every new feature / bug fix must ship with tests.
 
+### Test tiers (fast / smoke / all)
+
+To balance fast feedback and real-scenario coverage, tests are split into three tiers:
+
+| Command | Scope | Duration | When |
+| ---- | ---- | ---- | -------- |
+| `npm run test:fast` | vitest unit (main / renderer / shared contract layer) | ~6s | local dev, pre-commit |
+| `npm run test:e2e:smoke` | real Electron launch + offline-import → process → mock-oss upload → SQLite write-back full chain | ~10s (incl. build) | PR self-check, when touching IPC / uploader / processor |
+| `npm run test:e2e` | full playwright 122 cases (realPipeline contracts + UI regression) | ~1.5min | pre-release, when touching renderer main flow |
+| `npm run test:all` | all three in series | ~2min | strictest local gate |
+
+The `smoke` tier uses [`playwright.smoke.config.ts`](./playwright.smoke.config.ts), with `testDir` pointing to `tests/e2e-smoke/`, isolated from `tests/e2e/`.
+Key uploads go through `mock-oss://<sha8>.<ext>` shortcut (`GIFTK_E2E_MOCK_UPLOAD=1` env + `!app.isPackaged` double guard, never triggered in release builds).
+
 ---
 
 ## Acknowledgements

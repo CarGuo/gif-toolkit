@@ -10,7 +10,7 @@
 - 没有分级 → 一刀切要么 4MB(质量过牺牲) 要么 2MB(失败率太高)
 
 ## 怎么遵守
-- 改 [DEFAULT_OPTIONS](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types.ts) 时同时改 [OptionsForm.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/OptionsForm.tsx) 的输入控件
+- 改 [DEFAULT_OPTIONS](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types/) 时同时改 [OptionsForm.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/OptionsForm.tsx) 的输入控件
 - [sanitizeOptions](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/index.ts) 必须 clamp:`soft = min(soft, hard)`、`hard = max(soft, hard)`
 
 ## 反例

@@ -4,7 +4,7 @@
 > [App.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/App.tsx)
 > 一度膨胀到 2098 行的覆辙。
 
-最后更新：2026-05-21
+最后更新：2026-05-23
 
 ---
 
@@ -16,11 +16,11 @@
 | 单 .ts / .tsx **> 1000 行** | 视为违规。必须先拆分再补功能；除非显式 `eslint-disable max-lines` 加完整理由注释（≥ 3 行说明为何无法拆）。 |
 
 **反面教材**：
-- [App.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/App.tsx) 历史最高 2098 行；现已通过 8 个 hook + 7 个 view 拆到 1385 行。
+- [App.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/App.tsx) 历史最高 2098 行；现已通过多个 hook + view 拆到 ~1465 行（在 R-WS-90 全套 workspace 多 tab 落地后稳定在该量级）。
 - 拆分历史见 [src/renderer/views](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/views) 目录每个文件头注释的「Step 10 阶段 X」说明。
 
 **显式豁免（已审计 / 不再追问）**：
-- [src/main/processor.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor.ts) ≈ **2626 行** —— 真实业务复杂度（4-Phase 压缩 × R-43.2 per-task cancel × R-20 retry-while-draining × R-79 hard-target warning × toolbox 多入口共享 PQueue/activeAborts/taskAborts singleton），**不是设计债**。详见 §7「何时不该拆」的逐块复盘。每次想动它前，必须先通读 §7。
+- [src/main/processor.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor.ts) ≈ **3200 行** —— 真实业务复杂度（4-Phase 压缩 × R-43.2 per-task cancel × R-20 retry-while-draining × R-79 hard-target warning × toolbox 多入口共享 PQueue/activeAborts/taskAborts singleton），**不是设计债**。详见 §7「何时不该拆」的逐块复盘。每次想动它前，必须先通读 §7。
 
 ## 2. 拆分思路（按优先级）
 
@@ -42,7 +42,7 @@
   - 反向：SUITE Q — `skipCompress=true` 故意把 maxBytes 设极低，断言产物显著大于 maxBytes
 - **HL 弱单调**：当严格断言被 fixture 限制击穿时，**降到弱单调不变量**而不是删测试。SUITE R 即此例：
   原 `lossy200 ≤ lossy0 × 0.95` → 新 `lossy200 ≤ lossy0`，并在 comment 沉淀「fixture 极简下 lossy 维度不可观测」契约。
-- **三道闸**：每次 commit 前必须 `npm run typecheck && npm run lint && npm test && npm run build && npm run test:e2e` 全绿。
+- **三道闸**：每次 commit 前必须 `npm run typecheck && npm run lint && npm run test:fast && npm run build` 全绿；改了 IPC / uploader / processor / preload / db schema 必须额外跑 `npm run test:e2e:smoke`；发版前 `npm run test:e2e` 全量回归。三档定义见 [run-harness.md §2](file:///Users/guoshuyu/workspace/gif-toolkit/harness/run-harness.md)。
 
 ## 4. Workspace 模型不变量（2026-05-21 确立）
 
@@ -69,7 +69,7 @@
 1. 这个改动会不会让某个文件 > 600 行？→ 先想拆分
 2. 有没有现成的 hook / view / util 能直接拼？→ 先看 [src/renderer/components](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components) 和 [src/renderer/views](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/views)
 3. 真实链路 e2e 怎么覆盖？→ 翻 [realPipeline.spec.ts](file:///Users/guoshuyu/workspace/gif-toolkit/tests/e2e/realPipeline.spec.ts) 的 SUITE 命名表，找最像的样板
-4. 三道闸都会绿吗？→ 提交前在本机 `npm run typecheck && npm test && npm run test:e2e`
+4. 三道闸都会绿吗？→ 提交前在本机 `npm run typecheck && npm run lint && npm run test:fast && npm run build`，改了链路相关再加 `npm run test:e2e:smoke`
 
 ---
 

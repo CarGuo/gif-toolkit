@@ -1,5 +1,13 @@
 # docs/ipc-contract.md
 
+> ⚠️ **本文档可能滞后于源码** — 自 R-WS / R-LINEAGE / R-SNIFF-OVERLAY / R-COVERAGE 以来 IPC 通道已扩展多轮,本文档**不再逐项跟随**。
+> **权威来源以源码为准**:
+> - 调用面契约:[src/preload/index.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/preload/index.ts) + [src/renderer/global.d.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/global.d.ts)
+> - 主端 handler 注册:[src/main/index.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/index.ts)
+> - 共享类型:[src/shared/types/](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types)
+>
+> 本文保留作为 IPC 设计意图与历史不变量的索引(R-10 / R-11 / R-26 等),具体方法签名以 preload/global.d.ts 为准。
+
 > 主进程暴露的所有 IPC 通道 + Renderer 上 `window.giftk.*` 的全表。
 > 源代码:[src/preload/index.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/preload/index.ts) / [src/renderer/global.d.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/global.d.ts) / [src/main/index.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/index.ts)。
 > 关联规则:[R-10](file:///Users/guoshuyu/workspace/gif-toolkit/AGENTS.md) / [R-11](file:///Users/guoshuyu/workspace/gif-toolkit/AGENTS.md)。

@@ -87,7 +87,7 @@
 
 1. 阅读 [src/main/sniffer.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/sniffer.ts) `sniffPage` 主循环
 2. 决定优先级:你的规则比 `pattern` 强吗?是就插在它前面
-3. 在 [src/shared/types.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types.ts) `SniffedMedia.source` union 上加你的新值
+3. 在 [src/shared/types/](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types/) `SniffedMedia.source` union 上加你的新值
 4. 调 `pushUnique(map, { ...media, source: '<your-source>', pageUrl })`
 5. **写一个 SC-XX 场景** 到 [harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/),记录"什么样的页面会命中这条新规则"
 6. typecheck + lint + build 三连

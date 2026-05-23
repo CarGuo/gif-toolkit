@@ -69,11 +69,11 @@ flowchart TB
 | 不变量 | 违反后果 |
 |---|---|
 | Renderer 不直接调 `child_process` / `fs` | Electron 安全基线塌方 |
-| 共享类型只放 [src/shared/types.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types.ts) | 主/渲两边 schema 漂移,运行期才发现 |
+| 共享类型只放 [src/shared/types/](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types) | 主/渲两边 schema 漂移,运行期才发现 |
 | 二进制路径只通过 [src/main/binaries.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/binaries.ts) | 打包后 ffmpeg 找不到 |
 | `sniff:url` 拒绝 `file://` / `javascript:` | 任意文件读 + XSS 风险 |
 | Preload 暴露的方法必须 + global.d.ts 一起改 | 生产构建 `window.giftk.foo` undefined |
-| [processor.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor.ts) 不强行拆模块（≈ 2626 行豁免） | 见 [project_rules.md §7](file:///Users/guoshuyu/workspace/gif-toolkit/project_rules.md) — 真实业务复杂度，不是设计债 |
+| [processor.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor.ts) 不强行拆模块（≈ 3200 行豁免） | 见 [project_rules.md §7](file:///Users/guoshuyu/workspace/gif-toolkit/project_rules.md) — 真实业务复杂度，不是设计债 |
 
 ---
 

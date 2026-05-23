@@ -10,8 +10,8 @@
 - [ ] 它会跨主/渲两个进程吗?如果跨,IPC 通道叫什么?
 
 ## 2. 类型边界
-- [ ] 它是否需要在 [src/shared/types.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types.ts) 加新类型?
-- [ ] 它是否会破坏现有 [SniffedMedia](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types.ts) / [ProcessOptions](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types.ts) / [TaskProgress](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types.ts) 的字段?
+- [ ] 它是否需要在 [src/shared/types/](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types/) 加新类型?
+- [ ] 它是否会破坏现有 [SniffedMedia](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types/) / [ProcessOptions](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types/) / [TaskProgress](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types/) 的字段?
 
 ## 3. 嗅探层
 - [ ] 是否新加嗅探规则?它的 `source` 取什么值?优先级排在哪条之前?

@@ -39,7 +39,7 @@
 | **R-13** | SPA / anti-bot 页面必须三级 fallback:静态正则 → headless → CF challenge 报警 | [R-13](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-13-spa-must-have-fallback.md) |
 | **R-14** | embed resolver 必须随包分发 + 自动解析(开箱即用,无 confirm 弹窗) | [R-14](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-14-resolver-bundled.md) |
 | **R-15** | npm 供应链卫生:`min-release-age=7d` + `ignore-scripts` allowlist + `save-exact` + `npm ci` + lockfile lint | [R-15](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-15-npm-supply-chain-hygiene.md) |
-| **R-16** | 新功能必须随测试,修 bug 先写会失败的回归测试,`npm test` 0 失败硬关卡 | [R-16](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-16-tests-required.md) |
+| **R-16** | 新功能必须随测试,修 bug 先写会失败的回归测试,`npm run test:fast` 0 失败硬关卡 | [R-16](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-16-tests-required.md) |
 | **R-22** | 长视频默认只跑第 1 段(`maxSegmentSec=20`),`selectedSegments` 贯通 IPC | [R-22](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-22-clip-segment-cap.md) |
 | **R-23** | 批处理前必须弹「分段选择」对话框,modal 取消 = 不派发 | [R-23](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-23-batch-confirm-modal.md) |
 | **R-24** | ffmpeg single-pass + palettegen 抽帧 + yt-dlp `--download-sections` 多段下载 | [R-24](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-24-ffmpeg-single-pass-and-section-fetch.md) |
@@ -82,11 +82,12 @@
 1. **Read 触发场景** → 翻 [harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios) 看是否有同类问题已沉淀。如有,直接复用规则,**不再二次发明**。
 2. **Plan** → 用 TodoWrite 列步骤;影响第 1 节任何 R-* 要在计划里点名。
 3. **Execute** → 改代码。
-4. **Verify** → **四步顺序执行,全部通过才算完成**:
-   - `npm run typecheck`
-   - `npm run lint`
-   - `npm test` + 改了 [src/main/db/](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/db) **必须** `npm run test:db`(R-80 wrapper)
-   - `npm run build`
+4. **Verify** → **测试三档 + 静态门禁,按改动范围递进**:
+   - 必跑（commit 前）:`npm run typecheck` + `npm run lint` + `npm run test:fast`(vitest 全套，~6s) + `npm run build`
+   - 改了 [src/main/db/](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/db) **必须** `npm run test:db`(R-80 wrapper)
+   - 改了 IPC / uploader / processor / preload / db schema / native module **必须** `npm run test:e2e:smoke`(单进程真实链路 ~10s)
+   - 发版 / 改 renderer 主流程 / 大 PR 必跑 `npm run test:e2e`(完整 122 用例 ~1.5min);最严格本地全闸用 `npm run test:all`
+   - 三档定义见 [run-harness.md §2](file:///Users/guoshuyu/workspace/gif-toolkit/harness/run-harness.md)
 5. **Smoke (R-80 #8 / R-82 铁规则)** — 改了 native module / db schema / IPC / preload bridge / `before-quit` / 共享 enum 常量,**必须**额外跑一次 `npm run dev` 实派发一次任务,主进程日志无 `compiled against a different Node.js version` / `UnhandledPromiseRejection` / `'includes' is undefined` / `db init failed` 才能交付。**测试通过 ≠ 功能可用**。
 6. **Regress** → 跑 [harness/run-harness.md](file:///Users/guoshuyu/workspace/gif-toolkit/harness/run-harness.md) 中相关场景集。
 7. **Capture** — 修了新发现的 bug,**必须在 [harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios) 新增 SC-XX**;新规则**必须**在 [harness/rules/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules) 新增 R-XX。这是"不再犯"的唯一保证。
@@ -154,7 +155,7 @@
 
 - [ ] 我读了第 1 节 R-* 索引,没违反任何一条;改动直接关联的 rule 文件已细读
 - [ ] 我读了 [harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios),没让任何已有 SC 失效
-- [ ] `npm run typecheck` / `npm run lint` / `npm test` / `npm run build` 4 步全绿
+- [ ] `npm run typecheck` / `npm run lint` / `npm run test:fast` / `npm run build` 必绿;改了 IPC / uploader / processor / preload / db schema / native 再加 `npm run test:e2e:smoke`
 - [ ] 改了主/渲共享类型 → preload + global.d.ts 已同步
 - [ ] 改了 native module / db / preload / before-quit / 共享常量 → `npm run dev` 已 smoke 实派发任务
 - [ ] 修了新发现的 bug → [harness/scenarios/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios) 增了 SC-XX;新规则增了 [harness/rules/](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules) R-XX

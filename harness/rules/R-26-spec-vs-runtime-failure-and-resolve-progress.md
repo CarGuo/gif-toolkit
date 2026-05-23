@@ -47,7 +47,7 @@ look broken for the 5–15s a `yt-dlp` round-trip takes.
 ### 3. Spec failures are typed end-to-end
 
 * `TaskProgress.errorCode` is a **closed string-literal union** in
-  [shared/types.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types.ts).
+  [shared/types.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types/).
   Today: `'ASPECT_RATIO_OUT_OF_RANGE'`. Adding new categories MUST
   extend the union, never widen to plain `string`.
 * `errorMeta` carries the numeric context (`origW`, `origH`, `minSide`,
@@ -111,6 +111,6 @@ look broken for the 5–15s a `yt-dlp` round-trip takes.
 * [src/renderer/components/MediaGrid.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/MediaGrid.tsx)
 * [src/renderer/components/TaskTable.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/TaskTable.tsx)
 * [src/renderer/App.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/App.tsx)
-* [src/shared/types.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types.ts)
+* [src/shared/types/](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types/)
 * [src/main/index.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/index.ts) (sanitizeOptions)
 * [src/main/processor.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor.ts)

@@ -13,7 +13,7 @@
 
 ## 期望行为
 
-每个 [TaskProgress](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types.ts) emit 必须**至少包含**:
+每个 [TaskProgress](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types/) emit 必须**至少包含**:
 
 | 字段 | 例子 |
 |---|---|

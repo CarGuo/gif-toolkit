@@ -1,7 +1,7 @@
 # R-08 — 进度信息必须丰富
 
 ## 规则
-[TaskProgress](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types.ts) emit 时必须带:
+[TaskProgress](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types/) emit 时必须带:
 - `substep`(当前在做什么,人类可读)
 - `detail`(具体数字,如"1.78MB / target 2MB")
 - `stepIndex` / `totalSteps`(预估)

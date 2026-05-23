@@ -39,7 +39,7 @@
 - [ ] CI workflow 用的是 `npm ci`,没人偷偷换成 `npm install`
 
 ## 共享类型 / 边界
-- [ ] 改了 [src/shared/types.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types.ts)?(若是,确认对应的 sanitizeOptions / OptionsForm 都更新了)
+- [ ] 改了 [src/shared/types/](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types/)?(若是,确认对应的 sanitizeOptions / OptionsForm 都更新了)
 - [ ] 改了 IPC 通道?(若是,确认 [docs/ipc-contract.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/ipc-contract.md) 已更新)
 
 ## 动态回归
