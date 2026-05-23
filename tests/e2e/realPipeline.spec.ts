@@ -108,6 +108,9 @@ import './realPipeline/suite-toolbox-lineage-tree-ui'; // SUITE TB-LINEAGE-TREE-
 import './realPipeline/suite-upload-full';              // SUITE UPLOAD-FULL A..E (R-UPLOAD-FULL-V1)
 import './realPipeline/suite-lifecycle';                // SUITE LIFE A..D (R-LIFECYCLE-V1)
 import './realPipeline/suite-cancel-robust';            // SUITE CANCEL A..D (R-CANCEL-ROBUST-V1)
+import './realPipeline/suite-offline-import';           // SUITE OFFLINE A..C (R-OFFLINE-IMPORT-V1)
+import './realPipeline/suite-media-io';                 // SUITE MEDIA A..C (R-MEDIA-IO-V1)
+import './realPipeline/suite-db-ipc';                   // SUITE DB A..D (R-DB-IPC-V1)
 
 test.describe.configure({ timeout: 90_000 });
 
