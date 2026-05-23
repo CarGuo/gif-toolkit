@@ -1048,30 +1048,202 @@ details.advanced-gif > summary {
   letter-spacing: 0.2px;
 }
 
-.sniff-progress {
-  margin-top: 10px;
+/* R-SNIFF-OVERLAY-V1 — global loading overlay shown while a sniff is in
+ * flight. Replaces the old inline `.sniff-progress` row that hung off the
+ * bottom of the URL bar; the rest of the app dims behind a blurred mask.
+ * The card itself layers a CSS-only spinner, an animated shimmer over the
+ * progress bar, and a soft fade-in transition so the affordance feels
+ * alive even on long sniffs (system-chrome path can take 30s+).
+ */
+.sniff-overlay-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 10, 16, 0.62);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9998;
+  padding: 24px;
+  animation: sniff-overlay-fade-in 180ms ease-out both;
+}
+.sniff-overlay-card {
+  width: min(440px, 92vw);
+  background: linear-gradient(180deg, #1f2230 0%, #161922 100%);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 14px;
+  box-shadow:
+    0 28px 80px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(120, 130, 220, 0.18) inset;
+  padding: 26px 24px 22px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 14px;
+  color: var(--text, #e6e7eb);
+  animation: sniff-overlay-pop-in 220ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
-.sniff-progress-row {
+.sniff-overlay-spinner {
+  position: relative;
+  width: 52px;
+  height: 52px;
+  margin: 0 auto 4px;
+}
+.sniff-overlay-spinner-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 3px solid rgba(120, 130, 220, 0.18);
+  border-top-color: rgba(120, 130, 220, 0.95);
+  border-right-color: rgba(170, 130, 220, 0.85);
+  animation: sniff-overlay-spin 0.95s linear infinite;
+}
+.sniff-overlay-spinner-dot {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 10px;
+  height: 10px;
+  margin: -5px 0 0 -5px;
+  border-radius: 50%;
+  background: rgba(180, 160, 240, 0.95);
+  box-shadow: 0 0 12px rgba(180, 160, 240, 0.7);
+  animation: sniff-pulse 1s ease-in-out infinite alternate;
+}
+.sniff-overlay-headline {
   display: flex;
-  gap: 8px;
   align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.sniff-overlay-stage {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text, #e6e7eb);
+  letter-spacing: 0.2px;
+}
+.sniff-overlay-percent {
+  font-variant-numeric: tabular-nums;
+  font-size: 14px;
+  font-weight: 600;
+  color: rgba(170, 180, 220, 0.95);
+}
+.sniff-overlay-bar-wrap {
+  position: relative;
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.sniff-overlay-bar {
+  position: absolute;
+  inset: 0 auto 0 0;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #6e7bff 0%, #b07bff 100%);
+  box-shadow: 0 0 10px rgba(120, 130, 240, 0.45);
+  transition: width 200ms ease-out;
+}
+.sniff-overlay-bar-shimmer {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.18) 45%,
+    rgba(255, 255, 255, 0.32) 50%,
+    rgba(255, 255, 255, 0.18) 55%,
+    transparent 100%);
+  animation: sniff-overlay-shimmer 1.6s linear infinite;
+}
+.sniff-overlay-counts {
   font-size: 11.5px;
-  color: var(--muted);
+  color: var(--muted, #9aa0aa);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  min-height: 14px;
 }
-.sniff-stage {
-  color: var(--text);
-  font-weight: 500;
+.sniff-overlay-message {
+  font-size: 12.5px;
+  color: var(--muted, #9aa0aa);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  padding: 8px 10px;
+  line-height: 1.45;
 }
-.sniff-counts {
+.sniff-overlay-cf-banner {
+  margin-top: 0;
+  padding: 10px 12px;
+  background: rgba(241, 161, 64, 0.16);
+  border: 1px solid rgba(241, 161, 64, 0.5);
+  color: #f1a140;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.sniff-overlay-cf-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #f1a140;
+  flex-shrink: 0;
+  animation: sniff-pulse 1s ease-in-out infinite alternate;
+}
+.sniff-overlay-cf-text {
   flex: 1;
-  font-variant-numeric: tabular-nums;
+  min-width: 0;
 }
-.sniff-percent {
-  font-variant-numeric: tabular-nums;
-  color: var(--text);
+.sniff-overlay-cf-finalize {
+  background: #2aaa77;
+  color: #fff;
+  border: none;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.sniff-overlay-cf-finalize:hover {
+  background: #34c389;
+}
+.sniff-overlay-actions {
+  display: flex;
+  justify-content: center;
+  margin-top: 4px;
+}
+.sniff-overlay-cancel {
+  background: transparent;
+  color: var(--danger, #e76f51);
+  border: 1px solid var(--danger, #e76f51);
+  padding: 6px 18px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+.sniff-overlay-cancel:hover {
+  background: rgba(231, 111, 81, 0.14);
+}
+@keyframes sniff-overlay-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes sniff-overlay-pop-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.96); }
+  to   { opacity: 1; transform: translateY(0)   scale(1);    }
+}
+@keyframes sniff-overlay-spin {
+  to { transform: rotate(360deg); }
+}
+@keyframes sniff-overlay-shimmer {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(100%);  }
 }
 
 .modal-mask {

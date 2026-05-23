@@ -327,93 +327,79 @@ export function SniffSection(props: SniffSectionProps): JSX.Element {
         <div className="notice danger">{urlError}</div>
       ) : null}
       {sniffing && sniffProgress ? (
-        <div className="sniff-progress">
-          <div className="sniff-progress-row">
-            <span className="sniff-stage">{stageLabel(sniffProgress.stage)}</span>
-            <span className="sniff-counts">
+        <div
+          className="sniff-overlay-mask"
+          role="dialog"
+          aria-modal="true"
+          aria-label="嗅探进度"
+          data-testid="sniff-overlay"
+        >
+          {/* R-SNIFF-OVERLAY-V1 — full-screen blurred backdrop hosting a
+              centered loading card. Replaces the inline `.sniff-progress`
+              row at the bottom of the URL bar so the rest of the app
+              dims while a sniff is in flight. The card retains every
+              piece of information the inline row had (stage label,
+              found / probed counts, percent, message, system-chrome
+              wait banner with 「✓ 完成嗅探」), and adds a CSS-only
+              spinner + shimmer bar to reinforce the "we're working"
+              affordance. The cancel button is now the card's primary
+              action, lifted out of the row layout. */}
+          <div className="sniff-overlay-card" role="document">
+            <div className="sniff-overlay-spinner" aria-hidden="true">
+              <span className="sniff-overlay-spinner-ring" />
+              <span className="sniff-overlay-spinner-dot" />
+            </div>
+            <div className="sniff-overlay-headline">
+              <span className="sniff-overlay-stage">{stageLabel(sniffProgress.stage)}</span>
+              <span className="sniff-overlay-percent">{Math.round(sniffProgress.percent)}%</span>
+            </div>
+            <div className="sniff-overlay-bar-wrap" aria-hidden="true">
+              <div
+                className="sniff-overlay-bar"
+                style={{ width: `${Math.max(0, Math.min(100, sniffProgress.percent))}%` }}
+              />
+              <div className="sniff-overlay-bar-shimmer" />
+            </div>
+            <div className="sniff-overlay-counts">
               {typeof sniffProgress.found === 'number' ? `found ${sniffProgress.found}` : ''}
               {typeof sniffProgress.probed === 'number' && typeof sniffProgress.total === 'number'
-                ? ` · probed ${sniffProgress.probed}/${sniffProgress.total}`
+                ? `${typeof sniffProgress.found === 'number' ? ' · ' : ''}probed ${sniffProgress.probed}/${sniffProgress.total}`
                 : ''}
-            </span>
-            <span className="sniff-percent">{Math.round(sniffProgress.percent)}%</span>
-            {/* R-59 — Always-visible cancel button. */}
-            <button
-              onClick={onCancel}
-              title="取消嗅探"
-              style={{
-                marginLeft: 8,
-                background: 'transparent',
-                color: 'var(--danger, #e76f51)',
-                border: '1px solid var(--danger, #e76f51)',
-                padding: '2px 8px',
-                borderRadius: 4,
-                fontSize: 11,
-                fontWeight: 600,
-                cursor: 'pointer',
-                flexShrink: 0
-              }}
-            >
-              ✕ 取消
-            </button>
-          </div>
-          <div className="bar-wrap">
-            <div className="bar" style={{ width: `${Math.max(0, Math.min(100, sniffProgress.percent))}%` }} />
-          </div>
-          {sniffProgress.message ? (
-            activeSniffMode === 'system-chrome' && sniffProgress.percent >= 55 && sniffProgress.percent < 90 ? (
-              <div
-                className="notice"
-                role="status"
-                aria-live="polite"
-                style={{
-                  marginTop: 6,
-                  padding: '8px 10px',
-                  background: 'rgba(241, 161, 64, 0.16)',
-                  border: '1px solid rgba(241, 161, 64, 0.5)',
-                  color: '#f1a140',
-                  borderRadius: 6,
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  fontSize: 12,
-                  fontWeight: 600
-                }}
-              >
-                <span
-                  aria-hidden="true"
-                  style={{
-                    width: 8,
-                    height: 8,
-                    borderRadius: '50%',
-                    background: '#f1a140',
-                    animation: 'sniff-pulse 1s ease-in-out infinite alternate',
-                    flexShrink: 0
-                  }}
-                />
-                <span style={{ flex: 1, minWidth: 0 }}>{sniffProgress.message}</span>
-                <button
-                  onClick={onFinalizeSystemChromeSniff}
-                  title="立即结束嗅探并返回到目前已抓到的媒体(无需关闭 Chrome 整个进程)"
-                  style={{
-                    background: '#2aaa77',
-                    color: '#fff',
-                    border: 'none',
-                    padding: '4px 10px',
-                    borderRadius: 4,
-                    fontSize: 12,
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                    flexShrink: 0
-                  }}
+            </div>
+            {sniffProgress.message ? (
+              activeSniffMode === 'system-chrome' && sniffProgress.percent >= 55 && sniffProgress.percent < 90 ? (
+                <div
+                  className="notice sniff-overlay-cf-banner"
+                  role="status"
+                  aria-live="polite"
                 >
-                  ✓ 完成嗅探
-                </button>
-              </div>
-            ) : (
-              <div className="notice" style={{ marginTop: 4 }}>{sniffProgress.message}</div>
-            )
-          ) : null}
+                  <span className="sniff-overlay-cf-dot" aria-hidden="true" />
+                  <span className="sniff-overlay-cf-text">{sniffProgress.message}</span>
+                  <button
+                    className="sniff-overlay-cf-finalize"
+                    onClick={onFinalizeSystemChromeSniff}
+                    title="立即结束嗅探并返回到目前已抓到的媒体(无需关闭 Chrome 整个进程)"
+                  >
+                    ✓ 完成嗅探
+                  </button>
+                </div>
+              ) : (
+                <div className="sniff-overlay-message" role="status" aria-live="polite">
+                  {sniffProgress.message}
+                </div>
+              )
+            ) : null}
+            <div className="sniff-overlay-actions">
+              <button
+                type="button"
+                className="sniff-overlay-cancel"
+                onClick={onCancel}
+                title="取消嗅探"
+              >
+                ✕ 取消
+              </button>
+            </div>
+          </div>
         </div>
       ) : null}
       {!sniffing && result?.warnings.length ? (
@@ -422,7 +408,6 @@ export function SniffSection(props: SniffSectionProps): JSX.Element {
       {!sniffing && result?.infoNotices?.length ? (
         <div className="notice notice-info">{result.infoNotices.join('; ')}</div>
       ) : null}
-      {!sniffing && result?.title ? <div className="notice">{result.title}</div> : null}
     </div>
   );
 }
