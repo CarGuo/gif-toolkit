@@ -35,6 +35,7 @@ import {
   readSession as readLogSession
 } from '../sessionLogger';
 import { dispatchUpload } from './backends';
+import { isMockUploadEnabled } from './mockOss';
 import {
   TINY_PNG_BYTES,
   backoffDelayMs,
@@ -564,34 +565,44 @@ async function runOneJob(
   // the same bytes can be deduped — the cost is one in-memory pass
   // over a buffer we already have in RAM (sub-ms for a 5MB GIF).
   const fileHash = sha256Hex(bytes);
-  try {
-    const cache = await readHashCache();
-    const hit = cache[fileHash];
-    if (
-      hit &&
-      hit.backend === backend &&
-      typeof hit.url === 'string' &&
-      hit.url.length > 0 &&
-      Date.now() - (hit.uploadedAt || 0) < HASH_CACHE_TTL_MS
-    ) {
-      const md = buildMarkdown(fileName, hit.url, altTemplate);
-      emit({
-        jobId: job.id, backend,
-        status: 'done', percent: 100,
-        url: hit.url, markdown: md,
-        bytesTotal: total, bytesUploaded: total,
-        message: '♻️ hash 命中,复用历史地址',
-        attempt: 1, maxAttempts: 1,
-        fileHash, reused: true,
-        recordId
-      });
-      log(`[upload] hash-cache HIT job=${job.id} sha=${fileHash.slice(0, 8)}… url=${hit.url}`);
-      inflight.delete(job.id);
-      return;
+  // R-COVERAGE-REAL-SCENARIO — Skip the hash-dedup short-circuit when
+  // mock-oss mode is on. Otherwise a stale entry from a prior smoke
+  // run (or a sibling realPipeline SUITE that uploaded the same fixture
+  // bytes) would synthesise a `done` with the OLD non-mock URL and the
+  // smoke spec would never see `dispatchUpload` route into mockOss.
+  // The dedup feature itself is not under test in mock mode — every
+  // smoke job needs to traverse `dispatchUpload` for assertions.
+  const skipHashCache = isMockUploadEnabled();
+  if (!skipHashCache) {
+    try {
+      const cache = await readHashCache();
+      const hit = cache[fileHash];
+      if (
+        hit &&
+        hit.backend === backend &&
+        typeof hit.url === 'string' &&
+        hit.url.length > 0 &&
+        Date.now() - (hit.uploadedAt || 0) < HASH_CACHE_TTL_MS
+      ) {
+        const md = buildMarkdown(fileName, hit.url, altTemplate);
+        emit({
+          jobId: job.id, backend,
+          status: 'done', percent: 100,
+          url: hit.url, markdown: md,
+          bytesTotal: total, bytesUploaded: total,
+          message: '♻️ hash 命中,复用历史地址',
+          attempt: 1, maxAttempts: 1,
+          fileHash, reused: true,
+          recordId
+        });
+        log(`[upload] hash-cache HIT job=${job.id} sha=${fileHash.slice(0, 8)}… url=${hit.url}`);
+        inflight.delete(job.id);
+        return;
+      }
+    } catch (e) {
+      // Cache lookup failure is non-fatal: just go uploaded as normal.
+      log(`[upload] hash-cache lookup failed (non-fatal): ${(e as Error).message || String(e)}`);
     }
-  } catch (e) {
-    // Cache lookup failure is non-fatal: just go uploaded as normal.
-    log(`[upload] hash-cache lookup failed (non-fatal): ${(e as Error).message || String(e)}`);
   }
 
   let lastErr: unknown;
@@ -630,17 +641,21 @@ async function runOneJob(
         // R-54 — Persist the successful upload into the dedup cache.
         // We swallow write failures (best-effort): a missing cache
         // entry just means the next identical upload will repeat.
-        try {
-          const cache = await readHashCache();
-          cache[fileHash] = {
-            url,
-            backend,
-            fileName,
-            uploadedAt: Date.now()
-          };
-          await writeHashCache(cache);
-        } catch {
-          // already logged inside writeHashCache
+        // Skipped under mock-oss mode so smoke runs never persist a
+        // mock URL into the user's hash-cache file.
+        if (!skipHashCache) {
+          try {
+            const cache = await readHashCache();
+            cache[fileHash] = {
+              url,
+              backend,
+              fileName,
+              uploadedAt: Date.now()
+            };
+            await writeHashCache(cache);
+          } catch {
+            // already logged inside writeHashCache
+          }
         }
         log(`[upload] ok job=${job.id} attempt=${attempt} url=${url} sha=${fileHash.slice(0, 8)}…`);
         return;
