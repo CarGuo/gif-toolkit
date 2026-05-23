@@ -1,0 +1,254 @@
+name: Linux Smoke (Manual)
+
+# R-LINUX-SMOKE — manual headless verification of a published Linux
+# release artifact. The maintainer has no Linux box, and v* tags only
+# verify "the build pipeline succeeded", not "the AppImage actually
+# launches and renders on a clean Ubuntu". This workflow plugs that
+# gap by:
+#   1. downloading the published AppImage from GitHub Releases,
+#   2. running it under Xvfb on ubuntu-latest,
+#   3. taking timed screenshots while the app boots,
+#   4. running `npm run test:e2e:smoke` from the matching tag against
+#      a freshly-built dist (real ffmpeg + mock-oss upload),
+#   5. uploading every screenshot + log as an artifact for `gh run
+#      download` to fetch locally.
+#
+# Triggered manually:
+#   gh workflow run linux-smoke.yml -f version=v0.2.5
+#   gh workflow run linux-smoke.yml -f version=v0.2.5 -f debug=true
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release tag to verify (e.g. v0.2.5). Must already be published as a GitHub Release.'
+        required: true
+        default: 'v0.2.5'
+      debug:
+        description: 'Hold the runner open via tmate after smoke completes (lets you SSH in to poke at the live VM).'
+        required: false
+        type: boolean
+        default: false
+      run_e2e:
+        description: 'Also run npm run test:e2e:smoke against a freshly built dist (real ffmpeg + mock-oss). Slow (~5min) but high signal.'
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repo at tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.version }}
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # Headless-Linux runtime stack:
+      #   - xvfb               virtual framebuffer X server
+      #   - x11-utils          xwininfo / xprop for window introspection
+      #   - xdotool            scripted mouse/keyboard input
+      #   - imagemagick        `import -window root ...` for screenshots
+      #   - scrot              backup screenshot tool (faster than import)
+      #   - libgtk-3 / libnss3 / libnotify4 / libxss1 / libxtst6 /
+      #     libatspi2.0-0 / libdrm2 / libgbm1 / libasound2t64
+      #                        Electron runtime deps on Ubuntu 24.04
+      #   - fuse + libfuse2    AppImage uses FUSE to mount its squashfs;
+      #                        without these the binary refuses to start
+      - name: Install Xvfb + Electron runtime deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb x11-utils xdotool imagemagick scrot \
+            libgtk-3-0 libnotify4 libnss3 libxss1 libxtst6 \
+            libatspi2.0-0 libdrm2 libgbm1 libasound2t64 \
+            fuse libfuse2
+
+      - name: Download AppImage from GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          mkdir -p /tmp/smoke
+          cd /tmp/smoke
+          # The artifact name pattern is locked by package.json
+          # build.artifactName: "${productName}-${version}-${os}-${arch}.${ext}"
+          # so for v0.2.5 → "Gif-Toolkit-0.2.5-linux-x86_64.AppImage".
+          VER="${{ inputs.version }}"
+          VER_NO_V="${VER#v}"
+          ASSET="Gif-Toolkit-${VER_NO_V}-linux-x86_64.AppImage"
+          echo "Downloading ${ASSET} from release ${VER}..."
+          gh release download "${VER}" \
+            --repo "${{ github.repository }}" \
+            --pattern "${ASSET}" \
+            --dir /tmp/smoke
+          ls -la /tmp/smoke
+          chmod +x "/tmp/smoke/${ASSET}"
+          echo "ASSET_PATH=/tmp/smoke/${ASSET}" >> "$GITHUB_ENV"
+
+      - name: Inspect AppImage binary
+        run: |
+          file "$ASSET_PATH"
+          stat -c '%s bytes' "$ASSET_PATH"
+
+      # --------------------------------------------------------------
+      # PHASE A — Boot the published AppImage on a virtual display and
+      # capture timed screenshots. This is the "does the bundle even
+      # launch on a fresh Ubuntu" check.
+      # --------------------------------------------------------------
+      - name: Boot AppImage under Xvfb + capture screenshots
+        run: |
+          set -e
+          mkdir -p /tmp/smoke/shots
+          # Start Xvfb on display :99 with a 1920x1080 virtual screen.
+          Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp -ac &
+          XVFB_PID=$!
+          export DISPLAY=:99
+          # Give Xvfb a moment to come up before any X client connects.
+          sleep 2
+          # Sanity-check the display is reachable.
+          xdpyinfo -display :99 | head -3 || (echo "Xvfb did not come up"; exit 1)
+
+          # Launch the AppImage. --no-sandbox is required because the
+          # GitHub Actions Linux runner doesn't grant CAP_SYS_ADMIN,
+          # so Chromium's user namespace sandbox can't initialise.
+          # This is the same flag electron-builder injects in its CI
+          # smoke tests, and is safe in this trust boundary (we run
+          # OUR signed AppImage, no untrusted renderer content).
+          "$ASSET_PATH" --no-sandbox --disable-gpu \
+            > /tmp/smoke/app.stdout.log 2> /tmp/smoke/app.stderr.log &
+          APP_PID=$!
+
+          # Boot waterfall — snap at multiple offsets so we see the
+          # progression (splash → main window → first paint → ready).
+          for OFFSET in 3 6 10 15 20; do
+            sleep $((OFFSET - $(stat -c %Y /tmp/smoke/shots 2>/dev/null | head -c 0; echo 0))) 2>/dev/null || true
+            sleep 3
+            if kill -0 $APP_PID 2>/dev/null; then
+              import -window root "/tmp/smoke/shots/boot-${OFFSET}s.png" || true
+              echo "✓ snapped /tmp/smoke/shots/boot-${OFFSET}s.png at ~${OFFSET}s (pid ${APP_PID} alive)"
+            else
+              echo "✗ APP died before ${OFFSET}s — see app.stderr.log"
+              break
+            fi
+          done
+
+          # Final liveness check.
+          if kill -0 $APP_PID 2>/dev/null; then
+            echo "ALIVE_AFTER_BOOT=true" >> "$GITHUB_ENV"
+            xwininfo -root -tree > /tmp/smoke/wininfo.txt 2>&1 || true
+          else
+            echo "ALIVE_AFTER_BOOT=false" >> "$GITHUB_ENV"
+          fi
+
+          # PHASE B — Try to drive the UI a bit. Sidebar tabs in
+          # gif-toolkit aren't bound to global accelerators, so use
+          # xdotool to click at well-known sidebar coordinates. The
+          # sidebar is a vertical list at x≈40 starting from y≈80
+          # with each item ~56px tall (this is empirical from the
+          # published README screenshots). Failures here are
+          # non-fatal — we continue and let the user see the result.
+          if kill -0 $APP_PID 2>/dev/null; then
+            for IDX in 0 1 2 3; do
+              Y=$((100 + IDX * 70))
+              xdotool mousemove 40 $Y click 1 2>/dev/null || true
+              sleep 1
+              import -window root "/tmp/smoke/shots/tab-${IDX}.png" || true
+            done
+          fi
+
+          # Tear down the app cleanly. SIGTERM first, KILL after 3s.
+          kill -TERM $APP_PID 2>/dev/null || true
+          sleep 3
+          kill -KILL $APP_PID 2>/dev/null || true
+          kill $XVFB_PID 2>/dev/null || true
+
+          # Always succeed at this step — the artifact + ALIVE_AFTER_BOOT
+          # env let downstream steps + the user judge pass/fail. This
+          # avoids the workflow short-circuiting before artifact upload.
+          echo "Phase A/B complete (alive=${ALIVE_AFTER_BOOT})"
+
+      # --------------------------------------------------------------
+      # PHASE C — npm install + e2e:smoke. This is independent from
+      # Phase A: the AppImage check verifies the SHIPPED artifact, but
+      # e2e:smoke verifies the SOURCE TREE at the tag (real ffmpeg →
+      # mock-oss → SQLite round trip). Together they bracket the
+      # release: artifact + functional layer both green.
+      # --------------------------------------------------------------
+      - name: Install dependencies (matching release.yml)
+        if: ${{ inputs.run_e2e }}
+        run: |
+          npm ci
+          npm run postinstall
+          node node_modules/electron/install.js
+          test -s node_modules/electron/path.txt
+
+      - name: Run npm test:e2e:smoke under Xvfb
+        if: ${{ inputs.run_e2e }}
+        run: |
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
+            npm run test:e2e:smoke 2>&1 | tee /tmp/smoke/e2e.log
+
+      # --------------------------------------------------------------
+      # PHASE D — Always upload everything we collected, even on
+      # failure, so the maintainer can `gh run download` and inspect
+      # locally on their Mac.
+      # --------------------------------------------------------------
+      - name: Upload smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-smoke-${{ inputs.version }}
+          path: |
+            /tmp/smoke/shots/**
+            /tmp/smoke/app.stdout.log
+            /tmp/smoke/app.stderr.log
+            /tmp/smoke/wininfo.txt
+            /tmp/smoke/e2e.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      # --------------------------------------------------------------
+      # PHASE E (optional) — Hold the runner open via tmate so the
+      # maintainer can SSH in and explore live (e.g. re-launch the
+      # AppImage manually, run xdotool by hand, attach gdb to a
+      # crashed process, etc.). Default off because every triggered
+      # session burns a free-tier minute until manually closed.
+      # --------------------------------------------------------------
+      - name: Hold runner open via tmate (debug)
+        if: ${{ inputs.debug }}
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
+
+      - name: Final pass/fail summary
+        if: always()
+        run: |
+          echo "::group::Smoke summary for ${{ inputs.version }}"
+          echo "AppImage alive after boot: ${ALIVE_AFTER_BOOT:-unknown}"
+          if [ -f /tmp/smoke/app.stderr.log ]; then
+            echo "--- stderr (tail 30) ---"
+            tail -30 /tmp/smoke/app.stderr.log || true
+          fi
+          if [ -f /tmp/smoke/e2e.log ]; then
+            echo "--- e2e log (tail 30) ---"
+            tail -30 /tmp/smoke/e2e.log || true
+          fi
+          echo "::endgroup::"
+          # Fail the job if the AppImage didn't survive boot — that's
+          # the headline signal. e2e failures are still reported via
+          # exit code from the previous step.
+          if [ "${ALIVE_AFTER_BOOT}" != "true" ]; then
+            echo "❌ AppImage did not survive boot — see uploaded artifact."
+            exit 1
+          fi
+          echo "✅ AppImage survived boot."
