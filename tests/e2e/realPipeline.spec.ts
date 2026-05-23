@@ -114,6 +114,9 @@ import './realPipeline/suite-db-ipc';                   // SUITE DB A..D (R-DB-I
 import './realPipeline/suite-toolbox-standalone';       // SUITE TBX A..F (R-TOOLBOX-STANDALONE-V1)
 import './realPipeline/suite-capability-failsafe';      // SUITE CAP A..D (R-CAPABILITY-FAILSAFE-V1)
 import './realPipeline/suite-app-shell';                // SUITE SHELL A..E (R-APP-SHELL-V1)
+import './realPipeline/suite-upload-negative';          // SUITE UPLOAD-NEG A..E (R-UPLOAD-NEG-V1)
+import './realPipeline/suite-process-cancel';           // SUITE PROC A..D (R-PROCESS-CANCEL-V1)
+import './realPipeline/suite-updater-buildinfo';        // SUITE UPD A..D (R-UPDATER-BUILDINFO-V1)
 
 test.describe.configure({ timeout: 90_000 });
 

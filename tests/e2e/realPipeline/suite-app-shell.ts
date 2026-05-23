@@ -38,7 +38,7 @@ test.describe('SUITE APP-SHELL — app:* IPC validation + fallback contracts', (
     const { page } = getHarness();
     const r = await page.evaluate(async () => {
       const w = window as unknown as {
-        giftk: { update: { openExternal(url: string): Promise<void> } };
+        giftk: { updater: { openExternal(url: string): Promise<void> } };
       };
       const out: Record<string, string> = {};
       const tries: Array<[string, string]> = [
@@ -50,7 +50,7 @@ test.describe('SUITE APP-SHELL — app:* IPC validation + fallback contracts', (
       ];
       for (const [label, url] of tries) {
         try {
-          await w.giftk.update.openExternal(url);
+          await w.giftk.updater.openExternal(url);
           out[label] = '<accepted!>';
         } catch (e) {
           out[label] = (e as Error).message;
@@ -61,7 +61,7 @@ test.describe('SUITE APP-SHELL — app:* IPC validation + fallback contracts', (
       // string-length truncation surprises.
       const oversize = 'https://example.com/' + 'a'.repeat(3000);
       try {
-        await w.giftk.update.openExternal(oversize);
+        await w.giftk.updater.openExternal(oversize);
         out.oversize = '<accepted!>';
       } catch (e) {
         out.oversize = (e as Error).message;
