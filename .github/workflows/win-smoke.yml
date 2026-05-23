@@ -155,11 +155,16 @@ jobs:
           # Critical native binaries that the v0.2.5 Linux smoke
           # demonstrated can silently disappear if `npm ci` short-circuits
           # the lifecycle scripts. Each entry is "logical name | relative path".
+          # NOTE: gifsicle ships an arch-suffixed exe on Windows
+          # (gifsicle_x64.exe), not bare gifsicle.exe — confirmed by the
+          # main process log: gifsicle=...\vendor\win32\gifsicle_x64.exe ok=true.
+          # NOTE: yt-dlp is intentionally NOT bundled — ytdlp-nodejs lazy-
+          # downloads it into userData on first use, so it's expected to be
+          # absent from the install image.
           $expected = @(
             @{ name = "ffmpeg.exe";   path = "ffmpeg-static\ffmpeg.exe" },
             @{ name = "ffprobe.exe";  path = "ffprobe-static\bin\win32\x64\ffprobe.exe" },
-            @{ name = "gifsicle.exe"; path = "@343dev\gifsicle\vendor\win32\gifsicle.exe" },
-            @{ name = "yt-dlp.exe";   path = "ytdlp-nodejs\bin\yt-dlp.exe" },
+            @{ name = "gifsicle_x64.exe"; path = "@343dev\gifsicle\vendor\win32\gifsicle_x64.exe" },
             @{ name = "better_sqlite3.node"; path = "better-sqlite3\build\Release\better_sqlite3.node" }
           )
           $allOk = $true
@@ -331,20 +336,47 @@ jobs:
         shell: pwsh
         run: |
           $cleanReport = "$env:SMOKE_DIR\uninstall-report.txt"
-          $uninst = $env:UNINSTALL_STRING
-          if (-not $uninst) {
-            # Fall back to the well-known path the NSIS shim writes.
-            $uninst = Join-Path $env:INSTALL_DIR "Uninstall Gif Toolkit.exe"
+          $rawUninst = $env:UNINSTALL_STRING
+          # NSIS writes UninstallString as e.g.
+          #   "C:\GifToolkit\Uninstall Gif Toolkit.exe" /currentuser
+          # i.e. quoted exe path + (optionally) trailing args. A naive
+          # `.Trim('"')` only strips the leading quote and leaves the
+          # closing quote + " /currentuser" glued onto the path, so
+          # Test-Path always misses (caught in the v0.2.6 win-smoke
+          # artifact). Parse out the real exe path with a regex that
+          # accepts either quoted or unquoted forms.
+          $exePath = $null
+          $extraArgs = @("/S")
+          if ($rawUninst) {
+            if ($rawUninst -match '^"([^"]+)"\s*(.*)$') {
+              $exePath = $Matches[1]
+              if ($Matches[2]) {
+                # Preserve installer-mode flag (/currentuser, /allusers)
+                # so the silent uninstall runs in the same scope as the
+                # install — required by NSIS perUserInstallMode.
+                $extraArgs = @("/S") + ($Matches[2] -split '\s+' | Where-Object { $_ })
+              }
+            } elseif ($rawUninst -match '^(\S+\.exe)\s*(.*)$') {
+              $exePath = $Matches[1]
+              if ($Matches[2]) {
+                $extraArgs = @("/S") + ($Matches[2] -split '\s+' | Where-Object { $_ })
+              }
+            } else {
+              $exePath = $rawUninst.Trim('"')
+            }
           }
-          # Strip surrounding quotes some NSIS keys add.
-          $uninst = $uninst.Trim('"')
-          "UninstallString resolved: $uninst" | Tee-Object -FilePath $cleanReport
-          if (Test-Path $uninst) {
-            $proc = Start-Process -FilePath $uninst -ArgumentList "/S" -PassThru -Wait
+          if (-not $exePath) {
+            $exePath = Join-Path $env:INSTALL_DIR "Uninstall Gif Toolkit.exe"
+          }
+          "Raw UninstallString: $rawUninst"           | Tee-Object -FilePath $cleanReport
+          "Resolved exe path:   $exePath"             | Tee-Object -FilePath $cleanReport -Append
+          "Resolved args:       $($extraArgs -join ' ')" | Tee-Object -FilePath $cleanReport -Append
+          if (Test-Path $exePath) {
+            $proc = Start-Process -FilePath $exePath -ArgumentList $extraArgs -PassThru -Wait
             "Uninstaller exit: $($proc.ExitCode)" | Tee-Object -FilePath $cleanReport -Append
             Start-Sleep -Seconds 3
           } else {
-            "Uninstaller not found, skipping" | Tee-Object -FilePath $cleanReport -Append
+            "Uninstaller not found at $exePath, skipping" | Tee-Object -FilePath $cleanReport -Append
           }
           $stillThere = Test-Path $env:INSTALL_DIR
           "InstallDir still present: $stillThere" | Tee-Object -FilePath $cleanReport -Append
