@@ -23,6 +23,7 @@
  *   db:toolboxHistory:clear   ()    → void
  *   db:chainLineageNodes:listByChain    (chainId) → ChainLineageNodeRow[]
  *   db:chainLineageNodes:listChainIds   ()        → string[]
+ *   db:chainLineageNodes:findLatestChainIdByRootInput (inputPath) → string | null
  *   db:chainLineageNodes:upsert         (row)     → void
  *   db:chainLineageNodes:removeByChain  (chainId) → void
  *   db:chainLineageNodes:clear          ()        → void
@@ -216,6 +217,17 @@ export function registerDbIpc(): void {
   ipcMain.handle('db:chainLineageNodes:listChainIds', safeHandle('chainLineageNodes:listChainIds', async () =>
     getChainLineageNodes().listChainIds()
   ));
+  // R-LINEAGE-RESUME-V1 — reverse lookup chainId by the root step's
+  // input_path. Used by ToolboxPanel.handleEnterLineageFromHistory to
+  // decide between hydrating an existing chain vs. minting a fresh one
+  // when the user clicks 「继续」 on a toolbox-history row. Returns null
+  // when no chain has ever started off this file.
+  ipcMain.handle(
+    'db:chainLineageNodes:findLatestChainIdByRootInput',
+    safeHandle('chainLineageNodes:findLatestChainIdByRootInput', async (_e, inputPath: string) =>
+      getChainLineageNodes().findLatestChainIdByRootInput(inputPath)
+    )
+  );
   ipcMain.handle('db:chainLineageNodes:upsert', safeHandle('chainLineageNodes:upsert', async (_e, row: ChainLineageNodeRow) => {
     getChainLineageNodes().upsert(row);
   }));

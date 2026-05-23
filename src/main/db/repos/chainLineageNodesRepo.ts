@@ -116,6 +116,21 @@ export type { ChainLineageNodeRow };
 export interface ChainLineageNodesRepo {
   listByChain(chainId: string): ChainLineageNodeRow[];
   listChainIds(): string[];
+  /**
+   * R-LINEAGE-RESUME-V1 — reverse lookup the most-recent chainId whose
+   * first persisted step has `input_path === inputPath`. The renderer
+   * uses this when the user clicks 「继续」 on a toolbox-history row to
+   * decide between hydrating the existing chain vs. minting a fresh
+   * one. Returns null when no chain has ever started off this file.
+   *
+   * Why `parent_node_id` predicate: the synthetic 'root' node is NOT
+   * persisted (see useToolboxLineage header comment), so the earliest
+   * persisted step is the first child of root — its parent_node_id is
+   * the literal string 'root' under the current renderer contract. We
+   * also accept NULL to stay forward-compatible should a future schema
+   * persist the root itself.
+   */
+  findLatestChainIdByRootInput(inputPath: string): string | null;
   upsert(row: ChainLineageNodeRow): void;
   removeByChain(chainId: string): void;
   clear(): void;
@@ -131,6 +146,18 @@ export function createChainLineageNodesRepo(db: Database.Database): ChainLineage
   );
   const selectChainIds = db.prepare<[], { chain_id: string }>(
     'SELECT chain_id FROM chain_lineage_nodes GROUP BY chain_id ORDER BY MAX(created_at) DESC'
+  );
+  // R-LINEAGE-RESUME-V1 — reverse lookup chainId by the root step's
+  // input path. We pick the most-recent chain (created_at desc) so the
+  // user lands on their latest fork. LIMIT 1 keeps the prepared
+  // statement scalar.
+  const selectChainIdByRootInput = db.prepare<[string], { chain_id: string }>(
+    `SELECT chain_id
+       FROM chain_lineage_nodes
+      WHERE input_path = ?
+        AND (parent_node_id = 'root' OR parent_node_id IS NULL)
+      ORDER BY created_at DESC
+      LIMIT 1`
   );
   const upsertStmt = db.prepare(
     `INSERT INTO chain_lineage_nodes (
@@ -188,6 +215,11 @@ export function createChainLineageNodesRepo(db: Database.Database): ChainLineage
     },
     listChainIds() {
       return selectChainIds.all().map((r) => r.chain_id);
+    },
+    findLatestChainIdByRootInput(inputPath) {
+      if (!inputPath) return null;
+      const r = selectChainIdByRootInput.get(inputPath);
+      return r ? r.chain_id : null;
     },
     upsert(row) {
       upsertStmt.run(rowToParams(row));

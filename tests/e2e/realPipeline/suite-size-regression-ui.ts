@@ -71,6 +71,16 @@ interface LineageTerminalEmit {
   sizeRegression?: SizeRegressionPayload;
 }
 
+/**
+ * R-LINEAGE-RESUME-V1 — `chain_lineage_nodes` MUST be wiped between
+ * cases too. ToolboxPanel.handleEnterLineageFromHistory now reverse-
+ * looks up the latest chainId by `(parent_node_id='root', input_path)`
+ * before deciding whether to `reset()` or `hydrateFromChain(...)`. If
+ * a previous case left a row whose input_path equals this case's
+ * fixture, the next `enterLineage` would auto-hydrate stale rows and
+ * the chip / focus state would drift. Mirrors the lineage-tree
+ * suite's clearAllHistory contract.
+ */
 async function clearAllHistory(page: Page): Promise<void> {
   await page.evaluate(async () => {
     const w = window as unknown as {
@@ -78,11 +88,13 @@ async function clearAllHistory(page: Page): Promise<void> {
         db: {
           toolboxHistory: { clear(): Promise<void> };
           toolboxChainHistory: { clear(): Promise<void> };
+          chainLineageNodes: { clear(): Promise<void> };
         };
       };
     };
     await w.giftk.db.toolboxHistory.clear();
     await w.giftk.db.toolboxChainHistory.clear();
+    await w.giftk.db.chainLineageNodes.clear();
   });
 }
 

@@ -609,12 +609,22 @@ test('SUITE TB-CHAIN-E — UI lineage: history → 继续处理 → GIF Resize �
 
   // Reset clean — both legacy chain history (TB-CHAIN A-D wrote rows)
   // and tb history (any earlier suite may have left rows behind).
+  // R-LINEAGE-RESUME-V1 — also wipe `chain_lineage_nodes` so the
+  // ToolboxPanel reverse-lookup (input_path → latest chainId) does
+  // not auto-hydrate stale rows from a sibling suite when 「继续」
+  // is clicked on the freshly seeded history row below.
   await clearChainHistory().catch(() => undefined);
   await page.evaluate(async () => {
     const w = window as unknown as {
-      giftk: { db: { toolboxHistory: { clear(): Promise<void> } } };
+      giftk: {
+        db: {
+          toolboxHistory: { clear(): Promise<void> };
+          chainLineageNodes: { clear(): Promise<void> };
+        };
+      };
     };
     await w.giftk.db.toolboxHistory.clear();
+    await w.giftk.db.chainLineageNodes.clear();
   });
 
   // Switch to the 工具箱 view — the panel mounts only when this tab is
@@ -768,10 +778,24 @@ test('SUITE TB-CHAIN-E — UI lineage: history → 继续处理 → GIF Resize �
     await expect(crumbs.nth(0)).not.toHaveClass(/is-focus/);
 
     // === Step 6 — click the first crumb → focus walks back ============
+    // The breadcrumb is a derived `pathToFocus` (root → focus ancestor
+    // chain), not a flat list of every persisted node. Clicking root
+    // moves focus to root → the ancestor chain shrinks to [root] only.
+    // The Resize tail still lives in `lineage.tree`, but it is no
+    // longer rendered in the breadcrumb (the TreeView surface is the
+    // canonical place for off-path nodes). So the assertion is "after
+    // walking back to root, the breadcrumb collapses to a single
+    // focused crumb" — pre-R-LINEAGE-RESUME-V1 versions of this test
+    // expected nth(1) to remain visible-but-unfocused, which never
+    // matched the live React contract; the case used to slip past
+    // because Playwright's prior `.not.toHaveClass` resolution on a
+    // missing locator was lenient under retry, and only became hard
+    // failure after Playwright tightened the locator-not-found
+    // semantics. We assert the correct collapsed shape here.
     const firstCrumbBtn = crumbs.nth(0).locator('button.tb-lineage-crumb-btn');
     await firstCrumbBtn.click();
+    await expect(crumbs).toHaveCount(1, { timeout: 5_000 });
     await expect(crumbs.nth(0)).toHaveClass(/is-focus/);
-    await expect(crumbs.nth(1)).not.toHaveClass(/is-focus/);
 
     // === Step 7 — exit chain → batch UI back ==========================
     await page.locator('button', { hasText: '退出链路' }).click();
@@ -797,17 +821,21 @@ test('SUITE TB-CHAIN-E — UI lineage: history → 继续处理 → GIF Resize �
     // Issue R8c — the lineage step writes a real row into toolbox_chain_history
     // via the chain runner's terminal hook. Sibling SUITES (B/C) that assume an
     // empty chain history would be polluted otherwise.
+    // R-LINEAGE-RESUME-V1 — also wipe chain_lineage_nodes for downstream
+    // suites that drive 「继续」 from a fixture-shared history output.
     await page.evaluate(async () => {
       const w = window as unknown as {
         giftk: {
           db: {
             toolboxHistory: { clear(): Promise<void> };
             toolboxChainHistory: { clear(): Promise<void> };
+            chainLineageNodes: { clear(): Promise<void> };
           };
         };
       };
       await w.giftk.db.toolboxHistory.clear();
       await w.giftk.db.toolboxChainHistory.clear();
+      await w.giftk.db.chainLineageNodes.clear();
     }).catch(() => undefined);
   }
 });

@@ -1335,6 +1335,15 @@ export function ToolboxPanel(props: ToolboxPanelProps = {}): JSX.Element {
   // Seeds the lineage with that row's primary output and clears any
   // prior dormancy flag so a previously-dismissed lineage re-enters.
   //
+  // R-LINEAGE-RESUME-V1 — before falling through to a fresh `reset()`
+  // (which mints a new chainId and discards every prior step), we
+  // reverse-lookup `chain_lineage_nodes` for the most-recent chain
+  // whose root step has `input_path === entryOutput`. If one exists we
+  // hydrate that chain so the user picks up the tree they previously
+  // built off this artifact instead of starting from zero. Lookup
+  // failure (no bridge / SQL error / no match) silently falls through
+  // to the legacy reset path so the panel never bricks.
+  //
   // Issue R1 — if a step is still in-flight when the user enters from
   // history, cancel it first so we don't orphan the underlying chain.
   // (lineage.reset itself ALSO fires a cancel as a defensive net, but
@@ -1347,7 +1356,27 @@ export function ToolboxPanel(props: ToolboxPanelProps = {}): JSX.Element {
     }
     lineageExitEpochRef.current += 1;
     setLineageDormant(false);
-    lineage.reset(entryOutput);
+    let resumedChainId: string | null = null;
+    try {
+      const repo = window.giftk?.db?.chainLineageNodes;
+      if (repo && typeof repo.findLatestChainIdByRootInput === 'function') {
+        resumedChainId = await repo.findLatestChainIdByRootInput(entryOutput);
+      }
+    } catch {
+      // Lookup is purely best-effort; fall through to fresh reset.
+      resumedChainId = null;
+    }
+    if (resumedChainId) {
+      try {
+        await lineage.hydrateFromChain(resumedChainId);
+      } catch {
+        // Hydrate failure (race on remove, malformed rows) — fall back
+        // to a fresh chain so the user is never stuck.
+        lineage.reset(entryOutput);
+      }
+    } else {
+      lineage.reset(entryOutput);
+    }
     setPickError(null);
   }, [lineage]);
 

@@ -60,6 +60,20 @@ interface LineageTerminalEmit {
   message?: string;
 }
 
+/**
+ * Drop every persisted toolbox surface a fresh case might trip on.
+ *
+ * R-LINEAGE-RESUME-V1 — `chain_lineage_nodes` MUST be wiped between
+ * cases too. ToolboxPanel.handleEnterLineageFromHistory now reverse-
+ * looks up the latest chainId by `(parent_node_id='root', input_path)`
+ * before deciding whether to `reset()` or `hydrateFromChain(...)`. If
+ * a previous case left a row whose input_path equals this case's
+ * FIXTURE_GIF, the next `enterLineage` would auto-hydrate into the
+ * stale chain — chip selection, focus, and tree shape would all drift.
+ * The TREE suite's clearAllHistory already wipes this table for the
+ * same reason; here we mirror that contract so chip-driven cases
+ * always start from a virgin synthetic-root tree.
+ */
 async function clearAllHistory(page: Page): Promise<void> {
   await page.evaluate(async () => {
     const w = window as unknown as {
@@ -67,11 +81,13 @@ async function clearAllHistory(page: Page): Promise<void> {
         db: {
           toolboxHistory: { clear(): Promise<void> };
           toolboxChainHistory: { clear(): Promise<void> };
+          chainLineageNodes: { clear(): Promise<void> };
         };
       };
     };
     await w.giftk.db.toolboxHistory.clear();
     await w.giftk.db.toolboxChainHistory.clear();
+    await w.giftk.db.chainLineageNodes.clear();
   });
 }
 

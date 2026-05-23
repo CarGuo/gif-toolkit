@@ -612,6 +612,15 @@ const api = {
       listChainIds(): Promise<string[]> {
         return ipcRenderer.invoke('db:chainLineageNodes:listChainIds');
       },
+      // R-LINEAGE-RESUME-V1 — reverse lookup chainId by the root
+      // step's input_path. Used by ToolboxPanel to resume an existing
+      // lineage when 「继续」 is clicked on a toolbox-history row.
+      findLatestChainIdByRootInput(inputPath: string): Promise<string | null> {
+        return ipcRenderer.invoke(
+          'db:chainLineageNodes:findLatestChainIdByRootInput',
+          ensureString(inputPath, 'inputPath')
+        );
+      },
       upsert(row: ChainLineageNodeRow): Promise<void> {
         ensureObject(row, 'row');
         return ipcRenderer.invoke('db:chainLineageNodes:upsert', row);
