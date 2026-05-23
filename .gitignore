@@ -7,3 +7,4 @@ release
 .cache
 test-results
 playwright-report
+.linux-smoke/

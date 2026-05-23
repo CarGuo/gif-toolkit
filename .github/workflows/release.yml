@@ -145,17 +145,29 @@ jobs:
         # `npm rebuild sharp ffmpeg-static ffprobe-static @343dev/gifsicle
         # ytdlp-nodejs electron && electron-rebuild`) when the lockfile is
         # fully in-sync — it shortcuts to a tarball link without spawning
-        # the install hooks. The artifact is then missing the Electron
-        # binary (its postinstall fetches the platform tarball) and the
-        # native module .node files end up at Node ABI instead of the
-        # Electron one. We therefore explicitly:
-        #   1. run our root postinstall (idempotent native module rebuild)
+        # the install hooks. The artifact is then missing:
+        #   - the Electron binary (its postinstall fetches the platform
+        #     tarball — caught in v0.2.5 via Verify ABI)
+        #   - the ffmpeg-static binary (its install.js downloads ffmpeg
+        #     ~45MB — caught in v0.2.5 via linux-smoke artifact:
+        #     "binaries: ffmpeg=... ok=false ENOENT" + e2e:smoke
+        #     procTerm.status='failed' in 329ms)
+        # We therefore explicitly:
+        #   1. run our root postinstall (idempotent native module rebuild
+        #      + ffmpeg-static install.js bootstrap)
         #   2. invoke electron's own install.js to force a binary download
         #      — `npm rebuild electron` does NOT re-run install.js because
         #      npm rebuild only re-runs node-gyp builds, not download hooks
+        #   3. invoke ffmpeg-static's install.js for the same reason —
+        #      `npm rebuild ffmpeg-static` doesn't re-run its install.js,
+        #      so the ~45MB FFmpeg binary stays missing on Linux runners
         # Without step (2), node_modules/electron/dist/ stays empty and
         # `node -p "require('electron')"` in the verify probe throws
         # "Electron failed to install correctly".
+        # Without step (3), node_modules/ffmpeg-static/ffmpeg is missing
+        # and electron-builder bundles a working AppImage with NO ffmpeg
+        # binary inside its asar.unpacked tree → all video→GIF/WebP
+        # conversions fail at startBatch with ENOENT.
         shell: bash
         run: |
           npm ci
@@ -164,11 +176,17 @@ jobs:
           # missing. install.js is idempotent: it short-circuits when
           # node_modules/electron/path.txt already exists.
           node node_modules/electron/install.js
-          # Sanity check — fail fast here if the binary still isn't
+          # Same idempotent bootstrap for ffmpeg-static. Its install.js
+          # short-circuits with "ffmpeg is installed already" if the
+          # binary already exists, so this is safe to run unconditionally.
+          node node_modules/ffmpeg-static/install.js
+          # Sanity check — fail fast here if either binary still isn't
           # present, so the failure surfaces in the install step rather
-          # than later in the verify probe.
+          # than later in the verify probe / linux-smoke artifact.
           test -s node_modules/electron/path.txt
+          test -x node_modules/ffmpeg-static/ffmpeg
           ls -la node_modules/electron/dist | head -5
+          ls -la node_modules/ffmpeg-static/ffmpeg
 
       - name: Stamp build info
         shell: bash

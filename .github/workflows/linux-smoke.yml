@@ -198,11 +198,20 @@ jobs:
           npm ci
           npm run postinstall
           node node_modules/electron/install.js
+          node node_modules/ffmpeg-static/install.js
           test -s node_modules/electron/path.txt
+          test -x node_modules/ffmpeg-static/ffmpeg
 
       - name: Run npm test:e2e:smoke under Xvfb
         if: ${{ inputs.run_e2e }}
+        # `set -o pipefail` is required so that a non-zero exit from
+        # `npm run test:e2e:smoke` is preserved across the pipe — the
+        # default bash behaviour returns the exit code of `tee`, which
+        # is always 0, masking real test failures (caught in the v0.2.5
+        # artifact: 2 failed specs but workflow conclusion=success).
+        shell: bash
         run: |
+          set -o pipefail
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
             npm run test:e2e:smoke 2>&1 | tee /tmp/smoke/e2e.log
 
