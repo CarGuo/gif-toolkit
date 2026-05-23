@@ -8,3 +8,5 @@ release
 test-results
 playwright-report
 .linux-smoke/
+.win-smoke/
+.mac-smoke/
