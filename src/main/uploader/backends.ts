@@ -50,6 +50,7 @@ import {
   shortRandomSuffix
 } from './uploaderUtils';
 import { buildMultipart } from './multipart';
+import { isMockUploadEnabled, uploadMockOss } from './mockOss';
 
 interface BackendArgs<T> {
   fileBytes: Buffer;
@@ -326,6 +327,15 @@ export async function dispatchUpload(args: {
   onProgress?: (sent: number, total: number) => void;
   signal?: AbortSignal;
 }): Promise<{ url: string }> {
+  // R-COVERAGE-REAL-SCENARIO — Mock-OSS short-circuit (test-only).
+  // When enabled (env opt-in + un-packaged shell, see mockOss.ts),
+  // route ALL backends through the deterministic, network-free mock
+  // backend so the e2e suite can drive a full upload chain without
+  // creds. The guard is checked at dispatch time (not at module
+  // load) so a process that toggles the env mid-run picks it up.
+  if (isMockUploadEnabled()) {
+    return uploadMockOss({ fileBytes: args.fileBytes, fileName: args.fileName });
+  }
   switch (args.backend) {
     case 'customWeb': {
       if (!args.configs.customWeb) throw new Error('customWeb is not configured');
