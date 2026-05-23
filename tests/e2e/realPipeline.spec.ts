@@ -111,6 +111,9 @@ import './realPipeline/suite-cancel-robust';            // SUITE CANCEL A..D (R-
 import './realPipeline/suite-offline-import';           // SUITE OFFLINE A..C (R-OFFLINE-IMPORT-V1)
 import './realPipeline/suite-media-io';                 // SUITE MEDIA A..C (R-MEDIA-IO-V1)
 import './realPipeline/suite-db-ipc';                   // SUITE DB A..D (R-DB-IPC-V1)
+import './realPipeline/suite-toolbox-standalone';       // SUITE TBX A..F (R-TOOLBOX-STANDALONE-V1)
+import './realPipeline/suite-capability-failsafe';      // SUITE CAP A..D (R-CAPABILITY-FAILSAFE-V1)
+import './realPipeline/suite-app-shell';                // SUITE SHELL A..E (R-APP-SHELL-V1)
 
 test.describe.configure({ timeout: 90_000 });
 
