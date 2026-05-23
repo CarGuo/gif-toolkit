@@ -5,6 +5,13 @@ import type { MediaInfo } from './ToolboxPanel';
 import { LineageProgressRow } from './ToolboxLineageProgress';
 import { ToolboxLineageTreeView } from './ToolboxLineageTreeView';
 import { formatBytes } from './formatBytes';
+import { SessionLogPanel } from './SessionLogPanel';
+import { FocusPreview, pathToLocalUrl } from './ToolboxLineageFocusPreview';
+
+// R-TB-LOG-V1.1 — backwards-compat re-export so older callers that
+// import `pathToLocalUrl` from this module path keep working after we
+// moved the implementation to ToolboxLineageFocusPreview.tsx.
+export { pathToLocalUrl };
 
 /**
  * R-TB-CHAIN-V2.6 — ToolboxLineageModal.
@@ -38,29 +45,7 @@ const KIND_LABELS: Record<ToolboxKind, string> = {
 };
 
 // Custom protocol mirror of `src/main/offlineImport.ts#toGiftkLocalUrl`.
-// Renderer-side helper because the path-to-URL mapping is symmetric and
-// adding a preload bridge for one shape would be overkill.
-export function pathToLocalUrl(absPath: string): string {
-  if (!absPath) return '';
-  // Normalise path separators per platform; encode each segment so
-  // characters like `?`, `#`, spaces, Chinese names survive the URL
-  // round-trip cleanly. Win32: prepend `/` after the host.
-  const sep = absPath.includes('\\') ? '\\' : '/';
-  const parts = absPath.split(sep).map((seg) => encodeURIComponent(seg));
-  const isWin = /^[a-zA-Z]:/.test(absPath);
-  const joined = isWin ? '/' + parts.filter(Boolean).join('/') : parts.join('/');
-  return `giftk-local://localhost${joined}`;
-}
-
-function detectKind(p: string | null | undefined): 'gif' | 'webp' | 'video' | 'image' | 'other' {
-  if (!p) return 'other';
-  const lower = p.toLowerCase();
-  if (lower.endsWith('.gif')) return 'gif';
-  if (lower.endsWith('.webp')) return 'webp';
-  if (/\.(mp4|mov|webm|mkv|m4v)$/.test(lower)) return 'video';
-  if (/\.(png|jpe?g|bmp)$/.test(lower)) return 'image';
-  return 'other';
-}
+// Implementation lives in [ToolboxLineageFocusPreview.tsx](./ToolboxLineageFocusPreview.tsx).
 
 /** Render the focus's size, optionally with a "root → focus" delta.
  *
@@ -76,83 +61,6 @@ function fmtSizeCell(focusSize: number, rootSize: number | undefined, isRootFocu
     return `${formatBytes(rootSize)} → ${formatBytes(focusSize)} (${sign}${deltaPct.toFixed(1)}%)${warn}`;
   }
   return formatBytes(focusSize);
-}
-
-/**
- * Auto-playing preview of the current focus node.
- * GIF/animated WebP via <img>, video via muted autoplay loop.
- *
- * R-TB-CHAIN-V2.7 — error-handling: track `errored` via onError, fall
- * back to the panel-provided posterDataUrl, and finally to an explicit
- * "预览不可用" message so failures never look like a "黑屏 bug".
- *
- * R-COMPRESS-V1 #4 — When `trialPath` is set, FocusPreview renders the
- * trial-run output (a 0.5s tmp clip under `os.tmpdir()/giftk-trial-*`)
- * instead of the focus node's path. Parent owns trialPath lifecycle.
- */
-function FocusPreview({
-  path,
-  posterDataUrl,
-  trialPath
-}: {
-  path: string | null | undefined;
-  posterDataUrl?: string | null;
-  trialPath?: string | null;
-}): JSX.Element {
-  // Trial output (when present) takes precedence over focus path so
-  // the user sees the would-be next-step output, not the input.
-  const renderPath = trialPath || path || null;
-  const kind = detectKind(renderPath);
-  const url = renderPath ? pathToLocalUrl(renderPath) : '';
-  const [errored, setErrored] = useState(false);
-  useEffect(() => { setErrored(false); }, [url]);
-  if (!url) {
-    return <div className="tb-lineage-preview-empty" aria-hidden="true">🎞️</div>;
-  }
-  if (errored) {
-    if (posterDataUrl) {
-      return (
-        <img
-          className="tb-lineage-preview-media"
-          src={posterDataUrl}
-          alt="预览静态首帧"
-          loading="eager"
-        />
-      );
-    }
-    return (
-      <div className="tb-lineage-preview-error" role="status">
-        <div className="tb-lineage-preview-error-icon" aria-hidden="true">⚠️</div>
-        <div className="tb-lineage-preview-error-text">预览不可用</div>
-        <div className="tb-lineage-preview-error-hint">文件可能已被移动或删除</div>
-      </div>
-    );
-  }
-  if (kind === 'video') {
-    return (
-      <video
-        className="tb-lineage-preview-media"
-        src={url}
-        muted
-        autoPlay
-        loop
-        playsInline
-        preload="auto"
-        onError={() => setErrored(true)}
-      />
-    );
-  }
-  // gif / webp / image — animated formats loop natively now that the
-  // giftk-local:// protocol handler returns a proper Content-Type.
-  return (
-    <img
-      className="tb-lineage-preview-media"
-      src={url}
-      alt=""
-      loading="eager"
-      onError={() => setErrored(true)}
-    />
-  );
 }
 
 export interface ToolboxLineageModalProps {
@@ -224,10 +132,17 @@ export function ToolboxLineageModal(props: ToolboxLineageModalProps): JSX.Elemen
   } = props;
 
   // ESC closes; identical pattern to PreviewModal's keydown handler.
+  // R-TB-LOG-V1.1 — when the nested SessionLogPanel modal is open we
+  // defer to it so a single ESC tap doesn't unwind both layers (the
+  // user expectation is "ESC closes the topmost dialog only"). We
+  // detect the inner modal via its `data-testid` rather than wiring a
+  // shared bus because there is at most one such overlay at a time.
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') onClose();
+      if (e.key !== 'Escape') return;
+      if (document.querySelector('[data-testid="session-log-modal"]')) return;
+      onClose();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -397,6 +312,17 @@ export function ToolboxLineageModal(props: ToolboxLineageModalProps): JSX.Elemen
         <div className="modal-header">
           <span className="badge accent">链式处理</span>
           <span className="modal-title-text" title={focusPath ?? ''}>{focusName || '—'}</span>
+          {/* R-TB-LOG-V1.1 — toolbox-chain audit-log entry. Reuses
+              SessionLogPanel bound to `tb:${chainId}` (the session id
+              processor.startToolboxChain writes to). Renders as a
+              compact "📋 查看日志" chip pushed to the right of the
+              title (its inner span carries marginLeft:auto), and pops
+              a floating reader on click. Disabled until the first step
+              produces a chainId — before that there's nothing to read. */}
+          <SessionLogPanel
+            sessionId={lineage.chainId ? `tb:${lineage.chainId}` : ''}
+            suggestedName={lineage.chainId ? `toolbox-${lineage.chainId}` : undefined}
+          />
           <span className="modal-esc-hint">ESC</span>
           <button
             type="button"

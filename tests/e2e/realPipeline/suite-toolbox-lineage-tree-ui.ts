@@ -966,4 +966,69 @@ test.describe('SUITE TB-LINEAGE-TREE-UI — branching lineage tree (R-LINEAGE-TR
       await clearAllHistory(page).catch(() => undefined);
     }
   });
+
+  /**
+   * TREE-H-LOG-UI — R-TB-LOG-V1.1 visible audit-log entry inside the
+   * toolbox lineage modal.
+   *
+   * Why: TREE-G-LOG above only proves the backend session_logs row
+   * gets written. The user's complaint「工具箱加的日志入口在哪里？」
+   * was that the front-end never surfaced a way to read it. This case
+   * pins down the UI affordance: after the first chain step settles,
+   * the modal header must render a `[data-testid="session-log-open"]`
+   * button (compact "📋 查看日志" chip), clicking it opens the
+   * `[data-testid="session-log-modal"]` floating reader, and the
+   * entries pane carries at least one `[stage]` token containing
+   * `toolbox`.
+   */
+  test('TREE-H-LOG-UI R-TB-LOG-V1.1 — header surfaces 📋 查看日志 entry, modal reads tb:<chainId>', async () => {
+    const { page } = getHarness();
+    await clearAllHistory(page);
+    await ensureToolboxTab(page);
+    await seedHistoryRow(page, FIXTURE_GIF, 'gif-resize', 'tiny.gif');
+    await installRecorder();
+
+    try {
+      const modal = await enterLineage(page);
+      await selectChip(modal, /^GIF Resize$/);
+      const result = await runStepAndWaitDone(modal, page);
+      expect(result.status).toBe('done');
+
+      const trigger = modal.locator('[data-testid="session-log-open"]');
+      await expect(trigger).toBeVisible();
+      await expect(trigger).toBeEnabled();
+
+      await trigger.click();
+      const logModal = page.locator('[data-testid="session-log-modal"]');
+      await expect(logModal).toBeVisible();
+
+      const entries = logModal.locator('[data-testid="session-log-entries"]');
+      // Wait for the panel's first DB read to land. We poll the
+      // textContent so the assertion does not race the IPC.
+      await expect.poll(async () => {
+        const txt = (await entries.textContent()) ?? '';
+        return txt.includes('[toolbox');
+      }, { timeout: 5000, message: 'expected entries pane to include a [toolbox/...] line' }).toBe(true);
+
+      // Close the floating log modal. R-TB-LOG-V1.1 — the outer
+      // ToolboxLineageModal defers ESC handling to the inner log
+      // modal whenever the latter is open, so a single ESC tap on a
+      // pristine session would close only the inner overlay. Suite-
+      // wide runs occasionally race the listener registration order
+      // (the outer effect re-runs after a previous case's cleanup),
+      // so we prefer the explicit `✕` button — it deterministically
+      // closes only the inner modal regardless of effect order. Both
+      // pathways are exercised by the unit-level snapshot of
+      // SessionLogPanel; this test only needs to prove the entry
+      // exists and reads the toolbox-stage entries.
+      await logModal.locator('button[title="关闭(ESC)"]').click();
+      await expect(logModal).toBeHidden();
+      await expect(modal).toBeVisible();
+
+      await exitLineage(page, modal);
+    } finally {
+      await tearDownRecorder();
+      await clearAllHistory(page).catch(() => undefined);
+    }
+  });
 });

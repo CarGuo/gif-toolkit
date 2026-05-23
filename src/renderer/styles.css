@@ -322,6 +322,14 @@ input[type="text"]:focus { border-color: var(--accent); }
   top: calc(100% + 6px);
   left: 0;
   z-index: 50;
+  /* R-WS-2026-05-23 — without `width: max-content` an absolutely-
+     positioned ::after on a very narrow host (e.g. a 28px icon
+     button with only `✎` inside) collapses to the host's
+     shrink-to-fit width, which on Chromium ends up as ~1ch and
+     forces every CJK character onto its own line. `max-content`
+     makes the tooltip first lay out at the natural single-line
+     width, then `max-width: 320px` re-wraps long text. */
+  width: max-content;
   max-width: 320px;
   padding: 6px 10px;
   font-size: 11.5px;
