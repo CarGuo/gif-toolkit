@@ -5,7 +5,9 @@
 <h1 align="center">Gif Toolkit</h1>
 
 <p align="center">
-  <b>A local, cross-platform desktop app that turns "fetch web media → trim → convert to GIF / WebP → fit the platform's hard limit → grab a Markdown link" into just a few clicks. Nothing leaves your machine.</b>
+  <b>Turn "fetch web media → fit the platform's hard limit → grab a Markdown link" into a few clicks.</b>
+  <br/>
+  Local, cross-platform, nothing leaves your machine. Works offline.
 </p>
 
 <p align="center">
@@ -20,44 +22,18 @@
 
 ---
 
-## What is this
+## What it solves
 
-Anyone who ships GIFs into Slack, Discord, X, blogs or WeChat hits the same wall: **every platform has its own hard caps** (WeChat 10 MB AND <= 300 frames, Weibo 5 MB, Discord 8 MB, Slack 5 MB ...). Hand-tuning side length, fps and palette every time is tedious and never reproducible.
+Anyone who ships GIFs into Slack, Discord, X, blogs or WeChat hits the same wall: every platform enforces its own hard cap (WeChat ≤ 10 MB AND ≤ 300 frames, Weibo ≤ 5 MB, Discord ≤ 8 MB ...). Hand-tuning side length, fps and palette every time is tedious and never reproducible.
 
 Gif Toolkit automates the whole pipeline:
 
-- Paste an article URL and **auto-sniff** every GIF / video / embed inside (Bilibili / YouTube / X / TikTok / Instagram, ...)
-- **Convert video → GIF / WebP** with a two-pass palette + Lanczos scaling + Bayer dithering — quality stays predictable
-- **Four-phase adaptive compression** lands the output between your "soft target" and "hard target" — never silently emits an over-budget file
-- One-click upload to your own host / GitHub / Qiniu / Aliyun OSS / Tencent COS, **auto-generates a Markdown link** ready to paste
+- Paste an article URL — **auto-sniff** every GIF / video / embed inside (Bilibili / YouTube / X / TikTok / Instagram, ...).
+- **Video → GIF / WebP** with two-pass palette + Lanczos + Bayer dithering. Predictable quality.
+- **Four-phase adaptive compression** lands the output between your "soft target" and "hard target". Never silently emits an over-budget file.
+- One-click upload to your own host / GitHub / Qiniu / Aliyun OSS / Tencent COS — **auto-generates a Markdown link** ready to paste.
 
 Everything runs locally. **Offline-friendly, no login, nothing sent to any third-party server.**
-
----
-
-## Three pains you have probably hit
-
-### 1. "Video → GIF" is either blurry or huge
-
-`ffmpeg -i x.mp4 out.gif` ships output that is either unreadable text, or 30 MB. Hand-tuning `palettegen / paletteuse / lossy` a few times and most people give up.
-
-> Gif Toolkit gives you **two-pass palette + binary-search lossy** out of the box, aiming to land **exactly** on your target size. Hits the target, stop. Misses, geometrically shrink the long side. Still misses, mark `skipped`. **It will never quietly hand you an over-budget file.**
-
-### 2. WeChat's invisible 300-frame cap
-
-WeChat's editor enforces two unrelated hard caps on GIFs: **frame count <= 300** and a **clean header** (no diff-frame / comment / offset frame). Counter-intuitively, `gifsicle -O3` adds diff-frames back. So "I compressed it to 1 MB and WeChat still rejects it" is a trap nearly everyone runs into once.
-
-> Gif Toolkit ships a dedicated **WeChat-safe sanitize sub-pipeline**: gifsicle probe → ffmpeg `-gifflags -transdiff-offsetting` full re-encode → gifsicle `-O0 --no-extensions --no-comments --lossy=80`. Output has frames <= 300, variants=1, offset=0 — **drops straight into WeChat's editor**.
-
-### 3. Sniffing fails — JS, login walls, Cloudflare ...
-
-Plain `axios + cheerio` cannot reach pages that need JS rendering, login cookies, or pages gated by Cloudflare's JA3 fingerprinting. Those sites happen to be the richest sources of animated content.
-
-> Gif Toolkit offers a **5-tier sniffer cascade**, ramping up only when needed:
->
-> ![Sniffer cascade](./docs/images/sniffer-cascade.png)
->
-> No matter how locked down the page is, one of the tiers usually gets you the direct URL.
 
 ---
 
@@ -86,20 +62,18 @@ Plain `axios + cheerio` cannot reach pages that need JS rendering, login cookies
 
 ## Quickstart
 
-### Three steps
-
 ```bash
 git clone <repo-url>
 cd gif-toolkit
 npm install     # auto-prepares ffmpeg / gifsicle / sharp / yt-dlp
-npm run dev     # main + renderer with hot reload
+npm run dev     # launch the app
 ```
 
-After the app launches:
+Once the app is up:
 
-1. Paste a page URL (any page with GIFs / videos / embeds) into the address bar and click **Sniff**
-2. Tick what you want from the media grid; tweak `softMaxBytes` / `maxWidth` / `fps` / `colors`
-3. Click **Run batch**, wait for the task table; switch to the **Uploads** tab to push to a host and copy the Markdown link
+1. Paste an article URL with GIFs / videos at the top, click **Sniff**.
+2. Tick what you want in the media grid; tweak params (or pick a platform preset).
+3. Click **Run batch**, wait for the task table; jump to **Uploads** to upload + copy the Markdown link.
 
 ### Packaging
 
@@ -109,112 +83,100 @@ npm run package:win     # Windows: NSIS x64
 npm run package:linux   # Linux: AppImage / deb / tar.gz
 ```
 
-> No Apple notarization / Authenticode / Linux code signing yet. First launch may show "unidentified developer" — the app surfaces a toast with right-click-open / SmartScreen-skip instructions.
+> Apple notarization / Authenticode / Linux code-signing are not configured. First launch may show "unidentified developer"; the app surfaces a toast with the right-click / SmartScreen-bypass instructions.
+> About 5 s after launch, the app silently checks GitHub Releases and pops the **Check for updates** dialog if a strictly higher stable version is available. You can also trigger it manually from the top-right ⬆ button, the tray menu, or the macOS application menu.
 
 ---
 
-## Toolbox (10 standalone tools)
+## Toolbox
 
-The **Toolbox** tab exposes 10 standalone tools, each accepting drag-and-dropped local files for batch use:
+The "Toolbox" tab gives you 10 standalone tools. Drop files onto any tool to batch-process them:
 
 | Tool | Purpose |
 | --- | --- |
-| Video → GIF | Video to GIF + adaptive compression |
+| Video → GIF | Video to GIF + adaptive compression (ffmpeg / gifski engines) |
 | Video → WebP | Video to animated WebP |
-| GIF Resize | Proportional width scaling |
+| GIF Resize | Proportional width resize |
 | GIF Optimize | gifsicle `-O3` / lossy / colors / dither |
-| GIF WeChat-safe | 3-step sanitize, output drops straight into WeChat (<= 300 frames / clean header) |
-| Trim | Lossless time-range cutting |
-| Speed | 0.25x ~ 4x speed change |
+| GIF WeChat-safe | Three-step sanitize — output ships straight into WeChat (≤ 300 frames / clean header) |
+| Trim | Time-range cut (lossless) |
+| Speed | 0.25× ~ 4× |
 | Reverse | Reverse playback |
 | Rotate | Rotate + flip |
-| Crop | Visual rectangular crop |
-| GIF ↔ WebP | Convert between the two animation formats |
+| Crop | Visual rectangle crop |
+| GIF ↔ WebP | Convert between the two animated formats |
 
-### Progressive lineage chain (R-TB-CHAIN-V2.6 — modal overlay + autoplay preview)
+### Chained pipelines: feed the output back, step by step
 
-Every done row in the toolbox history sidebar shows a **「继续 →」(Continue →)** button (aria-label is still `继续处理`). Clicking it pops up a **dedicated lineage modal overlay** seeded with that artifact as the root node — the batch UI stays mounted underneath, just behind the dimmed mask. A linear breadcrumb at the top tracks every step (`Original input → GIF Resize → GIF Optimize ...`); the centre of the modal hosts an **auto-playing preview** of the current artifact — `.gif/.webp` use `<img>` (browsers loop animated image formats natively), `.mp4/.mov/.webm/...` use `<video muted autoplay loop playsInline>` (Chromium allows muted autoplay without a user gesture). Below: chips filtered by the focused artifact's extension (a `.gif` focus hides `Video → GIF`), the per-kind ParamForm, and a footer with `退出链路 / 取消 / 继续 →`. Clicking an earlier breadcrumb segment walks focus back so you can branch from a historical step. ESC / mask click / **「退出链路」(Exit chain)** all close the modal without dropping the lineage — re-entering through any history row picks up where you left off.
+Every `done` row in the toolbox history has a **Continue →** button. Click it and a dedicated **lineage modal** pops up, treating that output as the input of the next step:
 
-History rows have been upgraded to a 4-col grid: a 56×56 thumbnail on the left (static first-frame poster by default; **hover** swaps the `<img>` src to a `giftk-local://` URL so animated GIF/WebP plays live during hover) + status/kind/time meta + a compact **「继续 →」** pill + remove.
+![Chained pipeline modal](./docs/images/screenshots/05-toolbox-lineage-modal.png)
 
-![Lineage modal + autoplay preview + 4-col history row](./docs/images/screenshots/05-toolbox-lineage-modal.png)
+- A linear breadcrumb at the top (`Original → GIF Resize → GIF Optimize ...`); click any node to fork from there.
+- Auto-playing preview of the current artifact (GIFs / WebPs use native loop; MP4 / WebM uses muted autoplay).
+- Below: the next-step candidates filtered by extension, current params, and a **Trial 0.5 s** button — runs the first 0.5 s with current params so you can preview the effect (no history, no queue slot).
+- ESC / outside click / "Exit lineage" closes the modal; the lineage itself is not lost — re-enter from any "Continue →".
 
-Each step is a single-step `startToolboxChain` IPC, reusing the existing chain runner, cancellation propagation, and history contract (see [docs/ipc-contract.md](./docs/ipc-contract.md) and SUITE TB-CHAIN A/B/C/D/E). Crop in lineage mode reuses the batch CropForm and writes the rect directly into draft params; the legacy `awaiting-input` pause model is no longer triggered from the renderer.
+### Quality-of-life shortcuts
 
-### UX accelerator pack (R-COMPRESS-V1 — six P0 quick wins)
+![Target-bytes chip strip on GIF Optimize](./docs/images/screenshots/06-toolbox-target-bytes-chip.png)
 
-Real-world feedback boiled down to "the parameter names are correct but I do not know what to set". Six zero-regression UX wins ship across the toolbox panel and the history cards:
+- **Target-size chip strip on GIF Optimize**: `< 2 MB / < 5 MB / < 10 MB / Custom` — one click sets the threshold.
+- **smart fps**: dropping a video defaults to `min(srcFps, 24)`, so high-fps sources do not get silently downsampled to film-rate.
+- **Engine toggle on Video → GIF**: `Fast (ffmpeg)` / `High quality (gifski)` — gifski extracts a PNG sequence then encodes; richer color but slower.
+- **Recommended presets on history cards**: cards with a video output (`.mp4 / .mov / .webm` etc.) show a `Convert · Fast` / `Convert · High quality` chip row — one click atomically switches to Toolbox, clears the queue, and enqueues the artifact.
+- **Sniff card → Uploads jump**: the `☁ Uploaded N` pill on a sniff card is now clickable and lands you on the matching Uploads record.
 
-1. **GIF Optimize "target size" chip strip at the top** — `< 2 MB / < 5 MB / < 10 MB / Custom`. One click sets `method='budget'` + the matching `maxBytes`. The original `Optimization method` dropdown and `Lossy 强度` field are untouched; this is purely a "decide the target first" entry point.
-
-   ![GIF Optimize target-size chip strip](./docs/images/screenshots/06-toolbox-target-bytes-chip.png)
-
-2. **Smart-fps default for Video → GIF / WebP** — when you drop a video the default fps is now `min(srcFps, 24)` instead of a fixed 12, so a high-fps source is not silently downsampled to film cadence.
-
-3. **Video → GIF encoding-engine toggle** — a new "encoding engine" segmented control flips between `Fast (ffmpeg)` and `High quality (gifski)`. The gifski path runs "ffmpeg → PNG sequence → gifski --fps --quality --repeat". Colour fidelity is noticeably better, encoding is slower; the default is still ffmpeg single-pass palette, so behaviour is unchanged unless you opt in. `gifski-static` is wired through `optionalDependencies`; if missing the button disables and explains why.
-
-   ![Video → GIF encoding-engine toggle](./docs/images/screenshots/07-toolbox-engine-toggle.png)
-
-4. **Lineage modal "Trial 0.5 s" preview button** — the footer used to be just `Cancel / Continue →`; there is now a `试跑 0.5s` (Trial 0.5 s) button between them. It runs the current params on the first 0.5 seconds only — no history row, no progress event, no p-queue slot. Backed by dedicated IPC `toolbox:trialRun` / `toolbox:trialCleanup`; temp output lands at `os.tmpdir()/giftk-trial-*` and is also covered by R-87 sweep as a belt-and-suspenders.
-
-   ![Trial 0.5 s preview button](./docs/images/screenshots/08-lineage-trial-preview.png)
-
-5. **Recommended-preset chip row on history cards** — every card with a done output now has a `推荐预设: …` (Recommended presets) row above the stage stepper:
-   - Video output (`.mp4/.mov/.webm/.mkv/.m4v`) → `转 GIF · 快速` (Convert · Fast) / `转 GIF · 高质量` (Convert · HQ)
-   - GIF / WebP output → `压到 <5MB` (Compress to <5 MB) / `压到 <2MB` (Compress to <2 MB)
-
-   Clicking a chip switches the active tab to the toolbox and atomically clears the queue, replaces `kind+params`, and enqueues that single output as the lone job — no more manually setting kind, tweaking params, and re-selecting the file.
-
-   ![History card recommended-preset chip row](./docs/images/screenshots/09-history-preset-strip.png)
-
-6. **Sniff card → uploads-tab one-click jump** (acceleration item) — the `☁ uploaded N` chip on top of every sniff card was display-only; it is now clickable and jumps to the `Uploads` tab with that record focused.
-
-Every one of the six is gated by a real UI-driven Playwright e2e (SUITE RCV1-A/B/C/D/E/F) that never mocks `window.giftk` — full preload bridge + main IPC + sqlite — so the wiring from renderer to main is verified end-to-end.
+![Recommended presets on a history card](./docs/images/screenshots/09-history-preset-strip.png)
 
 ---
 
-## Adaptive compression pipeline (why outputs are stable)
+## Five-tier sniffer cascade
 
-Four-phase progressive strategy; on average about 12 gifsicle calls land the target size:
+Plain `axios + cheerio` cannot reach pages that need JS rendering, login cookies, or pages gated by Cloudflare's JA3 fingerprinting — exactly where the richest animated content lives. Gif Toolkit ramps up only when needed:
+
+![Sniffer cascade](./docs/images/sniffer-cascade.png)
+
+| Tier | Implementation | Best for |
+| --- | --- | --- |
+| (1) URL sniff | main-process axios + cheerio | Plain blogs / news pages / direct links / og:video |
+| (2) Embedded WebView | `WebContentsView` + `webRequest.onBeforeRequest` | Pages that need login / cookies / OAuth / light interaction |
+| (3) Real Chrome sniff | spawn local Chrome / Edge / Brave + CDP | Cloudflare / strict JA3 fingerprint sites |
+| (4) yt-dlp direct | ytdlp-nodejs `--dump-single-json` | 1900+ video sites (Bilibili / YouTube / X / TikTok / Instagram ...) |
+| (5) Offline import | `.mhtml` / `.html + _files/` / single file / drag-drop | Site went down / no network / saved-page archive |
+
+> Implementation details in [docs/sniffer-cascade.md](./docs/sniffer-cascade.md) and [docs/sniffer-rules.md](./docs/sniffer-rules.md).
+
+---
+
+## Adaptive compression
+
+Four-phase progressive strategy — typically ~12 gifsicle calls to land on target:
 
 ![Four-phase adaptive compression](./docs/images/compression-1-targets.png)
 
-1. **Resize first** — bring the long side down to `maxWidth` (often enough on its own)
-2. **Adaptive lossy** — binary-search lossy in `[0, 200]`, aim for `softMaxBytes` (default 2 MB)
-3. **Geometric shrink** — guard `minSize` short-side floor, multiply long side by 0.85 repeatedly
-4. **Hard fallback** — if still > `maxBytes` (default 4 MB), mark `skipped`. **Never emit an over-budget file.**
+1. **Resize first** — clamp the long side to `maxWidth`.
+2. **Adaptive lossy** — binary-search lossy ∈ `[0, 200]`, hit `softMaxBytes` (default 2 MB).
+3. **Geometric shrink** — guard `minSize` floor on the short edge, multiply long side by 0.85 and retry.
+4. **Bail** — still over `maxBytes` (default 4 MB) → mark `skipped`. **Never silently emit an over-budget file.**
 
-> Full state machine, hit conditions and emit-signal contract: see [docs/compression-pipeline.md](./docs/compression-pipeline.md). The WeChat-safe sub-pipeline is documented in section 8 of the same doc.
+WeChat additionally enforces two unrelated hard caps: **frames ≤ 300** and a **clean header**. The dedicated **WeChat-safe sanitize sub-pipeline** (gifsicle probe → ffmpeg full re-encode → gifsicle `-O0 --no-extensions --no-comments`) produces output that drops straight into the editor.
 
-Tunables: `maxBytes` / `softMaxBytes` / `maxWidth` / `minSize` / `fps` / `colors` / `concurrency` / `maxSegmentSec`. Built-in presets for WeChat / Zhihu / Weibo etc.
-
----
-
-## Five-tier sniffer cascade (why fetching works)
-
-| Tier | Implementation | Suits |
-| --- | --- | --- |
-| (1) URL sniff | main process axios + cheerio | Plain blogs / news / direct links / `og:video` exposed |
-| (2) Embedded WebView | `WebContentsView` + `webRequest.onBeforeRequest` | Sites needing login / cookies / OAuth / light interaction |
-| (3) Real Chrome sniff | spawn local Chrome / Edge / Brave + chrome-remote-interface (CDP) | Cloudflare / JA3-gated sites |
-| (4) yt-dlp direct | ytdlp-nodejs `--dump-single-json` | 1900+ video sites (Bilibili / YouTube / X / TikTok / Instagram ...) |
-| (5) Offline import | `.mhtml` / `.html + _files/` / single file / drag drop | Site is dead / network is down / page already saved |
-
-> Sniffer rules, dedupKey algorithm and embed-provider list: see [docs/sniffer-cascade.md](./docs/sniffer-cascade.md) and [docs/sniffer-rules.md](./docs/sniffer-rules.md).
+> State machine / hit conditions / WeChat-safe details in [docs/compression-pipeline.md](./docs/compression-pipeline.md).
 
 ---
 
-## Image hosting
+## Image host upload
 
-5 backends built in, configurable, multiple per backend:
+Five backends built in, configure many and switch on demand:
 
-- **Self-hosted Web** (custom signed endpoint)
+- **Custom Web** (custom signing endpoint)
 - **GitHub Contents API**
 - **Qiniu Kodo**
 - **Aliyun OSS**
 - **Tencent COS**
 
-File-hash dedup with 30-day TTL — same file hits the cache and reuses the remote URL, saving bandwidth and quota. Markdown links are auto-generated and one-click copyable. **Tokens / secrets are masked everywhere and never written to logs.**
+File-hash dedup (30-day TTL), reusing the remote URL when a file is unchanged. Markdown link is auto-generated. Tokens / secrets are masked end-to-end and **never written to logs**.
 
 ---
 
@@ -223,118 +185,53 @@ File-hash dedup with 30-day TTL — same file hits the cache and reuses the remo
 | Capability | macOS | Windows | Linux |
 | --- | --- | --- | --- |
 | Installer | dmg / zip (Intel + Apple Silicon) | NSIS x64 | AppImage / deb / tar.gz (x64 + arm64) |
-| FFmpeg / Sharp / yt-dlp | Yes | Yes | Yes (armv7 / Alpine musl is on you) |
-| Real-Chrome sniff | Chrome / Canary / Edge / Brave / Chromium | Program Files / per-user paths | Snap / Flatpak / .deb / .rpm |
-| Capability probing | Yes | Yes | Yes |
-| App Icon | `.icns` (10-tier iconset) | `.ico` (7-tier) | `.png` 8 sizes |
-
-> The icon pipeline uses Apple HIG's 824 / 1024 safe area + squircle rounding. All distribution artefacts are produced from a single source by [scripts/normalize-app-icon.mjs](./scripts/normalize-app-icon.mjs) with **zero new npm dependencies**. See [docs/architecture.md § 8](./docs/architecture.md).
-
----
-
-## Stack
-
-| Layer | Tech |
-| --- | --- |
-| Framework | Electron 31 + React 18 + TypeScript 5 + Vite 5 |
-| Fetching | axios + cheerio (main process, bypassing CORS) + chrome-remote-interface (CDP) |
-| Video processing | ffmpeg-static + ffprobe-static + sharp 0.33 |
-| GIF optimization | gifsicle 5.3 |
-| Direct-link extraction | yt-dlp (bundled, Unlicense) |
-| Persistence | better-sqlite3 |
-| Queue | p-queue (default concurrency 3, configurable 1–8) |
-| Tests | vitest + happy-dom + @testing-library/react + playwright (e2e) |
-
----
-
-## Architecture portal
-
-Process topology (Renderer ↔ Preload ↔ Main):
-
-![Architecture · process topology](./docs/images/architecture-1-topology.png)
-
-End-to-end data flow (URL → sniff → 4-Phase compression → output):
-
-![Architecture · end-to-end data flow](./docs/images/architecture-2-dataflow.png)
-
-Concurrency and cancellation propagation (per-task `AbortController`, signal threaded down to ffmpeg child processes):
-
-![Architecture · concurrency and cancellation](./docs/images/architecture-6-cancel.png)
-
-> Every architecture diagram is a derived PNG generated from a mermaid block. To change a diagram, edit the mermaid block in [docs/architecture.md](./docs/architecture.md) / [docs/compression-pipeline.md](./docs/compression-pipeline.md) / [docs/sniffer-cascade.md](./docs/sniffer-cascade.md), then run `npm run docs:render`.
+| FFmpeg / Sharp / yt-dlp | Yes | Yes | Yes |
+| Real Chrome sniff | Chrome / Canary / Edge / Brave / Chromium | Program Files / per-user paths | Snap / Flatpak / .deb / .rpm |
+| App icon | `.icns` (10-tier iconset) | `.ico` (7 tiers) | `.png` 8 sizes |
 
 ---
 
 ## Security & privacy
 
-- `contextIsolation=true` / `nodeIntegration=false` — the renderer has **zero** Node capability
-- Only whitelisted IPC is exposed; all download / parse / encode / upload happens in the main process
-- Any URL is processed **locally only** and **never sent to any third-party server**
-- yt-dlp passes through only an allow-listed header set (User-Agent / Referer / Origin / Range, ...) — Authorization / Cookie are explicitly **not** forwarded; signed URLs and tokens are auto-masked before anything is logged
-- Image-host tokens / secrets render as `••••••` with masked-merge in the UI; persisted as a separately encrypted field; **never enter logs**
+- `contextIsolation=true` / `nodeIntegration=false` — the renderer has **no** Node capabilities.
+- Only allow-listed IPC is exposed; downloads, parsing, transcoding, uploads all happen in the main process.
+- URLs are processed locally and **never sent to any third-party server**.
+- yt-dlp forwards an allow-list header set only; signed URLs / tokens are masked before logging.
+- Backend tokens / secrets are shown as `••••••` with masked-merge on save; encrypted on persistence; **never logged**.
 
 ---
 
 ## FAQ
 
-**Q: Why can't I sniff a particular video URL?**
-A: The site is probably TLS-fingerprinting / cookie-checking. Switch to the "Real Chrome sniff" tier and tick "use my real Chrome profile" so Cloudflare etc. recognise you as a normal user.
+**Q: Why can't I sniff the direct video URL?**
+A: Sites often check TLS fingerprint / cookies. Switch to **Real Chrome sniff** and tick "use my real Chrome profile" so Cloudflare etc. recognises you as a normal user.
 
-**Q: Some GIFs still exceed my target after compression. What now?**
-A: The tool marks them `skipped` instead of emitting an oversized file. Either raise `maxBytes`, or hand-tune lossy / colors more aggressively in the Toolbox.
+**Q: My GIF still exceeds the target size — what now?**
+A: The tool marks it `skipped` rather than emitting an over-budget file. Either raise `maxBytes`, or open the toolbox and re-compress with more aggressive lossy / colors.
 
 **Q: WeChat still says "image failed to load"?**
-A: Run **GIF WeChat-safe** in the Toolbox. It forces a full re-encode with `-transdiff-offsetting` and uses `gifsicle -O0`. Full reasoning in [docs/compression-pipeline.md § 8](./docs/compression-pipeline.md).
+A: Try the **GIF WeChat-safe** tool — it forcibly re-encodes frames, disables transdiff-offsetting, and emits via `gifsicle -O0`.
 
-**Q: Does it work offline?**
-A: Yes. yt-dlp / ffmpeg / gifsicle / sharp are all bundled. The only step that requires network is "sniff a live URL".
-
-**Q: Will GitHub treat uploaded images as code?**
-A: No. The GitHub Contents API returns raw URLs you embed in Markdown. They are unrelated to your code commits.
+**Q: Can it run offline?**
+A: Yes. yt-dlp / ffmpeg / gifsicle / sharp are all bundled. Only "sniff a remote URL" needs network.
 
 ---
 
-## Documentation
+## Docs & contributing
 
-For developers / contributors:
+- Architecture, compression pipeline, sniffer cascade, IPC contract: see [docs/](./docs/).
+- Engineering harness (rules / scenarios / checklists): see [harness/](./harness/).
+- Submission rules and PR self-check: [AGENTS.md](./AGENTS.md) + [harness/checklists/pr-checklist.md](./harness/checklists/pr-checklist.md).
 
-- [Architecture overview](./docs/architecture.md) — process topology, data flow, IPC sequence, 4-Phase state machine, cross-platform icon pipeline, concurrency / cancellation
-- [Compression pipeline](./docs/compression-pipeline.md) — 4-Phase hit conditions, emit signals, WeChat-safe sub-pipeline
-- [Sniffer cascade](./docs/sniffer-cascade.md) — full cascade diagram + per-tier engineering notes
-- [Sniffer rules](./docs/sniffer-rules.md)
-- [yt-dlp embed resolver](./docs/embed-resolver.md)
-- [IPC contract](./docs/ipc-contract.md)
-- [Troubleshooting](./docs/troubleshooting.md)
-- [SQLite persistence and native ABI](./docs/R-80-SQLITE-NOTES.md)
+Test tiers (developer-facing):
 
-Engineering discipline (rules / scenarios / checklists): see [harness/](./harness/).
-Submission rules for new features and bug fixes: see [AGENTS.md](./AGENTS.md).
-
----
-
-## Contributing
-
-Issues and PRs welcome. Before submitting please read:
-
-1. [AGENTS.md](./AGENTS.md) — project-level hard rules
-2. [harness/checklists/pr-checklist.md](./harness/checklists/pr-checklist.md) — pre-submit self-check
-3. [harness/scenarios/](./harness/scenarios/) — already-captured regression scenarios
+```bash
+npm run test:fast        # vitest unit suite, ~6s
+npm run test:e2e:smoke   # real Electron + mock-oss single chain, ~10s
+npm run test:e2e         # full 122 cases, ~1.5min
+```
 
 Every new feature / bug fix must ship with tests.
-
-### Test tiers (fast / smoke / all)
-
-To balance fast feedback and real-scenario coverage, tests are split into three tiers:
-
-| Command | Scope | Duration | When |
-| ---- | ---- | ---- | -------- |
-| `npm run test:fast` | vitest unit (main / renderer / shared contract layer) | ~6s | local dev, pre-commit |
-| `npm run test:e2e:smoke` | real Electron launch + offline-import → process → mock-oss upload → SQLite write-back full chain | ~10s (incl. build) | PR self-check, when touching IPC / uploader / processor |
-| `npm run test:e2e` | full playwright 122 cases (realPipeline contracts + UI regression) | ~1.5min | pre-release, when touching renderer main flow |
-| `npm run test:all` | all three in series | ~2min | strictest local gate |
-
-The `smoke` tier uses [`playwright.smoke.config.ts`](./playwright.smoke.config.ts), with `testDir` pointing to `tests/e2e-smoke/`, isolated from `tests/e2e/`.
-Key uploads go through `mock-oss://<sha8>.<ext>` shortcut (`GIFTK_E2E_MOCK_UPLOAD=1` env + `!app.isPackaged` double guard, never triggered in release builds).
 
 ---
 

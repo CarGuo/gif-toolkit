@@ -10,6 +10,7 @@ const projectRoot = path.resolve(__dirname, '..');
 const MAIN_ENTRY = path.join(projectRoot, 'dist/main/index.js');
 const outDir = path.join(projectRoot, 'docs/images/screenshots');
 const FIXTURE_GIF = path.join(projectRoot, 'tests/fixtures/tiny.gif');
+const FIXTURE_MP4 = path.join(projectRoot, 'tests/fixtures/tiny.mp4');
 
 const VIEWPORT = { width: 1440, height: 900 };
 
@@ -96,9 +97,11 @@ async function captureEngineToggle(page) {
 }
 
 /**
- * R-COMPRESS-V1 #5 — Seed a single done-with-.gif HistoryRecord so
- * HistoryPanel renders a 推荐预设 chip strip on the card. Assumes the
- * 历史 tab is reachable.
+ * R-COMPRESS-V1 #5 + R-PRESET-PRUNE-V1 — Seed a single done-with-.mp4
+ * HistoryRecord so HistoryPanel renders a 推荐预设 chip strip on the
+ * card. After R-PRESET-PRUNE-V1 the GIF→budget chips were removed,
+ * so the chip strip only shows for video-typed first outputs (`转 GIF
+ * · 快速 / 高质量`). Assumes the 历史 tab is reachable.
  */
 async function seedHistoryRecordWithDoneGif(page) {
   await page.evaluate(async (output) => {
@@ -116,10 +119,10 @@ async function seedHistoryRecordWithDoneGif(page) {
       title: '推荐预设演示页',
       items: [{
         id: taskId,
-        kind: 'image',
-        url: 'https://gif-toolkit.test.example/source.gif',
+        kind: 'video',
+        url: 'https://gif-toolkit.test.example/source.mp4',
         pageUrl: 'https://gif-toolkit.test.example/preset-demo',
-        tab: 'images'
+        tab: 'videos'
       }],
       options: {},
       outputDir: '',
@@ -127,7 +130,7 @@ async function seedHistoryRecordWithDoneGif(page) {
       taskStatus: { [taskId]: 'done' },
       uploadsByOutputPath: {}
     });
-  }, FIXTURE_GIF);
+  }, FIXTURE_MP4);
 }
 
 /**
