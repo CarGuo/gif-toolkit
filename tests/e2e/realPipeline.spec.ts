@@ -117,6 +117,9 @@ import './realPipeline/suite-app-shell';                // SUITE SHELL A..E (R-A
 import './realPipeline/suite-upload-negative';          // SUITE UPLOAD-NEG A..E (R-UPLOAD-NEG-V1)
 import './realPipeline/suite-process-cancel';           // SUITE PROC A..D (R-PROCESS-CANCEL-V1)
 import './realPipeline/suite-updater-buildinfo';        // SUITE UPD A..D (R-UPDATER-BUILDINFO-V1)
+import './realPipeline/suite-session-logs-ipc';         // SUITE LOGS A..D (R-SESSION-LOGS-IPC-V1)
+import './realPipeline/suite-sniff-chrome-detect';      // SUITE SCD A..D (R-SNIFF-CHROME-DETECT-V1)
+import './realPipeline/suite-event-wire';               // SUITE EW A..D (R-EVENT-WIRE-V1)
 
 test.describe.configure({ timeout: 90_000 });
 
