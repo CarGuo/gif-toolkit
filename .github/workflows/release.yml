@@ -140,7 +140,22 @@ jobs:
           echo "Resolved build version: ${VERSION}"
 
       - name: Install dependencies
-        run: npm ci
+        # `npm ci` on hosted runners has been observed to skip lifecycle
+        # scripts (electron postinstall + our root postinstall that runs
+        # `npm rebuild sharp ffmpeg-static ffprobe-static @343dev/gifsicle
+        # ytdlp-nodejs && electron-rebuild`) when the lockfile is fully
+        # in-sync — it shortcuts to a tarball link without spawning the
+        # install hooks. The artifact is then missing the Electron
+        # binary (its postinstall fetches the platform tarball) and the
+        # native module .node files end up at Node ABI instead of the
+        # Electron one. We therefore explicitly `npm rebuild` after
+        # `npm ci` to force every postinstall to run, including the
+        # root one. This also avoids relying on `npm ci`'s opaque
+        # script-skipping heuristics across npm minor versions.
+        run: |
+          npm ci
+          npm rebuild
+          npm run postinstall
 
       - name: Stamp build info
         shell: bash
