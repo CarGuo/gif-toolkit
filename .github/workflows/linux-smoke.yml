@@ -40,6 +40,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    # Draft releases require contents:write to list/download via the
+    # default GITHUB_TOKEN. release.yml already publishes as draft
+    # (`releaseType: draft` in package.json), so without this elevation
+    # `gh release download v0.2.5` returns "release not found" on
+    # the very first verification run.
+    permissions:
+      contents: write
+
     steps:
       - name: Checkout repo at tag
         uses: actions/checkout@v4
