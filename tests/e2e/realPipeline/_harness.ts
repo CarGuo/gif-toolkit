@@ -126,8 +126,14 @@ export function freshOutDir(label: string): string {
  * keeps a leading slash for a `giftk-local://localhost/C:/...` shape.
  */
 export function pathToGiftkLocal(absPath: string): string {
-  const norm = path.resolve(absPath);
-  const parts = norm.split(path.sep).map((seg) => encodeURIComponent(seg));
+  // Pick the platform-specific path impl explicitly so tests that flip
+  // `process.platform` via Object.defineProperty actually take effect —
+  // node's default `path` module locks itself to the host OS at import
+  // time, which would otherwise leak win32 separators into a "darwin"
+  // contract assertion when the test runs on a real Windows runner.
+  const sep = process.platform === 'win32' ? path.win32 : path.posix;
+  const norm = sep.resolve(absPath);
+  const parts = norm.split(sep.sep).map((seg) => encodeURIComponent(seg));
   const joined = process.platform === 'win32'
     ? '/' + parts.filter(Boolean).join('/')
     : parts.join('/');

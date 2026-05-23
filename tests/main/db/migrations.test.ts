@@ -46,7 +46,8 @@ describe('R-80 migrations runner', () => {
         sniff_history: HEAD_VERSIONS.sniff_history,
         toolbox_history: HEAD_VERSIONS.toolbox_history,
         toolbox_chain_history: HEAD_VERSIONS.toolbox_chain_history,
-        session_logs: HEAD_VERSIONS.session_logs
+        session_logs: HEAD_VERSIONS.session_logs,
+        chain_lineage_nodes: HEAD_VERSIONS.chain_lineage_nodes
       });
     } finally {
       db.close();

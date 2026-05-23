@@ -38,6 +38,18 @@ vi.mock('electron', () => ({
   BrowserWindow: { getAllWindows: vi.fn(() => []) }
 }));
 
+// Importing offlineImport transitively pulls in `./ffmpeg` which spawns
+// the bundled `ffprobe-static` binary on every video / gif import to
+// extract durationSec / width / height. Spawning a real ffprobe on a
+// 4-byte fake .mp4 takes north of 5s on the GitHub-hosted macOS runner
+// (cold-start + libavformat scan timeout), blowing the default vitest
+// 5000ms per-test budget. The probe failure is already non-fatal in
+// production code (try/catch swallows it); mocking it here makes the
+// unit test deterministic AND fast on every platform.
+vi.mock('../../src/main/ffmpeg', () => ({
+  probe: vi.fn().mockRejectedValue(new Error('mocked: probe disabled in unit tests'))
+}));
+
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';

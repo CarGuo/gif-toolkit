@@ -64,7 +64,10 @@ describe('listStaleEntries (pure)', () => {
       { name: 'giftk-mhtml-fresh', mtimeMs: now - 1 * HOUR, isDir: true }
     ];
     const out = listStaleEntries(items, now, ALLOWED_PREFIXES, 24 * HOUR, '/tmp');
-    expect(out).toEqual(['/tmp/giftk-mhtml-aaa', '/tmp/giftk-e2e-bbb']);
+    expect(out).toEqual([
+      path.join('/tmp', 'giftk-mhtml-aaa'),
+      path.join('/tmp', 'giftk-e2e-bbb')
+    ]);
   });
 
   it('does NOT delete prefix mismatches even when very old', () => {
@@ -84,7 +87,7 @@ describe('listStaleEntries (pure)', () => {
       { name: 'giftk-out-old', mtimeMs: cutoff - 1, isDir: true } // 1ms older → reaped
     ];
     const out = listStaleEntries(items, now, ALLOWED_PREFIXES, 24 * HOUR, '/tmp');
-    expect(out).toEqual(['/tmp/giftk-out-old']);
+    expect(out).toEqual([path.join('/tmp', 'giftk-out-old')]);
   });
 
   it('handles empty input and empty prefix list defensively', () => {
