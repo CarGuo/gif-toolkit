@@ -344,6 +344,26 @@ input[type="text"]:focus { border-color: var(--accent); }
   /* 入场过渡:opacity 由 0 → 1,无 transform 抖动。 */
   animation: tooltip-pop 0.12s ease-out both;
 }
+/* R-TOOLTIP-PLACE-2026-05-23 — placement modifier for hosts that sit
+   flush against the viewport's right edge (e.g. the ✎ pencil chip in
+   TopBar's actions cluster). With the default `left: 0` anchor, a
+   max-content tooltip expands rightward from the host's left edge and
+   gets clipped by the window. `data-tooltip-place="end"` flips the
+   anchor to `right: 0; left: auto` so the tooltip grows leftward
+   instead, keeping the entire string inside the viewport. We expose
+   `start` symmetrically so future left-edge hosts (e.g. a sidebar
+   collapse handle) can opt in without re-deriving the rule. The
+   default `left: 0` behavior is preserved for the (large majority of)
+   tooltips that don't set `data-tooltip-place`, so this change is
+   strictly additive. */
+[data-tooltip][data-tooltip-place="end"]:hover::after {
+  left: auto;
+  right: 0;
+}
+[data-tooltip][data-tooltip-place="start"]:hover::after {
+  left: 0;
+  right: auto;
+}
 @keyframes tooltip-pop {
   from { opacity: 0; transform: translateY(-2px); }
   to   { opacity: 1; transform: translateY(0);    }

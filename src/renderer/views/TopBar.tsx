@@ -146,6 +146,7 @@ export const TopBar: React.FC<TopBarProps> = ({
               title="修改输出根目录"
               aria-label="修改输出根目录"
               data-tooltip="修改输出根目录"
+              data-tooltip-place="end"
               style={{ padding: '0 8px' }}
             >
               ✎
