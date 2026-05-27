@@ -359,6 +359,46 @@ const App: React.FC = () => {
     []
   );
 
+  // R-TB-OPEN-FROM-PROGRESS — 主页处理进度行的「🛠 工具箱」按钮。
+  // 流程与 onApplyPresetFromHistory 类似:
+  //   1. 取该任务的第一个产物作为工具箱的 input。
+  //   2. 按产物扩展名挑一个最合适的默认 ToolboxKind:
+  //        .gif / .webp → gif-resize  (最常见的二次需求是改尺寸/再压缩)
+  //        .mp4 / .mov / .webm / ... → video-to-gif
+  //      未识别的扩展名直接放弃,避免把不兼容的文件丢进队列。
+  //   3. 切到 toolbox tab + 推一个新的 pendingPreset。
+  // 参数与 useToolbox#defaultParamsFor 保持同步;这里直接内联避免 App
+  // 多一次跨模块依赖,defaultParamsFor 改了的话两边一并更新即可。
+  const onOpenInToolboxFromProgress = useCallback(
+    (_m: { url: string }, p: { outputs?: string[] }): void => {
+      const out = Array.isArray(p.outputs) && p.outputs.length > 0 ? p.outputs[0] : null;
+      if (!out) return;
+      const dot = out.lastIndexOf('.');
+      if (dot < 0) return;
+      const ext = out.slice(dot).toLowerCase();
+      let kind: ToolboxKind | null = null;
+      let params: ToolboxParams = {};
+      if (ext === '.gif' || ext === '.webp') {
+        // 最高频的二次处理:对成品 GIF 调尺寸/再压。用户进入面板后还能
+        // 自由切到 gif-optimize / trim / speed 等其它 kind。
+        kind = 'gif-resize';
+        params = { targetWidth: 480 };
+      } else if (ext === '.mp4' || ext === '.mov' || ext === '.webm' || ext === '.mkv' || ext === '.avi') {
+        kind = 'video-to-gif';
+        params = { fps: 12, width: 800, engine: 'ffmpeg' };
+      }
+      if (!kind) return;
+      setView('toolbox');
+      setPendingPreset({
+        key: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        inputPath: out,
+        kind,
+        params
+      });
+    },
+    []
+  );
+
   // R-UPDATE — Update-check modal state. Three pieces:
   //   - `updateOpen` controls visibility of UpdateModal.
   //   - `updateResult` is the latest probe payload (from manual recheck
@@ -1357,6 +1397,7 @@ const App: React.FC = () => {
           onManualOptimize={onManualOptimize}
           onCancelOne={onCancelOne}
           onUploadOne={onUploadOne}
+          onOpenInToolbox={onOpenInToolboxFromProgress}
           logs={logs}
           logsVisible={logsVisible}
           toggleLogs={toggleLogs}

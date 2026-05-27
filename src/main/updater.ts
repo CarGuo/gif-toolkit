@@ -188,9 +188,9 @@ function defaultFetcher(url: string, timeoutMs: number): Promise<{ status: numbe
       status = res.statusCode;
       res.on('data', (c) => chunks.push(Buffer.from(c)));
       res.on('end', () => finish(() => resolve({ status, body: Buffer.concat(chunks).toString('utf8') })));
-      res.on('error', (e) => finish(() => reject(e)));
+      res.on('error', (e: Error) => finish(() => reject(e)));
     });
-    req.on('error', (e) => finish(() => reject(e)));
+    req.on('error', (e: Error) => finish(() => reject(e)));
     const timer = setTimeout(() => finish(() => {
       try { req.abort(); } catch { /* ignore */ }
       reject(new Error(`timeout after ${timeoutMs}ms`));

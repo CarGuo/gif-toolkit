@@ -343,6 +343,27 @@ const api = {
     ensureString(p, 'path');
     return ipcRenderer.invoke('toolbox:firstFrame', p);
   },
+  /* R-TRIM-FRAMESTRIP — Trim panel thumbnail strip + safe file:// URL.
+   *
+   * `toolboxThumbnailStrip` returns N evenly-spaced frames as
+   * self-contained JPEG data URLs the renderer can drop into <img>
+   * tags. `toolboxFileUrlFor` translates a validated absolute path to
+   * a `file://` URL the renderer's <video> element can play directly
+   * — main owns the Win-vs-POSIX path conversion via pathToFileURL so
+   * the renderer never has to know about drive letters / UNC / Unicode
+   * percent-escapes. R-11 — this is a strict pass-through, no extra
+   * surface. */
+  async toolboxThumbnailStrip(p: string, count?: number): Promise<{
+    sourceDurationSec: number;
+    frames: { atSec: number; dataUrl: string }[];
+  }> {
+    ensureString(p, 'path');
+    return ipcRenderer.invoke('toolbox:thumbnailStrip', { path: p, count });
+  },
+  async toolboxFileUrlFor(p: string): Promise<{ url: string }> {
+    ensureString(p, 'path');
+    return ipcRenderer.invoke('toolbox:fileUrl', p);
+  },
   /* R-COMPRESS-V1 #4 — Lineage modal "试跑 0.5s" preview bridge.
    *
    * Exposed as a sub-namespace `window.giftk.toolbox.{trialRun,

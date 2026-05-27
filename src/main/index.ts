@@ -8,7 +8,7 @@ import { openWebviewSniff } from './webviewSniff';
 import { sniffViaSystemChrome, findInstalledBrowsers } from './systemChromeSniff';
 import { sniffViaYtdlp } from './ytdlpDirectSniff';
 import { previewMedia, startBatch, cancelAllTasks, cancelTask, prefetchThumbnail, startToolbox, startToolboxChain, validateChainCompatibility, resumeToolboxChain, cancelToolboxChain, runToolboxTrialJob } from './processor';
-import { killAllProcs, probe as probeMedia, extractFrameDataUrl, toolboxTrim } from './ffmpeg';
+import { killAllProcs, probe as probeMedia, extractFrameDataUrl, extractFrameStrip, toolboxTrim } from './ffmpeg';
 import { log } from './logger';
 import {
   openSession as openLogSession,
@@ -26,6 +26,15 @@ import {
   DEFAULT_OPTIONS,
   TOOLBOX_INPUT_EXTENSIONS,
 } from '../shared/types';
+// R-82 — direct import of the strip-related constants from the source
+// file (NOT the barrel) so a stale `dist/shared/types/index.js` cannot
+// silently shadow newly added exports. The trim panel relies on these
+// to clamp the IPC `count` argument.
+import {
+  TRIM_STRIP_FRAME_COUNT_DEFAULT,
+  TRIM_STRIP_FRAME_COUNT_MAX,
+  TRIM_STRIP_FRAME_COUNT_MIN,
+} from '../shared/types/toolbox';
 import { sanitizeGifOptimizeKnobs } from './sanitizeOptions';
 import type {
   ProcessOptions,
@@ -709,6 +718,14 @@ async function createWindow(): Promise<void> {
       log(`loadFile failed: ${(e as Error).message}`);
     });
   }
+  // R-80 H5 fix companion — null out the wrapper ref once the OS
+  // window is truly destroyed. Without this, `mainWindow` stays as a
+  // dangling BrowserWindow reference whose getters (e.g. .webContents)
+  // throw `Object has been destroyed` from anywhere that tries to
+  // dereference it on the way out (before-quit, tray menu, etc.).
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
 }
 
 /* ----------------------- IPC handlers ----------------------- */
@@ -1681,6 +1698,87 @@ ipcMain.handle('toolbox:firstFrame', async (_e, p: unknown) => {
   return { dataUrl };
 });
 
+/**
+ * R-TRIM-FRAMESTRIP — toolbox:thumbnailStrip
+ *
+ * Produces a thumbnail strip for the Trim panel. Renderer asks for
+ * `count` frames evenly distributed across the source's duration; we
+ * return self-contained JPEG data URLs (no path leakage). Same path
+ * sandbox as toolbox:firstFrame: absolute, no NUL byte, extension on
+ * the toolbox whitelist, file must exist.
+ *
+ * Cross-platform note
+ * -------------------
+ * This handler intentionally never returns a `file://` URL or absolute
+ * path back to the renderer; data URLs are platform-agnostic. The
+ * Win/POSIX path delta lives entirely on the main side via
+ * path.resolve and ffmpeg invocation.
+ */
+ipcMain.handle('toolbox:thumbnailStrip', async (_e, payload: unknown) => {
+  let inputPath: unknown;
+  let count: unknown = TRIM_STRIP_FRAME_COUNT_DEFAULT;
+  if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+    const obj = payload as Record<string, unknown>;
+    inputPath = obj.path;
+    if ('count' in obj) count = obj.count;
+  }
+  if (typeof inputPath !== 'string' || !inputPath) {
+    throw new Error('toolbox:thumbnailStrip: path required');
+  }
+  if (inputPath.length > 4096) throw new Error('toolbox:thumbnailStrip: path too long');
+  const norm = path.resolve(inputPath);
+  if (norm.indexOf('\u0000') !== -1) throw new Error('toolbox:thumbnailStrip: null byte');
+  const ext = path.extname(norm).toLowerCase();
+  const allAllowed = new Set<string>();
+  for (const list of Object.values(TOOLBOX_INPUT_EXTENSIONS)) {
+    for (const x of list) allAllowed.add(x);
+  }
+  if (!allAllowed.has(ext)) {
+    throw new Error(`toolbox:thumbnailStrip: extension ${ext || '(none)'} not allowed`);
+  }
+  try { statSync(norm); } catch { throw new Error('toolbox:thumbnailStrip: file does not exist'); }
+  let n = typeof count === 'number' && Number.isFinite(count)
+    ? Math.floor(count)
+    : TRIM_STRIP_FRAME_COUNT_DEFAULT;
+  n = Math.max(TRIM_STRIP_FRAME_COUNT_MIN, Math.min(TRIM_STRIP_FRAME_COUNT_MAX, n));
+  const meta = await probeMedia(norm);
+  if (!meta || !Number.isFinite(meta.durationSec) || meta.durationSec <= 0) {
+    throw new Error('toolbox:thumbnailStrip: source has no usable duration');
+  }
+  const frames = await extractFrameStrip(norm, meta.durationSec, n);
+  return { sourceDurationSec: meta.durationSec, frames };
+});
+
+/**
+ * R-TRIM-FRAMESTRIP — toolbox:fileUrl
+ *
+ * Translates a validated absolute path into a `file://` URL the
+ * renderer's <video> element can consume directly. Done in main so
+ * the renderer never has to know about the Win-vs-POSIX path
+ * separator difference (pathToFileURL handles drive letters, UNC
+ * paths, and percent-escapes for Unicode/space all in one place).
+ *
+ * Path sandbox is identical to toolbox:firstFrame. The handler refuses
+ * anything that isn't on the toolbox extension allowlist so renderer
+ * code can't widen this into a generic "read any local file" oracle.
+ */
+ipcMain.handle('toolbox:fileUrl', async (_e, p: unknown) => {
+  if (typeof p !== 'string' || !p) throw new Error('toolbox:fileUrl: path required');
+  if (p.length > 4096) throw new Error('toolbox:fileUrl: path too long');
+  const norm = path.resolve(p);
+  if (norm.indexOf('\u0000') !== -1) throw new Error('toolbox:fileUrl: null byte');
+  const ext = path.extname(norm).toLowerCase();
+  const allAllowed = new Set<string>();
+  for (const list of Object.values(TOOLBOX_INPUT_EXTENSIONS)) {
+    for (const x of list) allAllowed.add(x);
+  }
+  if (!allAllowed.has(ext)) {
+    throw new Error(`toolbox:fileUrl: extension ${ext || '(none)'} not allowed`);
+  }
+  try { statSync(norm); } catch { throw new Error('toolbox:fileUrl: file does not exist'); }
+  return { url: pathToFileURL(norm).href };
+});
+
 ipcMain.handle('toolbox:start', async (_e, payload: unknown) => {
   // Accepted shapes: { jobs, outputDirOverride? } where jobs is an array.
   let jobs: unknown;
@@ -2200,10 +2298,21 @@ if (!gotLock) {
         // Reject any path whose normalised form differs (defence
         // against `..` traversal even though we don't have a single
         // root).
+        //
+        // R-TRIM-FRAMESTRIP follow-up — on Windows `path.normalize`
+        // converts every `/` to `\`, so a forward-slash URL path
+        // (which is what the renderer's pathToLocalUrl emits — URLs
+        // are always slash-delimited) would always fail the
+        // `norm !== p` equality check, returning 400 and breaking
+        // every animated GIF / WebP preview in the lineage modal.
+        // Normalise both sides via path.resolve so the comparison
+        // is robust to separator style on every platform.
         const norm = path.normalize(p);
-        if (norm !== p) {
+        const traversalSafe = path.resolve(p) === path.resolve(norm);
+        if (!traversalSafe) {
           return new Response('giftk-local: non-canonical path', { status: 400 });
         }
+        p = norm;
         // R-COMPRESS-V1 #4 follow-up — `net.fetch(file://)` returns a
         // Response with no Content-Type, which forces Chromium's image
         // pipeline to sniff the bytes and treat animated GIFs as a
@@ -2422,7 +2531,22 @@ app.on('before-quit', (event) => {
     return;
   }
 
-  const wc = mainWindow?.webContents;
+  // R-80 H5 fix — `mainWindow?.webContents` is *not* safe once the
+  // BrowserWindow has been destroyed: Electron's native getter throws
+  // `TypeError: Object has been destroyed` even when the wrapper ref
+  // is still truthy. We've seen this surface as a fatal "A JavaScript
+  // error occurred in the main process" dialog on Windows when the
+  // user closes the only window (window-all-closed → app.quit() →
+  // before-quit fires AFTER the WebContents has been torn down).
+  // Wrap the deref in try/catch + isDestroyed() so the second emit
+  // of `before-quit` (when `flushedBeforeQuit` is already true on a
+  // re-entry path that races the destroy) cannot bubble.
+  let wc: Electron.WebContents | null = null;
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      wc = mainWindow.webContents;
+    }
+  } catch { /* destroyed mid-deref */ }
   if (!wc || wc.isDestroyed()) {
     // No live renderer to ask — close DB synchronously and let the
     // quit proceed.

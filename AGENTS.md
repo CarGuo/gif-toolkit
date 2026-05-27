@@ -53,6 +53,8 @@
 | **R-87** | Tmp 清理三道护栏:ALLOWED_PREFIXES 白名单 + tmpdir-jail + dryRun 默认;sessionTmpRegistry 防误删本会话资源 | [R-87](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-87-tmp-cleanup-guardrails.md) |
 | **R-TB-CHAIN** | 工具箱渐进式链路:每步 1-step `startToolboxChain`、taskId 精确等值匹配、cancel-first 三入口、nextKindOptions 按产物扩展名过滤、Crop 复用 CropForm 而非 awaiting-input;**V2.6 起 lineage UI 弹窗化**(modal overlay + 视频/GIF 自动播放预览)、历史行 4-列 grid + 悬停自播缩略图 | [R-TB-CHAIN](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-TB-CHAIN-toolbox-progressive-lineage.md) |
 | **R-COMPRESS-V1** | 工具箱 / 历史卡 6 件 P0 体验加速:目标体积 chip / smart fps / engine 切换 / 试跑 0.5s / 推荐预设 chip / 嗅探卡上传胶囊跳转。paramsByKind 隔离不许打破;trial 三隔离(不入 queue/history/progress);applyPreset 必须原子(整体替换非 merge);gifski 不存在禁用而非静默 fallback;每件配真实 e2e SUITE RCV1-A..F | [R-COMPRESS-V1](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-COMPRESS-V1-six-quick-wins.md) |
+| **R-TRIM-FRAMESTRIP** | Trim 面板必须缩略图帧条 + 双把手 + 区间预览;主进程抽帧 ~10 jpeg dataUrl(R-10);count clamp 2..24;video 走 giftk-local + GIF/WebP 帧条循环模拟;PointerEvent + setPointerCapture(跨平台);onChange 原子 patch {startSec,endSec};NumField 微调入口保留 | [R-TRIM-FRAMESTRIP](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-TRIM-FRAMESTRIP-thumbnail-range-selector.md) |
+| **R-GIF-FRAME-PICK** | 动画 GIF 的 trim/reverse/rotate/crop 必须**两段法 rebuild canvas**:`gifsicle --colors=255 → -U <selectors> -O3`;捕 stderr `too complex` warning 触发 ffmpeg `palettegen→paletteuse` 兜底;不许直接 `gifsicle -O3 src '#a-b'`(ezgif disposal=asis 输入会全黑) | [R-GIF-FRAME-PICK](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-GIF-FRAME-PICK-rebuild-canvas.md) |
 
 ---
 

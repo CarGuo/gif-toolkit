@@ -2840,7 +2840,7 @@ button.hist-stage.is-clickable:active {
   color: #fca5a5;
 }
 
-.tb-body {
+.tb-content {
   display: grid;
   grid-template-columns: 1fr 320px;
   gap: 0;
@@ -2852,11 +2852,22 @@ button.hist-stage.is-clickable:active {
   background: var(--bg-2);
 }
 
-.tb-jobs {
+/* R-TRIM-CROP-SINGLE v2 — col 1: jobs queue + footer + history stacked
+   vertically. Each child keeps its own internal padding so the column
+   reads like a 3-section panel (queue · actions · history) all under
+   the same width. */
+.tb-main {
   display: flex;
   flex-direction: column;
   min-height: 0;
   border-right: 1px solid var(--border);
+  background: var(--bg-2);
+}
+
+.tb-jobs {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   background: var(--bg-2);
 }
 
@@ -2935,6 +2946,50 @@ button.hist-stage.is-clickable:active {
   font-size: 13px;
   border-bottom: 1px solid var(--border);
   transition: background 120ms ease;
+}
+
+/* R-TRIM-CROP-SINGLE v2 — Trim/Crop 模式下整行可点击作为单选;前置
+   一列 24px 的 radio dot 列。其它 kind 不渲染 .is-pickable,grid 不变。 */
+.tb-job-row.is-pickable {
+  grid-template-columns: 24px 56px 1fr 160px 140px 50px 32px;
+  cursor: pointer;
+}
+
+.tb-job-row.is-pickable:focus-visible {
+  outline: 2px solid var(--accent, #4080ff);
+  outline-offset: -2px;
+}
+
+.tb-job-row.is-selected {
+  background: rgba(64, 128, 255, 0.10);
+  box-shadow: inset 3px 0 0 0 var(--accent, #4080ff);
+}
+
+.tb-job-pick {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border);
+  background: var(--bg-2);
+}
+
+.tb-job-pick-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: transparent;
+  transition: background 120ms ease;
+}
+
+.tb-job-row.is-selected .tb-job-pick {
+  border-color: var(--accent, #4080ff);
+}
+
+.tb-job-pick-dot.is-on {
+  background: var(--accent, #4080ff);
 }
 
 .tb-job-row:last-child {
@@ -3127,9 +3182,10 @@ button.hist-stage.is-clickable:active {
   background: var(--panel);
   padding: 14px 16px;
   overflow: auto;
-  position: sticky;
-  top: 0;
-  align-self: start;
+  /* R-TRIM-CROP-SINGLE v2 — aside 现在 col2 row 1/-1,贯通整个 .tb-content
+     高度(jobs + footer + history 三段加起来)。grid item 自动 stretch,
+     所以不需要 sticky;保留 max-height 防超长参数表撑爆面板。 */
+  align-self: stretch;
   max-height: 100%;
 }
 
@@ -3140,6 +3196,15 @@ button.hist-stage.is-clickable:active {
   padding-bottom: 10px;
   margin-bottom: 12px;
   border-bottom: 1px solid var(--border);
+}
+
+/* R-TRIM-CROP-SINGLE v2 — picker 已迁到 .tb-job-row(整行 radio),
+   aside 仅在 jobs.length > 1 时显示一行 muted 提示。 */
+.tb-side-pick-hint {
+  font-size: 12px;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px dashed var(--border);
 }
 
 .tb-params {
@@ -3251,6 +3316,157 @@ button.hist-stage.is-clickable:active {
 .tb-warn {
   color: #f0a14b;
   font-size: 12px;
+}
+/* R-TRIM-FRAMESTRIP — Trim panel thumbnail strip + dual-handle range
+   selector. Layout: [▶ play btn] [thumb track + selection overlay].
+   The selection box is absolutely positioned on top of the thumb
+   track so the user can see exactly which thumbnails fall inside
+   the chosen range. Handles use a fixed pixel width so the selection
+   geometry stays correct down to durations of a few hundred ms.
+
+   Width strategy
+   --------------
+   The Trim panel can be mounted in two contexts:
+     1) Main toolbox aside (~288px usable) — narrow.
+     2) Lineage modal right column (~520px usable) — comfortable.
+   We don't try to render N=10 thumbs at <30px each (illegible). Instead
+   the track gets a `min-width` based on N=10 × 56px and the strip
+   container allows horizontal scroll inside its parent. The selection
+   overlay still uses absolute %-positioning so the geometry is
+   independent of the rendered visible width. */
+.tb-frame-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0 8px 0;
+  user-select: none;
+  /* Allow the inner track to scroll horizontally when the parent is
+     too narrow (e.g. main toolbox 288px aside) without forcing every
+     thumbnail to collapse to <30px. */
+  width: 100%;
+  overflow-x: auto;
+  overflow-y: visible;
+}
+.tb-frame-strip-empty,
+.tb-frame-strip-loading,
+.tb-frame-strip-error {
+  min-height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--border, #2c2c2c);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.tb-frame-strip-row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+.tb-frame-strip-play {
+  flex: 0 0 auto;
+  width: 36px;
+  border: 1px solid var(--border, #2c2c2c);
+  background: var(--surface, #1c1c1c);
+  color: var(--text, #ddd);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.tb-frame-strip-play:hover {
+  background: var(--surface-hover, #252525);
+}
+.tb-frame-strip-track {
+  position: relative;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: stretch;
+  height: 64px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface, #1c1c1c);
+  border: 1px solid var(--border, #2c2c2c);
+  touch-action: none;
+}
+.tb-frame-strip-thumb {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  pointer-events: none;
+  opacity: 0.85;
+  transition: opacity 0.15s ease;
+}
+.tb-frame-strip-thumb-active {
+  opacity: 1;
+  outline: 2px solid var(--accent, #4f8df0);
+  outline-offset: -2px;
+}
+.tb-frame-strip-selection {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-left: 2px solid var(--accent, #4f8df0);
+  border-right: 2px solid var(--accent, #4f8df0);
+  background: rgba(79, 141, 240, 0.12);
+  box-sizing: border-box;
+  pointer-events: none;
+}
+.tb-frame-strip-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent, #4f8df0);
+  color: #fff;
+  font-size: 12px;
+  cursor: ew-resize;
+  pointer-events: auto;
+  user-select: none;
+  touch-action: none;
+}
+.tb-frame-strip-handle-start {
+  left: -7px;
+  border-radius: 4px 0 0 4px;
+}
+.tb-frame-strip-handle-end {
+  right: -7px;
+  border-radius: 0 4px 4px 0;
+}
+.tb-frame-strip-handle:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 1px;
+}
+.tb-frame-strip-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #fff;
+  pointer-events: none;
+  box-shadow: 0 0 4px rgba(255, 255, 255, 0.6);
+}
+.tb-frame-strip-readout {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.tb-frame-strip-video {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+  /* The element exists only to drive timeupdate / play; visually we
+     show only the thumbnail strip + selection overlay. */
 }
 /* R-COMPRESS-V1 #1 — GIF Optimize 顶部「目标体积快捷条」.
    横向胶囊行,与 hist-stage 同款 999px 圆角,但配色用 accent

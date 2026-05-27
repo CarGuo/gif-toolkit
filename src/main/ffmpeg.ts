@@ -198,19 +198,74 @@ export async function probe(file: string): Promise<ProbeInfo> {
     file
   ]);
   const v = data.streams.find((s) => s.codec_type === 'video');
-  const dur = Number(v?.duration ?? data.format?.duration ?? 0) || 0;
+  let dur = Number(v?.duration ?? data.format?.duration ?? 0) || 0;
   // Prefer r_frame_rate (real / container) over avg_frame_rate (which is
   // often a noisy estimate for VFR sources). Fall back to avg if r is 0/0.
-  const fps = parseRational(v?.r_frame_rate) || parseRational(v?.avg_frame_rate);
+  let fps = parseRational(v?.r_frame_rate) || parseRational(v?.avg_frame_rate);
   const nbFromTag = Number(v?.nb_frames ?? 0);
-  const nbFrames = Number.isFinite(nbFromTag) && nbFromTag > 0
+  let nbFrames = Number.isFinite(nbFromTag) && nbFromTag > 0
     ? nbFromTag
     : (dur > 0 && fps > 0 ? Math.round(dur * fps) : 0);
+  let width = v?.width ?? 0;
+  let height = v?.height ?? 0;
+
+  // R-TRIM-FRAMESTRIP — GIF / animated WebP fallback.
+  //
+  // ffprobe routinely returns `duration=N/A` (and 0 for `nb_frames`) on
+  // animated GIFs and animated WebPs because the GIF/WebP container has
+  // no top-level duration field; the runtime is the sum of per-frame
+  // delays. Without this fallback the renderer's TrimFrameStrip never
+  // shows up (it gates on validDur > 0) and the form prints "请先添加
+  // 文件以获取时长" even though the file is right there.
+  //
+  // sharp ships its own GIF/WebP decoder and exposes per-frame delays
+  // via `metadata().delay` (ms[]), plus a `pages` count. We sum delays
+  // for true duration, fall back to pages * (default 100ms) if delays
+  // are absent. This is cross-platform (sharp's libvips bindings work
+  // identically on win32 / darwin / linux).
+  if (!(dur > 0)) {
+    const lower = file.toLowerCase();
+    if (lower.endsWith('.gif') || lower.endsWith('.webp')) {
+      try {
+        const meta = await sharp(file, { animated: true }).metadata();
+        if (meta.width && !width) width = meta.width;
+        // sharp reports metadata.height as totalHeight for animated
+        // images (pages stacked); pageHeight is the per-frame height.
+        const pageH = (meta as unknown as { pageHeight?: number }).pageHeight;
+        if (typeof pageH === 'number' && pageH > 0 && !height) {
+          height = pageH;
+        } else if (meta.height && !height) {
+          height = meta.height;
+        }
+        const delays = Array.isArray(meta.delay) ? meta.delay : [];
+        const pages = Number(meta.pages ?? delays.length ?? 0) || 0;
+        if (delays.length > 0) {
+          const totalMs = delays.reduce((a, b) => a + (Number(b) || 0), 0);
+          if (totalMs > 0) {
+            dur = totalMs / 1000;
+            if (!fps && delays.length > 0) {
+              fps = delays.length / dur;
+            }
+            nbFrames = nbFrames > 0 ? nbFrames : delays.length;
+          }
+        } else if (pages > 0) {
+          // Conservative default: 10 fps when delays are missing.
+          dur = pages / 10;
+          if (!fps) fps = 10;
+          nbFrames = nbFrames > 0 ? nbFrames : pages;
+        }
+      } catch {
+        // Best-effort fallback; if sharp also can't read the file we
+        // leave dur=0 and let the UI show the placeholder.
+      }
+    }
+  }
+
   return {
     durationSec: dur,
-    width: v?.width ?? 0,
-    height: v?.height ?? 0,
-    hasVideo: !!v,
+    width,
+    height,
+    hasVideo: !!v || dur > 0,
     frameRate: fps,
     nbFrames
   };
@@ -335,6 +390,87 @@ export async function extractFrameDataUrl(
       succeed(`data:image/jpeg;base64,${buf.toString('base64')}`);
     });
   });
+}
+
+/**
+ * R-TRIM-FRAMESTRIP — extract `count` frames evenly distributed across
+ * the source's duration as small JPEG data URLs. Powers the Trim
+ * panel's thumbnail strip (renderer can't read local files directly,
+ * R-10).
+ *
+ * Implementation notes
+ * --------------------
+ * - Concurrency is capped at 4. ffmpeg-static spawns one child per
+ *   frame; running all 10 in parallel saturates a low-end laptop's
+ *   IO bus and the speedup over 4-wide is marginal. The cap is
+ *   bumped from 4 to `count` automatically when the user asks for
+ *   2 or 3 frames.
+ * - We sample at evenly-spaced positions in (0, duration). The first
+ *   sample is offset by half a slot (duration / count / 2) so the
+ *   strip never lands a "first frame is the same as firstFrame" /
+ *   "last frame is the same as lastFrame" duplicate at the edges.
+ * - `signal` is forwarded to every child extract; cancelling the
+ *   overall strip aborts every in-flight ffmpeg child.
+ * - Cross-platform: data URLs are self-contained UTF-8 strings and
+ *   carry no path separators, so the renderer never has to do
+ *   pathToFileURL conversion (which differs Win vs POSIX) for the
+ *   strip itself.
+ */
+/**
+ * R-TRIM-FRAMESTRIP — pure helper: compute the atSec list the strip
+ * should sample at, given a duration and a desired count. Extracted
+ * for unit testability per R-82 ("sanitize 抽纯模块单测") — calling
+ * the parent extractFrameStrip in tests would require child-process
+ * mocks of ffmpeg-static which is overkill for what is fundamentally
+ * a 5-line scheduling computation.
+ *
+ *   - Throws if duration is not a finite positive number.
+ *   - count is clamped to [2, 24] (TRIM_STRIP_FRAME_COUNT_MIN/MAX).
+ *   - Each slot lands at slot * (i + 0.5) → mid-slot sampling avoids
+ *     duplicating the firstFrame / lastFrame thumbnails at the edges.
+ */
+export function computeFrameStripPositions(
+  durationSec: number,
+  count: number
+): number[] {
+  if (!Number.isFinite(durationSec) || durationSec <= 0) {
+    throw new Error('computeFrameStripPositions: durationSec must be > 0');
+  }
+  const n = Math.max(2, Math.min(24, Math.floor(count)));
+  const slot = durationSec / n;
+  const positions: number[] = [];
+  for (let i = 0; i < n; i++) {
+    positions.push(Math.min(durationSec, slot * (i + 0.5)));
+  }
+  return positions;
+}
+
+export async function extractFrameStrip(
+  file: string,
+  durationSec: number,
+  count: number,
+  options: { signal?: AbortSignal } = {}
+): Promise<{ atSec: number; dataUrl: string }[]> {
+  const positions = computeFrameStripPositions(durationSec, count);
+  const n = positions.length;
+  const concurrency = Math.min(4, n);
+  const out: { atSec: number; dataUrl: string }[] = new Array(n);
+  let cursor = 0;
+  const signal = options.signal;
+  async function worker() {
+    for (;;) {
+      if (signal?.aborted) throw makeCancelledError();
+      const idx = cursor++;
+      if (idx >= positions.length) return;
+      const at = positions[idx];
+      const dataUrl = await extractFrameDataUrl(file, at, { signal });
+      out[idx] = { atSec: at, dataUrl };
+    }
+  }
+  const workers: Promise<void>[] = [];
+  for (let i = 0; i < concurrency; i++) workers.push(worker());
+  await Promise.all(workers);
+  return out;
 }
 
 export interface GifConvertParams {
@@ -1288,6 +1424,142 @@ function atempoChain(factor: number): string {
 }
 
 /**
+ * R-GIF-FRAME-PICK — animated-GIF frame-range / frame-pick ops MUST
+ * rebuild every selected frame as a complete canvas before writing,
+ * otherwise renderers see "transparent black" holes whenever the
+ * starting frame is not the GIF's keyframe (frame 0). The classic
+ * trigger is ezgif-style optimised inputs: tiny per-frame diff rects
+ * with `disposal=asis` + local color tables — gifsicle's plain
+ * `[input, '#a-b']` selection drops the cumulative pixel state, so
+ * the output's first frame is just the diff overlay on top of pure
+ * (transparent, alpha=0) pixels. The user-facing symptom is the
+ * "全黑只有零星色点" trim output that started this rule.
+ *
+ * Two-tier strategy:
+ *   1. gifsicleRebuildFrames — `--colors=255` first (force a single
+ *      shared 256-colour palette), then `-U` (unoptimize, expand each
+ *      diff-frame back to a full canvas), then the requested frame
+ *      selectors, then `-O3` to re-pack. Watches stderr for the
+ *      sentinel "GIF too complex to unoptimize" — when gifsicle gives
+ *      up we throw GifsicleRebuildError so the caller can fall back.
+ *   2. ffmpegRebuildGifFrames — full decode → palettegen → paletteuse
+ *      via the static ffmpeg binary. Slower but works on every GIF
+ *      because it doesn't rely on gifsicle's palette merger. Used as
+ *      the safety net behind tier 1.
+ *
+ * Both helpers always write to a tmp path first and only rename onto
+ * `output` after a clean run, so a failed attempt never leaves a
+ * half-broken file behind.
+ */
+class GifsicleRebuildError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'GifsicleRebuildError';
+  }
+}
+
+function spawnGifsicleCapture(
+  cmd: string,
+  args: string[],
+  signal?: AbortSignal
+): Promise<{ code: number; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(makeCancelledError()); return; }
+    const child = spawn(cmd, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    let err = '';
+    child.stderr.on('data', (d: Buffer) => { err += d.toString('utf8'); });
+    child.on('error', (e) => reject(e));
+    child.on('close', (code) => resolve({ code: code ?? -1, stderr: err }));
+    if (signal) {
+      const onAbort = (): void => { try { child.kill('SIGKILL'); } catch { /* ignore */ } };
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+  });
+}
+
+async function gifsicleRebuildFrames(
+  input: string,
+  output: string,
+  frameSelectors: string[],
+  signal?: AbortSignal,
+  extraOps: string[] = []
+): Promise<void> {
+  const gifsicle = getGifsiclePath();
+  const tmpQuant = `${output}.q.gif`;
+  const tmpFinal = `${output}.t.gif`;
+  try {
+    // Step 1 — force a single 256-colour palette so step 2's -U has a
+    // chance to merge local palettes. Without this many ezgif outputs
+    // refuse to unoptimize ("GIF too complex to unoptimize").
+    const q = await spawnGifsicleCapture(
+      gifsicle,
+      ['--colors=255', input, '-o', tmpQuant],
+      signal
+    );
+    if (q.code !== 0) {
+      throw new GifsicleRebuildError(`gifsicle --colors=255 exited ${q.code}: ${q.stderr.slice(-300)}`);
+    }
+    // Step 2 — unoptimize + frame select / extra ops + re-optimize.
+    // `extraOps` (e.g. ['--rotate-90'], ['--crop','0,0+200x200']) are
+    // applied AFTER -U so they operate on the full canvas, not the
+    // diff rects.
+    const u = await spawnGifsicleCapture(
+      gifsicle,
+      ['-U', tmpQuant, ...frameSelectors, ...extraOps, '-O3', '-o', tmpFinal],
+      signal
+    );
+    if (u.code !== 0) {
+      throw new GifsicleRebuildError(`gifsicle -U exited ${u.code}: ${u.stderr.slice(-300)}`);
+    }
+    if (/GIF too complex to unoptimize/i.test(u.stderr)) {
+      throw new GifsicleRebuildError('gifsicle reported "too complex to unoptimize" — falling back to ffmpeg');
+    }
+    await fsp.rename(tmpFinal, output);
+  } finally {
+    for (const p of [tmpQuant, tmpFinal]) {
+      try { await fsp.unlink(p); } catch { /* swallow */ }
+    }
+  }
+}
+
+async function ffmpegRebuildGifClip(
+  input: string,
+  output: string,
+  range: { startSec?: number; endSec?: number; extraVf?: string },
+  signal?: AbortSignal
+): Promise<void> {
+  const ffmpeg = getFfmpegPath();
+  const args: string[] = ['-y'];
+  // ffmpeg interprets `-to` as an absolute timestamp ONLY when it
+  // pairs with a preceding `-ss`; without `-ss` the same `-to` value
+  // accidentally clamps the run to that absolute timestamp anyway,
+  // but the legacy semantics differ across builds. Be explicit: when
+  // we push `-ss`, use `-to`; when we don't, use `-t` (duration).
+  const hasSeek =
+    typeof range.startSec === 'number' && range.startSec > 0;
+  if (hasSeek) {
+    args.push('-ss', String(range.startSec));
+  }
+  if (typeof range.endSec === 'number' && Number.isFinite(range.endSec)) {
+    if (hasSeek) {
+      args.push('-to', String(range.endSec));
+    } else {
+      args.push('-t', String(range.endSec));
+    }
+  }
+  args.push('-i', input);
+  // Build a single filter graph: optional pre-filter (e.g. crop / hflip)
+  // → split → palettegen → paletteuse. The split + palettegen pair is
+  // the standard "high-quality gif from any source" recipe and works
+  // even on ezgif-optimised inputs because we decode every frame back
+  // to RGB first.
+  const head = range.extraVf ? `${range.extraVf},` : '';
+  const vf = `${head}split[a][b];[a]palettegen=stats_mode=full[p];[b][p]paletteuse=dither=bayer:bayer_scale=5`;
+  args.push('-vf', vf, '-loop', '0', output);
+  await run(ffmpeg, args, { signal });
+}
+
+/**
  * R-37 Trim — extract a [startSec, endSec) clip. Lossless re-mux when
  * the input is a video (we use -ss + -to with -c copy so we don't
  * transcode). For gifs we go through gifsicle's frame-range syntax
@@ -1347,7 +1619,41 @@ export async function toolboxTrim(
     // a frame selection. The frame range must be a separate argv entry
     // following the input file path. Without this split gifsicle bails
     // with "No such file or directory" on every range.
-    await run(gifsicle, ['-O3', input, `#${startIdx}-${endIdx}`, '-o', output], { signal: opts.signal });
+    //
+    // R-GIF-FRAME-PICK — when the trim range does not start at frame 0,
+    // a plain `[input, '#a-b']` selection drops the cumulative pixel
+    // state of every disposal=asis / partial-rect optimised input
+    // (ezgif's --optimize is the canonical example). Symptom: the
+    // output's first frames are mostly transparent/black with only a
+    // few diff pixels visible. Route through the rebuild helper
+    // (gifsicle --colors=255 → -U → range → -O3) and fall back to a
+    // full ffmpeg palettegen decode whenever gifsicle says "too complex
+    // to unoptimize". For range == [0..lastFrame] (whole-gif copy) we
+    // could keep the legacy fast path, but we always rebuild so the
+    // behaviour is uniform across trim ranges and we never regress
+    // again on this class of bug.
+    try {
+      await gifsicleRebuildFrames(
+        input,
+        output,
+        [`#${startIdx}-${endIdx}`],
+        opts.signal
+      );
+    } catch (e) {
+      if ((e as Error).name === 'CancelledError') throw e;
+      if ((e as Error).name !== 'GifsicleRebuildError') throw e;
+      // Tier 2: ffmpeg-side rebuild. Translate frame indices back to
+      // seconds using the delay table we already parsed above so the
+      // ffmpeg `-ss/-to` clamp matches the user's trim selection.
+      const startSecForFfmpeg = delays.slice(0, startIdx).reduce((a, b) => a + b, 0);
+      const endSecForFfmpeg = delays.slice(0, endIdx + 1).reduce((a, b) => a + b, 0);
+      await ffmpegRebuildGifClip(
+        input,
+        output,
+        { startSec: startSecForFfmpeg, endSec: endSecForFfmpeg },
+        opts.signal
+      );
+    }
     return;
   }
 
@@ -1556,9 +1862,30 @@ export async function toolboxReverse(
     // `path#N`. We open the input once at the start and prepend the file
     // arg, then the per-frame `#N` selectors copy frames in descending
     // order.
+    //
+    // R-GIF-FRAME-PICK — reverse picks every frame in descending order,
+    // which means frame 0 of the output is the LAST frame of an
+    // optimised input. On `disposal=asis` + local-palette inputs the
+    // last frame is just a tiny diff rect; without rebuilding the
+    // canvas the renderer sees "transparent black" holes. Use the
+    // shared rebuild helper (gifsicle --colors=255 → -U → frames →
+    // -O3) and fall back to a full ffmpeg decode on "too complex"
+    // warnings.
     const frames: string[] = [];
     for (let i = count - 1; i >= 0; i -= 1) frames.push(`#${i}`);
-    await run(gifsicle, ['-O3', '-U', input, ...frames, '-o', output], { signal: opts.signal });
+    try {
+      await gifsicleRebuildFrames(input, output, frames, opts.signal);
+    } catch (e) {
+      if ((e as Error).name === 'CancelledError') throw e;
+      if ((e as Error).name !== 'GifsicleRebuildError') throw e;
+      // ffmpeg fallback: full decode + reverse filter + palettegen.
+      await ffmpegRebuildGifClip(
+        input,
+        output,
+        { extraVf: 'reverse' },
+        opts.signal
+      );
+    }
     return;
   }
 
@@ -1616,10 +1943,20 @@ export async function toolboxRotate(
   }
 
   if (isGifPath(input) && !flipH && !flipV) {
-    const gifsicle = getGifsiclePath();
     const flag = deg === 90 ? '--rotate-90' : deg === 180 ? '--rotate-180' : deg === 270 ? '--rotate-270' : null;
     if (flag) {
-      await run(gifsicle, ['-O3', flag, input, '-o', output], { signal: opts.signal });
+      // R-GIF-FRAME-PICK — rotate operates on every frame; on optimised
+      // GIF inputs (local palettes + disposal=asis + diff rects) the
+      // rotated diff rects no longer line up with the cumulative
+      // canvas, so we must rebuild every frame as a full canvas first.
+      try {
+        await gifsicleRebuildFrames(input, output, [], opts.signal, [flag]);
+      } catch (e) {
+        if ((e as Error).name === 'CancelledError') throw e;
+        if ((e as Error).name !== 'GifsicleRebuildError') throw e;
+        const vfChain = deg === 90 ? 'transpose=1' : deg === 180 ? 'transpose=2,transpose=2' : 'transpose=2';
+        await ffmpegRebuildGifClip(input, output, { extraVf: vfChain }, opts.signal);
+      }
       return;
     }
   }
@@ -1668,14 +2005,6 @@ export async function toolboxCrop(
   rect: { x: number; y: number; w: number; h: number },
   opts: { signal?: AbortSignal; onProgress?: (percent: number, etaSec: number | null) => void } = {}
 ): Promise<void> {
-  // Snap to even pixels (mandatory for many codecs; harmless for gif).
-  const x = Math.max(0, Math.floor(rect.x / 2) * 2);
-  const y = Math.max(0, Math.floor(rect.y / 2) * 2);
-  const w = Math.max(2, Math.floor(rect.w / 2) * 2);
-  const h = Math.max(2, Math.floor(rect.h / 2) * 2);
-  // ffmpeg crop filter — note the (w:h:x:y) ordering.
-  const vf = `crop=${w}:${h}:${x}:${y}`;
-
   // R-65 — see toolboxTrim for rationale.
   if (isWebpPath(input)) {
     await withWebpAsGif(input, output, (gifIn, gifOut) =>
@@ -1683,6 +2012,60 @@ export async function toolboxCrop(
     );
     return;
   }
+
+  if (isGifPath(input)) {
+    // R-CROP-GIF-FIX — Animated GIFs go through gifsicle, NOT ffmpeg. The
+    // previous implementation re-encoded via `ffmpeg -vf crop=...` which on
+    // some real-world sources (PAL8 + crop filter + default gif muxer
+    // framerate handling) silently collapses N-frame animations into a
+    // single frame. gifsicle's native `--crop X,Y+WxH` keeps every frame's
+    // delay / disposal / transparency / loop count intact and accepts odd
+    // pixel coords, so we skip the even-pixel snap that the video branch
+    // below needs. Same "GIF-first, fall back to ffmpeg only for video"
+    // pattern as toolboxTrim / toolboxReverse / toolboxRotate's fast path.
+    //
+    // R-GIF-FRAME-PICK — crop slices the canvas; on disposal=asis +
+    // local-palette inputs the per-frame diff rects can sit OUTSIDE
+    // the crop window, leaving subsequent frames "unaware" of the
+    // missing context and producing the transparent-black bug. We
+    // rebuild every frame to a full canvas first (--colors=255 + -U)
+    // before applying --crop, falling back to ffmpeg crop+palettegen
+    // when gifsicle gives up.
+    const gx = Math.max(0, Math.floor(rect.x));
+    const gy = Math.max(0, Math.floor(rect.y));
+    const gw = Math.max(1, Math.floor(rect.w));
+    const gh = Math.max(1, Math.floor(rect.h));
+    // Coarse progress: gifsicle is single-shot, so we emit one mid-run
+    // tick so the lineage modal doesn't appear stuck at 5%.
+    if (opts.onProgress) {
+      try { opts.onProgress(50, null); } catch { /* swallow */ }
+    }
+    try {
+      await gifsicleRebuildFrames(
+        input,
+        output,
+        [],
+        opts.signal,
+        ['--crop', `${gx},${gy}+${gw}x${gh}`]
+      );
+    } catch (e) {
+      if ((e as Error).name === 'CancelledError') throw e;
+      if ((e as Error).name !== 'GifsicleRebuildError') throw e;
+      const vfChain = `crop=${gw}:${gh}:${gx}:${gy}`;
+      await ffmpegRebuildGifClip(input, output, { extraVf: vfChain }, opts.signal);
+    }
+    return;
+  }
+
+  // Video path — snap to even pixels (mandatory for libx264 / VP9 /
+  // WebP_anim). gifs survive odd dimensions and we already returned
+  // above, so this snap only applies to videos.
+  const x = Math.max(0, Math.floor(rect.x / 2) * 2);
+  const y = Math.max(0, Math.floor(rect.y / 2) * 2);
+  const w = Math.max(2, Math.floor(rect.w / 2) * 2);
+  const h = Math.max(2, Math.floor(rect.h / 2) * 2);
+  // ffmpeg crop filter — note the (w:h:x:y) ordering.
+  const vf = `crop=${w}:${h}:${x}:${y}`;
 
   // R-CROP-PROG-V1 — probe upstream duration so we can convert ffmpeg's
   // `time=HH:MM:SS.cc` stderr lines into a real 0..100 percent for the
@@ -1713,13 +2096,6 @@ export async function toolboxCrop(
     const eta = cur > 0 && cur < totalSec ? Math.max(0, Math.round(totalSec - cur)) : null;
     try { opts.onProgress(pct, eta); } catch { /* swallow */ }
   };
-
-  if (isGifPath(input)) {
-    // For gifs we re-encode through the gif muxer; ffmpeg keeps the
-    // animation timing (per-frame delays) intact when no -r is given.
-    await run(ffmpeg, ['-y', '-i', input, '-vf', vf, '-loop', '0', output], { signal: opts.signal, onStderr });
-    return;
-  }
 
   // Video path — preserve original audio with `-c:a copy`. If the input
   // container rejects copy (rare, e.g. AAC-in-MOV with PCM remap), fall

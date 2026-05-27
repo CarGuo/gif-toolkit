@@ -416,3 +416,43 @@ export function isChainStepDraftValid(kind: ToolboxKind, params: ToolboxParams):
   }
 }
 
+/* --------------------- R-TRIM-FRAMESTRIP: thumbnail strip --------------------- */
+
+/**
+ * R-TRIM-FRAMESTRIP — one sample inside a thumbnail strip. The main
+ * process emits these as small JPEG data URLs the renderer can drop
+ * straight into an <img> tag. Cross-platform note: the data URL is
+ * fully self-contained, so renderer code never needs the original
+ * absolute path (which would otherwise need pathToFileURL conversion
+ * to be safe on Windows / mac / Linux).
+ */
+export interface ToolboxFrameSample {
+  /** Position in source seconds the frame was sampled at. Always >= 0
+   *  and <= sourceDurationSec. Sorted ascending in the strip. */
+  atSec: number;
+  /** Self-contained `data:image/jpeg;base64,...` URL. Sized for
+   *  inline rendering inside the strip (~256w). */
+  dataUrl: string;
+}
+
+/**
+ * R-TRIM-FRAMESTRIP — full strip payload returned by toolbox:thumbnailStrip.
+ * `sourceDurationSec` is echoed alongside the samples so the renderer
+ * can map the strip's pixel space onto seconds without re-probing.
+ */
+export interface ToolboxThumbnailStrip {
+  sourceDurationSec: number;
+  frames: ToolboxFrameSample[];
+}
+
+/**
+ * R-TRIM-FRAMESTRIP — bounds for thumbnailStrip's `count` parameter.
+ * Lower bound 2 keeps the strip useful (a single frame is just
+ * firstFrame); upper bound 24 caps the IPC payload (~3 MB worst
+ * case at 256w jpeg quality 70). The renderer asks for 10 by
+ * default; tests pin both ends.
+ */
+export const TRIM_STRIP_FRAME_COUNT_MIN = 2;
+export const TRIM_STRIP_FRAME_COUNT_MAX = 24;
+export const TRIM_STRIP_FRAME_COUNT_DEFAULT = 10;
+

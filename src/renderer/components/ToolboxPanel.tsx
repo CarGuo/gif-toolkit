@@ -285,6 +285,354 @@ function CheckboxField({ label, checked, onChange, hint }: CheckboxFieldProps): 
   );
 }
 
+/* ---------------------------------------------------------------------------
+ * R-TRIM-FRAMESTRIP — Trim panel thumbnail strip.
+ *
+ * UX
+ * --
+ *   ┌───┬───────────────────────────────────────────────────┬───┐
+ *   │ ▶ │  thumbnails   ⟦startHandle    selected    endHandle⟧ │
+ *   └───┴───────────────────────────────────────────────────┴───┘
+ *
+ *   - The strip itself is one row of N=10 evenly-spaced JPEG thumbs
+ *     produced by `toolboxThumbnailStrip`. The renderer never sees
+ *     the absolute path of the thumb files: each frame ships as a
+ *     self-contained `data:image/jpeg;base64,...` URL so cross-platform
+ *     path quirks (Win drive letters, UNC, Unicode percent-escapes)
+ *     are isolated to the main process.
+ *   - Two draggable handles bound a selection rectangle. Dragging
+ *     either handle patches `startSec` / `endSec` on the toolbox
+ *     params in real time. Pointer events are used (not mousedown /
+ *     touchstart) so trackpad + touchscreen on macOS / Windows /
+ *     Linux all work out of the box.
+ *   - The ▶ button toggles a preview loop over the selected range.
+ *     For real videos we mount a hidden <video> with the source as a
+ *     `giftk-local://` URL (already CSP-allow-listed) and seek/play
+ *     between [startSec, endSec]. For GIF / WebP we cycle the
+ *     thumbnail strip itself at ~120ms intervals — best we can do
+ *     without re-decoding the animated bitmap on the renderer side.
+ *
+ * Cross-platform notes
+ * --------------------
+ *   - Path → URL conversion is centralised in `pathToGiftkLocal` (top
+ *     of file). It already handles drive letters and was registered
+ *     as a privileged scheme in main on all three platforms.
+ *   - PointerEvent.releasePointerCapture is universally supported in
+ *     Chromium-based Electron (>= 102), no platform fork needed.
+ *   - We avoid `setTimeout` / `setInterval` cleanup leaks via a
+ *     captured local variable + cleanup in the effect's teardown.
+ */
+
+interface FrameStripFrame {
+  atSec: number;
+  dataUrl: string;
+}
+
+export function TrimFrameStrip({
+  inputPath,
+  durationSec,
+  startSec,
+  endSec,
+  onChange,
+}: {
+  inputPath: string | null;
+  /** Source duration in seconds. Comes from probeMedia, so 0 / NaN
+   *  means "still probing" — the strip renders a placeholder. */
+  durationSec: number;
+  /** Current trim params. Both undefined fall back to [0, duration]. */
+  startSec: number | undefined;
+  endSec: number | undefined;
+  /** Atomic update — both fields go up at once so the parent doesn't
+   *  observe an intermediate (s>e) state. */
+  onChange: (next: { startSec: number; endSec: number }) => void;
+}): JSX.Element {
+  const trackRef = useRef<HTMLDivElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [frames, setFrames] = useState<FrameStripFrame[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [playing, setPlaying] = useState(false);
+  const [playCursor, setPlayCursor] = useState<number>(0);
+  const [activeDrag, setActiveDrag] = useState<null | 'start' | 'end'>(null);
+
+  // Resolve the actual selected range — undefineds collapse to bounds.
+  const validDur = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0;
+  const sNum = typeof startSec === 'number' && startSec >= 0 ? Math.min(startSec, validDur) : 0;
+  const eNum = typeof endSec === 'number' && endSec > 0 ? Math.min(endSec, validDur) : validDur;
+  // Defensive: clamp so s <= e even if upstream params arrived inverted.
+  const selStart = Math.min(sNum, eNum);
+  const selEnd = Math.max(sNum, eNum);
+
+  // Detect the source kind from extension. Videos go through <video>;
+  // GIF / WebP fall back to thumbnail cycling because Electron can't
+  // play GIF/WebP via <video>.
+  const isVideoSource = useMemo(() => {
+    if (!inputPath) return false;
+    const ext = inputPath.toLowerCase().slice(inputPath.lastIndexOf('.'));
+    return ext === '.mp4' || ext === '.mov' || ext === '.webm' || ext === '.mkv' || ext === '.m4v';
+  }, [inputPath]);
+
+  // Fetch the strip whenever the input changes. Cancellation is best-
+  // effort: we drop stale results via a captured "alive" flag.
+  useEffect(() => {
+    if (!inputPath || validDur <= 0) {
+      setFrames(null);
+      setLoadError(null);
+      return;
+    }
+    let alive = true;
+    setLoading(true);
+    setLoadError(null);
+    (async () => {
+      try {
+        const res = await window.giftk.toolboxThumbnailStrip(inputPath, 10);
+        if (!alive) return;
+        setFrames(res.frames);
+      } catch (e) {
+        if (!alive) return;
+        setLoadError((e as Error)?.message || 'thumbnail strip failed');
+        setFrames(null);
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [inputPath, validDur]);
+
+  // Stop preview whenever the selection or input changes.
+  useEffect(() => {
+    setPlaying(false);
+  }, [inputPath, selStart, selEnd]);
+
+  // Video preview loop — seek to selStart on play, pause when we hit
+  // selEnd, then bounce back to selStart for next loop.
+  useEffect(() => {
+    if (!playing) return;
+    if (isVideoSource) {
+      const v = videoRef.current;
+      if (!v) return;
+      v.currentTime = selStart;
+      const onTimeUpdate = () => {
+        if (!videoRef.current) return;
+        const t = videoRef.current.currentTime;
+        setPlayCursor(t);
+        if (t >= selEnd) {
+          videoRef.current.currentTime = selStart;
+        }
+      };
+      v.addEventListener('timeupdate', onTimeUpdate);
+      v.play().catch(() => setPlaying(false));
+      return () => {
+        v.pause();
+        v.removeEventListener('timeupdate', onTimeUpdate);
+      };
+    }
+    // GIF / WebP fallback — step the play cursor over the selected
+    // window at ~8fps (125ms tick). Cheap and good enough for a
+    // visual confirmation; the actual encode will produce the real
+    // animation.
+    if (validDur <= 0) return;
+    let cursor = selStart;
+    setPlayCursor(cursor);
+    const stepSec = Math.max(0.05, (selEnd - selStart) / 32);
+    const handle = window.setInterval(() => {
+      cursor += stepSec;
+      if (cursor > selEnd) cursor = selStart;
+      setPlayCursor(cursor);
+    }, 125);
+    return () => {
+      window.clearInterval(handle);
+    };
+  }, [playing, isVideoSource, selStart, selEnd, validDur]);
+
+  // Find the closest frame index for the play cursor (used by the
+  // GIF fallback to highlight the strip's "current" cell).
+  const cursorIdx = useMemo(() => {
+    if (!frames || frames.length === 0) return 0;
+    let best = 0;
+    let bestDiff = Infinity;
+    for (let i = 0; i < frames.length; i++) {
+      const d = Math.abs(frames[i].atSec - playCursor);
+      if (d < bestDiff) {
+        bestDiff = d;
+        best = i;
+      }
+    }
+    return best;
+  }, [frames, playCursor]);
+
+  // Map a client X coordinate (page space) to the source second.
+  // Centralised so the start / end handle drag handlers share it.
+  const clientXToSec = useCallback((clientX: number): number => {
+    const track = trackRef.current;
+    if (!track) return 0;
+    const rect = track.getBoundingClientRect();
+    if (rect.width <= 0) return 0;
+    const ratio = (clientX - rect.left) / rect.width;
+    const clamped = Math.max(0, Math.min(1, ratio));
+    return clamped * validDur;
+  }, [validDur]);
+
+  // Pointer drag for both handles. We capture the pointer on
+  // pointerdown so dragging outside the strip still updates the
+  // value; releasing rolls back the capture.
+  const beginHandleDrag = useCallback(
+    (which: 'start' | 'end') =>
+      (ev: React.PointerEvent<HTMLDivElement>) => {
+        if (validDur <= 0) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        const target = ev.currentTarget;
+        try { target.setPointerCapture(ev.pointerId); } catch { /* ignore */ }
+        setActiveDrag(which);
+        const apply = (clientX: number) => {
+          const t = clientXToSec(clientX);
+          if (which === 'start') {
+            const ns = Math.max(0, Math.min(t, selEnd - 0.05));
+            onChange({ startSec: ns, endSec: selEnd });
+          } else {
+            const ne = Math.max(selStart + 0.05, Math.min(t, validDur));
+            onChange({ startSec: selStart, endSec: ne });
+          }
+        };
+        const onMove = (e: PointerEvent) => apply(e.clientX);
+        const onUp = (e: PointerEvent) => {
+          apply(e.clientX);
+          setActiveDrag(null);
+          target.removeEventListener('pointermove', onMove);
+          target.removeEventListener('pointerup', onUp);
+          target.removeEventListener('pointercancel', onUp);
+          try { target.releasePointerCapture(ev.pointerId); } catch { /* ignore */ }
+        };
+        target.addEventListener('pointermove', onMove);
+        target.addEventListener('pointerup', onUp);
+        target.addEventListener('pointercancel', onUp);
+      },
+    [clientXToSec, onChange, selStart, selEnd, validDur]
+  );
+
+  // Render gating
+  if (!inputPath || validDur <= 0) {
+    return (
+      <div className="tb-frame-strip tb-frame-strip-empty" data-testid="trim-frame-strip-empty">
+        <span className="tb-muted">添加文件后将自动生成帧条</span>
+      </div>
+    );
+  }
+  if (loading) {
+    return (
+      <div className="tb-frame-strip tb-frame-strip-loading" data-testid="trim-frame-strip-loading">
+        <span className="tb-muted">正在抽取预览帧…</span>
+      </div>
+    );
+  }
+  if (loadError || !frames || frames.length === 0) {
+    return (
+      <div className="tb-frame-strip tb-frame-strip-error" data-testid="trim-frame-strip-error">
+        <span className="tb-warn">帧条加载失败:{loadError || '空结果'}</span>
+      </div>
+    );
+  }
+
+  // Selection box geometry. When validDur is 0 we won't reach here
+  // (the early-return above guards it), so division is always safe.
+  const leftPct = (selStart / validDur) * 100;
+  const widthPct = Math.max(0, ((selEnd - selStart) / validDur) * 100);
+
+  // Video source URL — only mounted when we actually need it (avoids
+  // pre-loading bytes for the GIF / WebP path).
+  const videoUrl = isVideoSource ? pathToGiftkLocal(inputPath) : null;
+
+  return (
+    <div className="tb-frame-strip" data-testid="trim-frame-strip">
+      <div className="tb-frame-strip-row">
+        <button
+          type="button"
+          className="tb-frame-strip-play"
+          aria-label={playing ? '暂停预览' : '预览选中区间'}
+          onClick={() => setPlaying((p) => !p)}
+          data-testid="trim-frame-strip-play"
+        >
+          {playing ? '❚❚' : '▶'}
+        </button>
+        <div
+          className="tb-frame-strip-track"
+          ref={trackRef}
+          data-testid="trim-frame-strip-track"
+          data-active-drag={activeDrag || ''}
+        >
+          {frames.map((f, i) => (
+            <img
+              key={i}
+              className={
+                'tb-frame-strip-thumb' +
+                (playing && !isVideoSource && i === cursorIdx ? ' tb-frame-strip-thumb-active' : '')
+              }
+              src={f.dataUrl}
+              alt={`frame @ ${f.atSec.toFixed(2)}s`}
+              draggable={false}
+            />
+          ))}
+          <div
+            className="tb-frame-strip-selection"
+            style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
+            data-testid="trim-frame-strip-selection"
+          >
+            <div
+              className="tb-frame-strip-handle tb-frame-strip-handle-start"
+              role="slider"
+              aria-label="开始时间"
+              aria-valuemin={0}
+              aria-valuemax={validDur}
+              aria-valuenow={selStart}
+              tabIndex={0}
+              data-testid="trim-frame-strip-handle-start"
+              onPointerDown={beginHandleDrag('start')}
+            >
+              ⟨
+            </div>
+            <div
+              className="tb-frame-strip-handle tb-frame-strip-handle-end"
+              role="slider"
+              aria-label="结束时间"
+              aria-valuemin={0}
+              aria-valuemax={validDur}
+              aria-valuenow={selEnd}
+              tabIndex={0}
+              data-testid="trim-frame-strip-handle-end"
+              onPointerDown={beginHandleDrag('end')}
+            >
+              ⟩
+            </div>
+          </div>
+          {playing && isVideoSource ? (
+            <div
+              className="tb-frame-strip-playhead"
+              style={{ left: `${(playCursor / validDur) * 100}%` }}
+              data-testid="trim-frame-strip-playhead"
+            />
+          ) : null}
+        </div>
+      </div>
+      <div className="tb-frame-strip-readout" data-testid="trim-frame-strip-readout">
+        {selStart.toFixed(2)}s — {selEnd.toFixed(2)}s · 时长 {(selEnd - selStart).toFixed(2)}s
+      </div>
+      {videoUrl ? (
+        <video
+          ref={videoRef}
+          className="tb-frame-strip-video"
+          src={videoUrl}
+          muted
+          playsInline
+          preload="metadata"
+        />
+      ) : null}
+    </div>
+  );
+}
+
 /** R-38 — natural size + duration of the (single) preview job, used by
  *  Trim (NumField max bound + helper text) and Crop (CropBox needs source
  *  pixel dimensions to convert drag positions). null means "not yet
@@ -422,11 +770,17 @@ function CropForm({ params, setParams, mediaInfo }: {
 // R-COMPRESS-V1 — exported so tests can mount ParamForm with a static
 // MediaInfo and assert the new chip strip / smart-fps hint behavior in
 // isolation, without standing up the full ToolboxPanel + IPC scaffold.
-export function ParamForm({ kind, params, setParams, mediaInfo, onTargetFormatTouch }: {
+export function ParamForm({ kind, params, setParams, mediaInfo, inputPath, onTargetFormatTouch }: {
   kind: ToolboxKind;
   params: ToolboxParams;
   setParams: (p: ToolboxParams | ((prev: ToolboxParams) => ToolboxParams)) => void;
   mediaInfo: MediaInfo | null;
+  /** R-TRIM-FRAMESTRIP — absolute path of the focus-job's source.
+   *  Drives the Trim panel's thumbnail strip (one IPC call per
+   *  inputPath). Optional so existing call sites + tests that mount
+   *  ParamForm without a queue still compile; absent → strip falls
+   *  back to its empty-state placeholder. */
+  inputPath?: string | null;
   // R-43 — fires once when the user clicks either radio in the
   // gif-webp-convert form. Lets the parent disable the auto-flip
   // effect so the user's choice survives queue churn.
@@ -550,6 +904,21 @@ export function ParamForm({ kind, params, setParams, mediaInfo, onTargetFormatTo
     return (
       <div className="tb-params">
         <div className="tb-info-row" data-testid="trim-duration-info">{durLabel}</div>
+        {/* R-TRIM-FRAMESTRIP — visual range selector. Mounted above
+            the numeric NumFields so the user gets the fast path
+            (drag handles) by default and can fine-tune via the
+            inputs below. The strip self-renders an empty placeholder
+            when inputPath is null / duration is 0, so unconditional
+            mounting is safe. */}
+        <TrimFrameStrip
+          inputPath={inputPath ?? null}
+          durationSec={typeof dur === 'number' && dur > 0 ? dur : 0}
+          startSec={params.startSec}
+          endSec={params.endSec}
+          onChange={({ startSec, endSec }) => {
+            setParams((prev) => ({ ...prev, startSec, endSec }));
+          }}
+        />
         <NumField
           label="开始 (秒)"
           value={params.startSec}
@@ -926,7 +1295,15 @@ export function ToolboxPanel(props: ToolboxPanelProps = {}): JSX.Element {
   }
   const [jobMedia, setJobMedia] = useState<Record<string, JobMedia>>({});
 
-  const previewPath = tb.jobs[0]?.inputPath ?? null;
+  // R-TRIM-CROP-SINGLE — for Trim and Crop the panel previews and
+  // operates on the user's currently-selected row, not jobs[0]. Other
+  // tools (batch-friendly) keep the legacy jobs[0] semantics so the
+  // existing media-probe / first-frame paths are unchanged.
+  const isSingleKind = tb.kind === 'trim' || tb.kind === 'crop';
+  const selectedJob = isSingleKind
+    ? (tb.jobs.find((j) => j.id === tb.selectedJobId) ?? tb.jobs[0] ?? null)
+    : (tb.jobs[0] ?? null);
+  const previewPath = selectedJob?.inputPath ?? null;
   const queuePaths = useMemo(() => {
     // R-TB-CHAIN-V2 — also probe every lineage node path so the
     // breadcrumb's current-product preview (thumb + meta line) shares
@@ -1120,8 +1497,13 @@ export function ToolboxPanel(props: ToolboxPanelProps = {}): JSX.Element {
   // R-38 — Crop kind enforces single-file processing in the renderer (the
   // backend sanitizer/processor are kind-agnostic, this is purely a UX
   // gate). Start is also blocked until a non-empty rect has been drawn.
+  // R-TRIM-CROP-SINGLE — Crop's run-gate cares about the selected row,
+  // not the queue size. Multi-file queues are allowed (each row is
+  // processed one-at-a-time via the side picker), so we only block
+  // when there's no selectable row OR the user hasn't drawn a rect on
+  // the currently-selected source yet.
   const cropBlocked = tb.kind === 'crop' && (
-    tb.jobs.length !== 1 ||
+    !selectedJob ||
     !mediaInfo ||
     typeof tb.params.cropX !== 'number' ||
     typeof tb.params.cropY !== 'number' ||
@@ -1166,16 +1548,39 @@ export function ToolboxPanel(props: ToolboxPanelProps = {}): JSX.Element {
     const fl = e.target.files;
     if (!fl || fl.length === 0) return;
     const out: string[] = [];
+    const rejected: string[] = [];
     for (let i = 0; i < fl.length; i += 1) {
       const f = fl[i] as unknown as { path?: string; name?: string };
       const p = typeof f.path === 'string' && f.path ? f.path : '';
       if (p) {
         const lower = p.toLowerCase();
         const dot = lower.lastIndexOf('.');
-        if (dot >= 0 && allowedExts.has(lower.slice(dot))) out.push(p);
+        const ext = dot >= 0 ? lower.slice(dot) : '';
+        if (ext && allowedExts.has(ext)) {
+          out.push(p);
+        } else {
+          const baseName = p.split(/[\\/]/).pop() || p;
+          rejected.push(ext ? `${baseName} (${ext})` : baseName);
+        }
+      } else if (f.name) {
+        const lower = f.name.toLowerCase();
+        const dot = lower.lastIndexOf('.');
+        const ext = dot >= 0 ? lower.slice(dot) : '';
+        rejected.push(ext ? `${f.name} (${ext})` : f.name);
       }
     }
-    if (out.length) tb.addJobsFromPaths(out);
+    if (out.length) {
+      tb.addJobsFromPaths(out);
+      setPickError(null);
+    }
+    if (rejected.length) {
+      const allowed = TOOLBOX_INPUT_EXTENSIONS[tb.kind].join(' / ');
+      const head = rejected.slice(0, 3).join('、');
+      const more = rejected.length > 3 ? ` 等 ${rejected.length} 个文件` : '';
+      setPickError(
+        `当前功能「${tb.kind}」仅支持 ${allowed},已忽略不匹配的文件:${head}${more}`
+      );
+    }
     // Reset so picking the same file twice in a row still triggers change.
     e.target.value = '';
   }, [allowedExts, tb]);
@@ -1183,6 +1588,7 @@ export function ToolboxPanel(props: ToolboxPanelProps = {}): JSX.Element {
   const handleDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     const out: string[] = [];
+    const rejected: string[] = [];
     if (e.dataTransfer?.files) {
       for (let i = 0; i < e.dataTransfer.files.length; i += 1) {
         const f = e.dataTransfer.files[i];
@@ -1191,11 +1597,35 @@ export function ToolboxPanel(props: ToolboxPanelProps = {}): JSX.Element {
         if (typeof p === 'string' && p) {
           const lower = p.toLowerCase();
           const dot = lower.lastIndexOf('.');
-          if (dot >= 0 && allowedExts.has(lower.slice(dot))) out.push(p);
+          const ext = dot >= 0 ? lower.slice(dot) : '';
+          if (ext && allowedExts.has(ext)) {
+            out.push(p);
+          } else {
+            const baseName = p.split(/[\\/]/).pop() || p;
+            rejected.push(ext ? `${baseName} (${ext})` : baseName);
+          }
+        } else if (f.name) {
+          // Fallback when Electron doesn't expose `path` (e.g. drag from
+          // a remote source). We still want to flag the mismatch.
+          const lower = f.name.toLowerCase();
+          const dot = lower.lastIndexOf('.');
+          const ext = dot >= 0 ? lower.slice(dot) : '';
+          rejected.push(ext ? `${f.name} (${ext})` : f.name);
         }
       }
     }
-    if (out.length) tb.addJobsFromPaths(out);
+    if (out.length) {
+      tb.addJobsFromPaths(out);
+      setPickError(null);
+    }
+    if (rejected.length) {
+      const allowed = TOOLBOX_INPUT_EXTENSIONS[tb.kind].join(' / ');
+      const head = rejected.slice(0, 3).join('、');
+      const more = rejected.length > 3 ? ` 等 ${rejected.length} 个文件` : '';
+      setPickError(
+        `当前功能「${tb.kind}」仅支持 ${allowed},已忽略不匹配的文件:${head}${more}`
+      );
+    }
   }, [allowedExts, tb]);
 
   const onDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
@@ -1483,7 +1913,8 @@ export function ToolboxPanel(props: ToolboxPanelProps = {}): JSX.Element {
         <div className="tb-notice tb-notice-error" role="alert">{pickError}</div>
       ) : null}
 
-      <div className="tb-body">
+      <div className="tb-content">
+        <div className="tb-main">
         <div className="tb-jobs">
           <div className="tb-jobs-head">
             <span>{tb.jobs.length} 个文件</span>
@@ -1529,7 +1960,32 @@ export function ToolboxPanel(props: ToolboxPanelProps = {}): JSX.Element {
                   ? pathToGiftkLocal(job.inputPath)
                   : '';
                 return (
-                  <li key={job.id} className={`tb-job-row${p?.status ? ` is-${p.status}` : ''}`}>
+                  <li
+                    key={job.id}
+                    className={
+                      `tb-job-row${p?.status ? ` is-${p.status}` : ''}` +
+                      (isSingleKind ? ' is-pickable' : '') +
+                      (isSingleKind && job.id === selectedJob?.id ? ' is-selected' : '')
+                    }
+                    onClick={isSingleKind ? () => tb.selectJob(job.id) : undefined}
+                    role={isSingleKind ? 'radio' : undefined}
+                    aria-checked={isSingleKind ? job.id === selectedJob?.id : undefined}
+                    tabIndex={isSingleKind ? 0 : undefined}
+                    onKeyDown={isSingleKind ? (e) => {
+                      if (e.key === ' ' || e.key === 'Enter') {
+                        e.preventDefault();
+                        tb.selectJob(job.id);
+                      }
+                    } : undefined}
+                    data-testid={isSingleKind ? `tb-row-pick-${job.id}` : undefined}
+                  >
+                    {isSingleKind ? (
+                      <span className="tb-job-pick" aria-hidden="true">
+                        <span
+                          className={'tb-job-pick-dot' + (job.id === selectedJob?.id ? ' is-on' : '')}
+                        />
+                      </span>
+                    ) : null}
                     {/* R-39 — every queued row carries a thumbnail, including
                         pending ones, so the user can identify which clip is
                         which before processing starts. */}
@@ -1579,7 +2035,7 @@ export function ToolboxPanel(props: ToolboxPanelProps = {}): JSX.Element {
                       type="button"
                       className="tb-job-remove"
                       title="移除"
-                      onClick={() => tb.removeJob(job.id)}
+                      onClick={(e) => { e.stopPropagation(); tb.removeJob(job.id); }}
                       disabled={tb.isRunning && p != null && p.status !== 'pending' && p.status !== 'done' && p.status !== 'failed' && p.status !== 'cancelled' && p.status !== 'skipped'}
                     >×</button>
                   </li>
@@ -1589,18 +2045,6 @@ export function ToolboxPanel(props: ToolboxPanelProps = {}): JSX.Element {
           )}
         </div>
 
-        <aside className="tb-side">
-          <div className="tb-side-head">参数</div>
-          <ParamForm
-            kind={tb.kind}
-            params={tb.params}
-            setParams={tb.setParams}
-            mediaInfo={mediaInfo}
-            onTargetFormatTouch={() => { userTouchedTargetRef.current = true; }}
-          />
-        </aside>
-      </div>
-
       <footer className="tb-footer">
         <div className="tb-footer-left">
           {tb.lastOutputDir ? (
@@ -1608,10 +2052,10 @@ export function ToolboxPanel(props: ToolboxPanelProps = {}): JSX.Element {
               打开输出目录
             </button>
           ) : null}
-          {tb.kind === 'crop' && tb.jobs.length > 1 ? (
-            <span className="tb-warn">Crop 仅支持单文件,请删除其余文件后再处理</span>
+          {isSingleKind && tb.jobs.length > 1 ? (
+            <span className="tb-muted">Crop / Trim 每次处理一个,其余文件保留在队列里</span>
           ) : null}
-          {tb.kind === 'crop' && tb.jobs.length === 1 && cropBlocked ? (
+          {tb.kind === 'crop' && tb.jobs.length >= 1 && cropBlocked ? (
             <span className="tb-muted">请在预览图上拖拽以选择裁剪区域</span>
           ) : null}
         </div>
@@ -1628,10 +2072,9 @@ export function ToolboxPanel(props: ToolboxPanelProps = {}): JSX.Element {
         </div>
       </footer>
 
-      {/* R-39 — History section. Sits below the footer (i.e. always
-          visible at the very bottom of the panel) so completed runs are
-          one click away. Each row is itself a button that triggers
-          revealItem on the primary output. */}
+      {/* R-39 — History section. Now lives inside .tb-main (col 1) so the
+          right-side .tb-side aside can stretch from top to bottom of the
+          panel without the history rows being squeezed under it. */}
       <section className="tb-history" aria-label="工具箱历史结果">
         <div className="tb-history-head">
           <span className="tb-history-title">历史结果 · {tb.toolboxHistory.length}</span>
@@ -1719,6 +2162,29 @@ export function ToolboxPanel(props: ToolboxPanelProps = {}): JSX.Element {
           </ul>
         )}
       </section>
+        </div>{/* /.tb-main */}
+
+        <aside className="tb-side">
+          <div className="tb-side-head">参数</div>
+          {/* R-TRIM-CROP-SINGLE v2 — Trim/Crop 单文件入口已迁到队列行
+              内(整行可点 + radio dot),aside 只剩参数表单。仅在
+              jobs.length>1 时显示一行 muted 提示,避免用户漏看那个
+              「整行=单选」的隐式交互。 */}
+          {isSingleKind && tb.jobs.length > 1 ? (
+            <div className="tb-side-pick-hint tb-muted" data-testid="tb-side-pick-hint">
+              {tb.kind === 'trim' ? 'Trim' : 'Crop'} 每次处理一个文件,在左侧队列点击行即可切换
+            </div>
+          ) : null}
+          <ParamForm
+            kind={tb.kind}
+            params={tb.params}
+            setParams={tb.setParams}
+            mediaInfo={mediaInfo}
+            inputPath={previewPath}
+            onTargetFormatTouch={() => { userTouchedTargetRef.current = true; }}
+          />
+        </aside>
+      </div>
 
       {/* R-TB-CHAIN-V2.6 — lineage runs as an overlay modal so the
           batch UI underneath stays mounted and interactive (just
@@ -1749,7 +2215,13 @@ export function ToolboxPanel(props: ToolboxPanelProps = {}): JSX.Element {
         rootMedia={lineage.nodes[0] ? (jobMedia[lineage.nodes[0].path] ?? null) : null}
         focusPosterDataUrl={lineageFocus ? (jobMedia[lineageFocus.path]?.previewDataUrl ?? null) : null}
         renderParamForm={({ kind, params, setParams, mediaInfo }) => (
-          <ParamForm kind={kind} params={params} setParams={setParams} mediaInfo={mediaInfo} />
+          <ParamForm
+            kind={kind}
+            params={params}
+            setParams={setParams}
+            mediaInfo={mediaInfo}
+            inputPath={lineageFocus?.path ?? null}
+          />
         )}
         renderCropForm={({ params, setParams, mediaInfo }) => (
           <CropForm params={params} setParams={setParams} mediaInfo={mediaInfo} />

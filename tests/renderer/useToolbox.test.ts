@@ -581,3 +581,116 @@ describe('useToolbox', () => {
     expect(result.current.toolboxHistory).toHaveLength(1);
   });
 });
+
+// R-TRIM-CROP-SINGLE — Trim/Crop must operate on exactly one queued
+// file at a time even when the queue holds many. The hook auto-pins
+// `selectedJobId` to jobs[0] on enter and to the new head when the
+// pinned row is removed; `start()` in these kinds dispatches ONLY the
+// selected payload and leaves the rest of the queue intact for a
+// follow-up run.
+describe('useToolbox — R-TRIM-CROP-SINGLE single-file selection', () => {
+  beforeEach(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    delete (window as any).giftk;
+  });
+
+  it('auto-pins selectedJobId to jobs[0] when entering trim with a non-empty queue', async () => {
+    installFakeGiftk();
+    const { result } = renderHook(() => useToolbox());
+    await flushLoad();
+    // R-41 — gif inputs are only accepted under gif-* / trim / crop /
+    // ... kinds, NOT under the default video-to-gif. Switch first.
+    act(() => { result.current.setKind('trim'); });
+    act(() => {
+      result.current.addJobsFromPaths(['/a/x.gif', '/a/y.gif', '/a/z.gif']);
+    });
+    expect(result.current.jobs).toHaveLength(3);
+    expect(result.current.selectedJobId).toBe(result.current.jobs[0].id);
+  });
+
+  it('selectJob re-pins to a different row, and clears to jobs[0] when that row is removed', async () => {
+    installFakeGiftk();
+    const { result } = renderHook(() => useToolbox());
+    await flushLoad();
+    act(() => { result.current.setKind('trim'); });
+    act(() => {
+      result.current.addJobsFromPaths(['/a/x.gif', '/a/y.gif', '/a/z.gif']);
+    });
+    const second = result.current.jobs[1].id;
+    act(() => { result.current.selectJob(second); });
+    expect(result.current.selectedJobId).toBe(second);
+    act(() => { result.current.removeJob(second); });
+    // After removal the auto-pin effect should snap to the new jobs[0].
+    expect(result.current.selectedJobId).toBe(result.current.jobs[0].id);
+  });
+
+  it('selectJob is a no-op for unknown ids (stale clicks cannot strand the panel)', async () => {
+    installFakeGiftk();
+    const { result } = renderHook(() => useToolbox());
+    await flushLoad();
+    act(() => { result.current.setKind('trim'); });
+    act(() => { result.current.addJobsFromPaths(['/a/x.gif']); });
+    const pinned = result.current.selectedJobId;
+    act(() => { result.current.selectJob('does-not-exist'); });
+    expect(result.current.selectedJobId).toBe(pinned);
+  });
+
+  it('start() in trim/crop dispatches ONLY the selected job, leaving the rest of the queue', async () => {
+    const fake = installFakeGiftk();
+    fake.startToolbox.mockResolvedValueOnce({ ok: true, outputDir: '/out/x' });
+    const { result } = renderHook(() => useToolbox());
+    await flushLoad();
+    act(() => { result.current.setKind('trim'); });
+    act(() => {
+      result.current.addJobsFromPaths(['/a/x.gif', '/a/y.gif', '/a/z.gif']);
+    });
+    const second = result.current.jobs[1].id;
+    const secondPath = result.current.jobs[1].inputPath;
+    act(() => { result.current.selectJob(second); });
+    await act(async () => {
+      const r = await result.current.start();
+      expect(r.ok).toBe(true);
+    });
+    expect(fake.startToolbox).toHaveBeenCalledTimes(1);
+    const payload = fake.startToolbox.mock.calls[0][0] as Array<{ id: string; inputPath: string; kind: string }>;
+    expect(payload).toHaveLength(1);
+    expect(payload[0].id).toBe(second);
+    expect(payload[0].inputPath).toBe(secondPath);
+    expect(payload[0].kind).toBe('trim');
+    // Other rows must remain queued for follow-up runs.
+    expect(result.current.jobs.map((j) => j.inputPath)).toContain('/a/x.gif');
+    expect(result.current.jobs.map((j) => j.inputPath)).toContain('/a/z.gif');
+  });
+
+  it('start() in non-single kinds (video-to-gif) still dispatches the entire queue', async () => {
+    const fake = installFakeGiftk();
+    fake.startToolbox.mockResolvedValueOnce({ ok: true, outputDir: '/out/x' });
+    const { result } = renderHook(() => useToolbox());
+    await flushLoad();
+    act(() => {
+      result.current.addJobsFromPaths(['/a/1.mp4', '/a/2.mp4', '/a/3.mp4']);
+    });
+    expect(result.current.kind).toBe('video-to-gif');
+    await act(async () => {
+      await result.current.start();
+    });
+    const payload = fake.startToolbox.mock.calls[0][0] as Array<unknown>;
+    expect(payload).toHaveLength(3);
+  });
+
+  it('start() falls back to jobs[0] when selectedJobId is stale (defensive guard)', async () => {
+    const fake = installFakeGiftk();
+    fake.startToolbox.mockResolvedValueOnce({ ok: true, outputDir: '/out/x' });
+    const { result } = renderHook(() => useToolbox());
+    await flushLoad();
+    act(() => { result.current.setKind('crop'); });
+    act(() => {
+      result.current.addJobsFromPaths(['/a/x.gif', '/a/y.gif']);
+    });
+    const firstPath = result.current.jobs[0].inputPath;
+    await act(async () => { await result.current.start(); });
+    const payload = fake.startToolbox.mock.calls[0][0] as Array<{ inputPath: string }>;
+    expect(payload).toHaveLength(1);
+    expect(payload[0].inputPath).toBe(firstPath);
+  });
+});

@@ -42,6 +42,9 @@ export interface ProgressDockProps {
   onManualOptimize?: (media: SniffedMedia, p: TaskProgress) => void | Promise<void>;
   onCancelOne?: (media: SniffedMedia) => void | Promise<void>;
   onUploadOne?: (media: SniffedMedia, progress: TaskProgress) => void | Promise<void>;
+  /** R-TB-OPEN-FROM-PROGRESS — per-row "open in toolbox" hand-off.
+   *  Forwarded as-is to TaskTable; see [TaskTable.tsx](./TaskTable.tsx#L46-L55). */
+  onOpenInToolbox?: (media: SniffedMedia, progress: TaskProgress) => void;
   /** Buttons / status text rendered to the right of the dock title. */
   headerExtras?: React.ReactNode;
   /** Optional uploads strip (HistoryDetailModal). */
@@ -63,6 +66,7 @@ export const ProgressDock: React.FC<ProgressDockProps> = ({
   onManualOptimize,
   onCancelOne,
   onUploadOne,
+  onOpenInToolbox,
   headerExtras,
   uploadsSlot,
   logs,
@@ -107,6 +111,7 @@ export const ProgressDock: React.FC<ProgressDockProps> = ({
         onManualOptimize={onManualOptimize}
         onCancelOne={onCancelOne}
         onUploadOne={onUploadOne}
+        onOpenInToolbox={onOpenInToolbox}
       />
       {uploadsSlot}
       {showLogToggle && logsVisible ? (

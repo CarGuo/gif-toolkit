@@ -55,6 +55,11 @@ export interface MediaGridPaneProps {
   onManualOptimize: (m: SniffedMedia, p: TaskProgress) => void | Promise<void>;
   onCancelOne: (m: SniffedMedia) => void | Promise<void>;
   onUploadOne: (m: SniffedMedia, p: TaskProgress) => void | Promise<void>;
+  /** R-TB-OPEN-FROM-PROGRESS — per-row「🛠 工具箱」hand-off. Forwarded
+   *  to ProgressDock → TaskTable; the host (App.tsx) implements the
+   *  handler by switching to the toolbox view and calling
+   *  tb.applyPreset via the existing pendingPreset bridge. */
+  onOpenInToolbox: (m: SniffedMedia, p: TaskProgress) => void;
   logs: string[];
   logsVisible: boolean;
   toggleLogs: () => void;
@@ -100,6 +105,7 @@ export const MediaGridPane: React.FC<MediaGridPaneProps> = ({
   onManualOptimize,
   onCancelOne,
   onUploadOne,
+  onOpenInToolbox,
   logs,
   logsVisible,
   toggleLogs,
@@ -196,6 +202,7 @@ export const MediaGridPane: React.FC<MediaGridPaneProps> = ({
         onManualOptimize={onManualOptimize}
         onCancelOne={onCancelOne}
         onUploadOne={onUploadOne}
+        onOpenInToolbox={onOpenInToolbox}
         logs={logs}
         logsVisible={logsVisible}
         onToggleLogs={toggleLogs}

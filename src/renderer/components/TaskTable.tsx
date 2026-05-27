@@ -43,6 +43,16 @@ interface Props {
    * an upload job for THAT output via the active backend.
    */
   onUploadOne?: (media: SniffedMedia, progress: TaskProgress) => void | Promise<void>;
+  /**
+   * R-TB-OPEN-FROM-PROGRESS — per-row "open in toolbox". When supplied,
+   * "done" rows that have at least one output path render a "🛠 工具箱"
+   * button. Clicking it asks the host to switch to the Toolbox tab and
+   * preload the produced file (typically the GIF) as a single-job queue
+   * with a sensible default kind (e.g. gif-resize for *.gif). The host
+   * is responsible for picking the kind and calling tb.applyPreset via
+   * the existing pendingPreset bridge.
+   */
+  onOpenInToolbox?: (media: SniffedMedia, progress: TaskProgress) => void;
 }
 
 function fileName(u: string): string {
@@ -170,7 +180,7 @@ const WarningDetailModal: React.FC<{ s: DetailModalState; onClose: () => void }>
   );
 };
 
-export const TaskTable: React.FC<Props> = ({ items, progress, onRetry, onForceAllow, onManualOptimize, onCancelOne, onUploadOne }) => {
+export const TaskTable: React.FC<Props> = ({ items, progress, onRetry, onForceAllow, onManualOptimize, onCancelOne, onUploadOne, onOpenInToolbox }) => {
   const [detail, setDetail] = useState<DetailModalState | null>(null);
   // Track which task IDs are currently mid-retry so we can disable the button
   // until a fresh progress event arrives. Without this, double-clicks would
@@ -342,6 +352,25 @@ export const TaskTable: React.FC<Props> = ({ items, progress, onRetry, onForceAl
                   style={{ marginLeft: 8, fontSize: 11, padding: '2px 8px' }}
                 >
                   📤 上传
+                </button>
+              ) : null}
+              {/* R-TB-OPEN-FROM-PROGRESS — 把已成功产物直接送进工具箱
+                  做二次处理(resize/optimize/trim/...)。仅在 done 且
+                  至少有一个产物时显示;扩展名兼容性由 host 侧
+                  (App.tsx#onOpenInToolbox) 决定。 */}
+              {onOpenInToolbox && p.status === 'done' && (p.outputs?.length ?? 0) > 0 ? (
+                <button
+                  type="button"
+                  className="retry-btn toolbox-btn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onOpenInToolbox(m, p);
+                  }}
+                  title="把该产物送入工具箱继续处理(resize / 压缩 / 裁剪 / 加速 ...)"
+                  aria-label="在工具箱中打开"
+                  style={{ marginLeft: 8, fontSize: 11, padding: '2px 8px' }}
+                >
+                  🛠 工具箱
                 </button>
               ) : null}
               {(() => {

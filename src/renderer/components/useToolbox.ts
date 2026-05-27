@@ -4,33 +4,19 @@ import { TOOLBOX_INPUT_EXTENSIONS } from '../../shared/types';
 import { reportDbError } from './dbErrorBus';
 
 /**
- * R-80 — storage moved from localStorage to a main-process SQLite
- * store. The hook still owns an in-memory mirror so the panel can
- * render synchronously; mutations are optimistic + fire-and-forget
- * IPC. Initial load is async, gated on `isHistoryLoading`.
- */
-
-/**
- * R-35 / R-39 — useToolbox.
+ * R-80 / R-35 / R-39 — useToolbox.
  *
  * Manages a flat list of toolbox jobs (one per local input file) plus a
- * map of taskId → latest TaskProgress event. The hook is intentionally
- * thin — render-side ToolboxPanel does all the layout, and main-side
- * processor reuses the existing `process:progress` IPC channel so we
- * piggy-back on the same listener that powers TaskTable on home.
+ * map of taskId → latest TaskProgress event. Storage lives in a main-
+ * process SQLite store (R-80); the hook keeps an in-memory mirror so
+ * the panel renders synchronously, with optimistic fire-and-forget IPC
+ * mutations and an async initial load gated on `isHistoryLoading`.
  *
- * R-39 additions:
- *   - When a job reaches a terminal status (`done` / `failed` /
- *     `cancelled` / `skipped`) it is *moved out* of `jobs` into a
- *     persistent `toolboxHistory` log. This solves the UX issue where
- *     the queue grew indefinitely as the user processed more files; the
- *     queue is now strictly the "to do" list.
- *   - The history is persisted to `localStorage` under
- *     `giftk.toolbox.history.v1` so it survives reload / restart.
- *   - Each entry remembers the source input path, the kind, the chosen
- *     params, the resulting output path(s) and a timestamp so the panel
- *     can show "completed at 14:32 · GIF Resize · clip.mp4 → clip.gif"
- *     and let the user click to reveal the output in Finder/Explorer.
+ * Terminal jobs (done / failed / cancelled / skipped) move out of
+ * `jobs` into a persistent `toolboxHistory` log. Each entry remembers
+ * inputPath, kind, params, outputs and a timestamp so the panel can
+ * render a clickable "completed at 14:32 · GIF Resize · clip.mp4 →
+ * clip.gif" line.
  */
 
 export interface ToolboxJobView extends ToolboxJob {
@@ -47,11 +33,9 @@ export interface ToolboxHistoryEntry {
   displayName: string;
   /** Output file paths (typically 1; gif-optimize may emit aux files). */
   outputs: string[];
-  /** Snapshot of the params used at the time the job ran, useful for
-   *  history rows showing "GIF Resize · 480px" etc. */
+  /** Snapshot of params at run-time (drives "GIF Resize · 480px" rows). */
   params: ToolboxParams;
-  /** Final status; `done` is the happy path, the rest are kept so the
-   *  history works as an audit log for failures too. */
+  /** Final status; non-`done` entries kept as failure audit log. */
   status: 'done' | 'failed' | 'cancelled' | 'skipped';
   /** Optional human-readable error string for non-`done` entries. */
   error?: string;
@@ -63,21 +47,17 @@ export const TOOLBOX_HISTORY_STORAGE_KEY = 'giftk.toolbox.history.v1';
 const TOOLBOX_HISTORY_LIMIT = 200;
 
 /**
- * R-79b — see [storageSchema.ts](./storageSchema.ts) for the full
- * version-contract rationale. Currently version 1 with no migrations
- * defined; the existing on-disk shape *is* v1 and legacy bare-array
- * blobs are accepted as v0 by the shared reader.
+ * R-79b — see [storageSchema.ts](./storageSchema.ts). v1 with no
+ * migrations; legacy bare-array blobs are accepted as v0.
  */
 export const TOOLBOX_HISTORY_SCHEMA_VERSION = 1;
 
 export interface UseToolboxResult {
   kind: ToolboxKind;
-  /** R-41 — `setKind` can be called with a second arg `{ confirm }` so
-   *  the caller can intercept incompatible-queue switches (e.g. when
-   *  the queued .mp4s would all be dropped because the new tool only
-   *  accepts .gif/.webp). The hook calls `confirm(droppedCount)` and
-   *  aborts the switch if it returns false. Without the option we
-   *  preserve the old "silent drop" behaviour for backwards-compat. */
+  /** R-41 — `setKind({ confirm })` lets the caller intercept incompatible-
+   *  queue switches (e.g. queued .mp4s when the new tool only accepts
+   *  .gif/.webp). Returns false to abort. Without the option we preserve
+   *  the legacy silent-drop behaviour. */
   setKind: (k: ToolboxKind, opts?: { confirm?: (droppedCount: number) => boolean }) => boolean;
   params: ToolboxParams;
   setParams: (p: ToolboxParams | ((prev: ToolboxParams) => ToolboxParams)) => void;
@@ -85,6 +65,11 @@ export interface UseToolboxResult {
   addJobsFromPaths: (paths: string[]) => void;
   removeJob: (id: string) => void;
   clearJobs: () => void;
+  /** R-TRIM-CROP-SINGLE — id of the queue row currently selected as
+   *  Trim/Crop target. Auto-pinned; null = empty queue. */
+  selectedJobId: string | null;
+  /** R-TRIM-CROP-SINGLE — set the target; unknown ids are no-ops. */
+  selectJob: (id: string | null) => void;
   progress: Record<string, TaskProgress>;
   /** Last batch's output directory (populated after a successful start). */
   lastOutputDir: string | null;
@@ -192,6 +177,9 @@ export function useToolbox(): UseToolboxResult {
   const [kind, setKindInner] = useState<ToolboxKind>('video-to-gif');
   const [params, setParamsInner] = useState<ToolboxParams>(() => defaultParamsFor('video-to-gif'));
   const [jobs, setJobs] = useState<ToolboxJobView[]>([]);
+  // R-TRIM-CROP-SINGLE — Trim/Crop must operate on exactly one queued
+  // file at a time; track via id (not path) to disambiguate duplicates.
+  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   // R-41 — Mirror the latest `jobs` array into a ref so synchronous
   // helpers like setKind() can compute the queue diff (incompatible
   // count) without relying on functional setState semantics — under
@@ -476,11 +464,24 @@ export function useToolbox(): UseToolboxResult {
       return { ok: false, error: 'giftk bridge unavailable' };
     }
     if (jobs.length === 0) return { ok: false, error: 'no jobs to run' };
+    // R-TRIM-CROP-SINGLE — Trim and Crop are inherently single-file
+    // ops. Resolve the active row from selectedJobId (auto-pinned via
+    // the effect below) and dispatch ONE; the rest of the queue stays.
+    const isSingleKind = kind === 'trim' || kind === 'crop';
+    const dispatched: ToolboxJobView[] = isSingleKind
+      ? (() => {
+          const sel = jobs.find((j) => j.id === selectedJobId) ?? jobs[0];
+          return sel ? [sel] : [];
+        })()
+      : jobs;
+    if (dispatched.length === 0) {
+      return { ok: false, error: 'no job selected' };
+    }
     // Promote the renderer-side per-tool params onto each ToolboxJob and
     // override its kind to the currently-selected toolbox kind. The hook
     // intentionally keeps params at the form level so the user can tweak
     // once and apply to all queued files.
-    const payload: ToolboxJob[] = jobs.map((j) => ({
+    const payload: ToolboxJob[] = dispatched.map((j) => ({
       id: j.id,
       kind,
       inputPath: j.inputPath,
@@ -489,8 +490,8 @@ export function useToolbox(): UseToolboxResult {
     ownedIdsRef.current = new Set(payload.map((j) => j.id));
     // Snapshot job rows + params so the history-migration step can read
     // them after we've already removed the row from `jobs`.
-    jobSnapshotsRef.current = new Map(jobs.map((j) => [j.id, j]));
-    paramSnapshotsRef.current = new Map(jobs.map((j) => [j.id, { kind, params }]));
+    jobSnapshotsRef.current = new Map(dispatched.map((j) => [j.id, j]));
+    paramSnapshotsRef.current = new Map(dispatched.map((j) => [j.id, { kind, params }]));
     migratedIdsRef.current = new Set();
     setProgress({});
     setIsRunning(true);
@@ -502,7 +503,7 @@ export function useToolbox(): UseToolboxResult {
       setIsRunning(false);
       return { ok: false, error: (e as Error).message || String(e) };
     }
-  }, [jobs, kind, params]);
+  }, [jobs, kind, params, selectedJobId]);
 
   const cancel = useCallback(async (): Promise<void> => {
     if (typeof window === 'undefined' || !window.giftk) return;
@@ -510,6 +511,26 @@ export function useToolbox(): UseToolboxResult {
       await window.giftk.cancelAll();
     } finally {
       setIsRunning(false);
+    }
+  }, []);
+
+  // R-TRIM-CROP-SINGLE — auto-pin selection: enter trim/crop → pin
+  // jobs[0]; selected row removed → pin new head; non-single kinds → noop.
+  useEffect(() => {
+    if (kind !== 'trim' && kind !== 'crop') return;
+    if (jobs.length === 0) {
+      if (selectedJobId !== null) setSelectedJobId(null);
+      return;
+    }
+    if (selectedJobId === null || !jobs.some((j) => j.id === selectedJobId)) {
+      setSelectedJobId(jobs[0].id);
+    }
+  }, [kind, jobs, selectedJobId]);
+
+  // R-TRIM-CROP-SINGLE — public selector, validates id against queue.
+  const selectJob = useCallback((id: string | null): void => {
+    if (id === null || jobsRef.current.some((j) => j.id === id)) {
+      setSelectedJobId(id);
     }
   }, []);
 
@@ -561,6 +582,8 @@ export function useToolbox(): UseToolboxResult {
     addJobsFromPaths,
     removeJob,
     clearJobs,
+    selectedJobId,
+    selectJob,
     progress,
     lastOutputDir,
     isRunning,
