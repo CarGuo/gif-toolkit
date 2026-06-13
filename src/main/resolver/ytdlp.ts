@@ -28,6 +28,28 @@ import type { ResolvedMedia } from '../../shared/types';
  * YtDlpNotInstalledError so the renderer can show a per-card retry hint.
  */
 
+// R-84-ytdlp-default-headers — Bilibili (and a handful of other CN
+// extractors) reject requests carrying yt-dlp's default User-Agent /
+// missing Referer with HTTP 412 Precondition Failed. We always pass an
+// evergreen desktop Chrome UA, and inject `Referer: https://www.bilibili.com`
+// when the page URL is on a bilibili.com / b23.tv host. See
+// rules/R-84-ytdlp-default-headers.md for full rationale + repro.
+const DEFAULT_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+  '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+function bilibiliReferer(pageUrl: string): string | null {
+  try {
+    const host = new URL(pageUrl).hostname.toLowerCase();
+    if (
+      host === 'bilibili.com' ||
+      host.endsWith('.bilibili.com') ||
+      host === 'b23.tv'
+    ) return 'https://www.bilibili.com';
+  } catch { /* ignore */ }
+  return null;
+}
+
 let cached: YtDlp | null = null;
 // Cached actual binary path (varies by platform: yt-dlp_macos / yt-dlp.exe /
 // yt-dlp / yt-dlp_linux_aarch64 …). Populated by checkYtdlp / ensureYtdlp.
@@ -353,11 +375,17 @@ function getInfoSpawn(bin: string, pageUrl: string, signal?: AbortSignal): Promi
       '--no-warnings',
       '--no-progress',
       '--no-playlist',
-      '--no-call-home',
       '--socket-timeout', '15',
-      '--dump-single-json',
-      pageUrl
+      // R-84-ytdlp-default-headers — see top-of-file comment. Bilibili
+      // returns 412 without a real UA; --no-call-home was also dropped
+      // here because yt-dlp 2026.03 deprecated it and it now emits a
+      // warning into stderr that pollutes our error diagnostics.
+      '--user-agent', DEFAULT_UA,
+      '--dump-single-json'
     ];
+    const ref = bilibiliReferer(pageUrl);
+    if (ref) args.push('--referer', ref);
+    args.push(pageUrl);
     const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let stdoutBuf = '';
     let stderrBuf = '';
@@ -521,6 +549,12 @@ export async function downloadYtdlpSections(
   for (const s of validated) {
     args.push('--download-sections', `*${s.startSec}-${s.endSec}`);
   }
+  // R-84-ytdlp-default-headers — mirror the header injection done in
+  // getInfoSpawn so the section download path also survives Bilibili's
+  // 412 gate. Must come BEFORE the pageUrl positional.
+  args.push('--user-agent', DEFAULT_UA);
+  const ref = bilibiliReferer(pageUrl);
+  if (ref) args.push('--referer', ref);
   args.push(pageUrl);
 
   // eslint-disable-next-line @typescript-eslint/no-var-requires

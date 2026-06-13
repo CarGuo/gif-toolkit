@@ -32,6 +32,18 @@ export interface LineageTreeNode {
   sizeBefore: number | null;
   sizeAfter: number | null;
   sizeRegressionRatio: number | null;
+  /**
+   * R-SIZE-REGRESSION-REVERT-V1 — renderer-only flag indicating the
+   * main process detected a size regression and **auto-reverted** the
+   * step's output to the input bytes (i.e. the step was a no-op for
+   * the user). When true the lineage UI should surface an amber
+   * "auto-reverted" badge instead of the red ⚠️, even though
+   * `sizeRegressionRatio` will be ~1.0 (since after≈before). NOT
+   * persisted to SQLite — sourced from the terminal `done` progress
+   * emit (`TaskProgress.sizeRegression.reverted` or
+   * `substep === 'size-regression-reverted'`).
+   */
+  sizeRegressionReverted?: boolean;
   status: ChainLineageNodeRow['status'];
   createdAt: number;
   doneAt: number | null;

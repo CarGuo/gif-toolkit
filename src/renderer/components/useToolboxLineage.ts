@@ -164,7 +164,8 @@ function buildTerminalRow(
   status: ChainLineageNodeStatus,
   outputPath: string | null,
   sizeAfter: number | null,
-  sizeRegressionRatio: number | null
+  sizeRegressionRatio: number | null,
+  sizeRegressionReverted?: boolean
 ): LineageTreeNode {
   return {
     nodeId: pending.nodeId,
@@ -178,6 +179,7 @@ function buildTerminalRow(
     sizeBefore: pending.sizeBefore,
     sizeAfter,
     sizeRegressionRatio,
+    sizeRegressionReverted,
     status,
     createdAt: pending.createdAt,
     doneAt: Date.now()
@@ -359,8 +361,15 @@ export function useToolboxLineage(): UseToolboxLineageResult {
     const ratio = typeof reg?.ratio === 'number'
       ? reg.ratio
       : (sizeAfter && sizeBefore && sizeBefore > 0 ? sizeAfter / sizeBefore : null);
+    // R-SIZE-REGRESSION-REVERT-V1 — main emits substep
+    // 'size-regression-reverted' (and/or sizeRegression.reverted=true)
+    // when it detected a regression and auto-copied the input as the
+    // output. Surface that as a renderer-only flag so the tree view
+    // can paint an amber "auto-reverted" badge instead of (or before)
+    // the red ⚠️.
+    const reverted = reg?.reverted === true || p.substep === 'size-regression-reverted';
     const doneRow: LineageTreeNode = {
-      ...buildTerminalRow(pending, 'done', out, sizeAfter, ratio),
+      ...buildTerminalRow(pending, 'done', out, sizeAfter, ratio, reverted || undefined),
       sizeBefore
     };
     persistRow(doneRow);
@@ -369,8 +378,9 @@ export function useToolboxLineage(): UseToolboxLineageResult {
     setTree((prev) => prev.map((n) => n.nodeId === pending.nodeId ? doneRow : n));
     setFocusNodeId(pending.nodeId);
     // R-SIZE-REGRESSION-V1 — keep the last frame visible so the row
-    // badge persists across the run.
-    setCurrentProgress(p.sizeRegression ? p : null);
+    // badge persists across the run. Also keep it when the step was
+    // auto-reverted so the progress row's amber badge survives.
+    setCurrentProgress(p.sizeRegression || reverted ? p : null);
     clearInflight();
     pending.resolve(asLineageNode(doneRow));
   }

@@ -266,16 +266,51 @@ export const TaskTable: React.FC<Props> = ({ items, progress, onRetry, onForceAl
             </div>
             <div className={`size`}>
               {p.currentSizeMB ? `${p.currentSizeMB.toFixed(2)} MB` : ''}
-              {p.sizeRegression ? (
-                <span
-                  className="size-regression-warn"
-                  data-testid="task-size-regression-warn"
-                  title={`体积反向增加 ${(((p.sizeRegression.ratio) - 1) * 100).toFixed(1)}%（${(p.sizeRegression.beforeBytes / 1024 / 1024).toFixed(2)} MB → ${(p.sizeRegression.afterBytes / 1024 / 1024).toFixed(2)} MB）— 原文件可能已高度优化，原文件仍保留`}
-                  style={{ marginLeft: 4, cursor: 'help' }}
-                >
-                  ⚠️
-                </span>
-              ) : null}
+              {(() => {
+                // R-SIZE-REGRESSION-REVERT-V1 — reverted (main auto-
+                // copied input as output) takes priority over the raw
+                // ratio>1.05 branch. Ratio will be ~1.0 in that case
+                // so without this check the user sees no signal that
+                // the step was effectively a no-op.
+                const reverted =
+                  p.sizeRegression?.reverted === true ||
+                  p.substep === 'size-regression-reverted';
+                if (reverted) {
+                  return (
+                    <span
+                      className="size-regression-reverted"
+                      data-testid="task-size-regression-reverted"
+                      title="这一步未能减小体积,已自动复制原图作为输出"
+                      style={{
+                        marginLeft: 4,
+                        cursor: 'help',
+                        color: '#b45309',
+                        background: '#fef3c7',
+                        border: '1px solid #fcd34d',
+                        borderRadius: 4,
+                        padding: '0 6px',
+                        fontSize: 11,
+                        fontWeight: 600
+                      }}
+                    >
+                      自动回退
+                    </span>
+                  );
+                }
+                if (p.sizeRegression) {
+                  return (
+                    <span
+                      className="size-regression-warn"
+                      data-testid="task-size-regression-warn"
+                      title={`体积反向增加 ${(((p.sizeRegression.ratio) - 1) * 100).toFixed(1)}%（${(p.sizeRegression.beforeBytes / 1024 / 1024).toFixed(2)} MB → ${(p.sizeRegression.afterBytes / 1024 / 1024).toFixed(2)} MB）— 原文件可能已高度优化，原文件仍保留`}
+                      style={{ marginLeft: 4, cursor: 'help' }}
+                    >
+                      ⚠️
+                    </span>
+                  );
+                }
+                return null;
+              })()}
             </div>
             <div className={`status ${cls}`}>
               <span>{p.status}</span>

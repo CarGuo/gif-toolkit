@@ -180,3 +180,77 @@ describe('ParamForm — smart fps hint (R-COMPRESS-V1 #2)', () => {
     expect(container.textContent).toContain('源 29.97fps');
   });
 });
+
+// ============================================================================
+// P1-2 / R-85 — gif-optimize method picker dropdown cross-field hygiene.
+//
+// setMethod() in ToolboxPanel must (a) clear unrelated params so a stale
+// `lossy=80` from a previous selection doesn't silently leak into the
+// budget pipeline, and (b) seed defaults for whichever fields the new
+// method actually consumes (e.g. switching to budget should auto-seed
+// maxBytes=2MB so the user isn't dropped into an empty form). These
+// tests drive the visible <select> via fireEvent.change to mirror the
+// real renderer path through the SelectField wrapper.
+// ============================================================================
+describe('ParamForm — setMethod budget/lossy cross-field hygiene (P1-2, R-85)', () => {
+  it("switching method from 'lossy' → 'budget' clears lossy and seeds maxBytes=2MB", () => {
+    const prev: ToolboxParams = { method: 'lossy', lossy: 80 };
+    let captured: ToolboxParams | null = null;
+    const setParams = vi.fn((updater: any) => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      captured = next;
+    });
+    const { container } = render(
+      <ParamForm
+        kind="gif-optimize"
+        params={prev}
+        setParams={setParams}
+        mediaInfo={null}
+      />
+    );
+    const select = container.querySelector('select') as HTMLSelectElement;
+    expect(select).not.toBeNull();
+    fireEvent.change(select, { target: { value: 'budget' } });
+    expect(setParams).toHaveBeenCalledTimes(1);
+    expect(captured).not.toBeNull();
+    expect(captured!.method).toBe('budget');
+    // Stale lossy must be wiped — the budget pipeline does its own
+    // method bias and a residual `lossy=80` would mislead the user.
+    expect(captured!.lossy).toBeUndefined();
+    // budget mode seeds a 2 MB default so the NumField below has a
+    // meaningful starting value instead of a placeholder-only blank.
+    expect(captured!.maxBytes).toBe(2 * 1024 * 1024);
+  });
+
+  it("switching method from 'budget' → 'lossy' clears maxBytes (and softMaxBytes) and seeds lossy=80", () => {
+    const prev: ToolboxParams = {
+      method: 'budget',
+      maxBytes: 2 * 1024 * 1024,
+      softMaxBytes: 1024 * 1024
+    };
+    let captured: ToolboxParams | null = null;
+    const setParams = vi.fn((updater: any) => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      captured = next;
+    });
+    const { container } = render(
+      <ParamForm
+        kind="gif-optimize"
+        params={prev}
+        setParams={setParams}
+        mediaInfo={null}
+      />
+    );
+    const select = container.querySelector('select') as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: 'lossy' } });
+    expect(captured).not.toBeNull();
+    expect(captured!.method).toBe('lossy');
+    // Budget knobs must be cleared — otherwise the hasBudget guard in
+    // processor.ts (which dominates method when both are set) would
+    // silently route the next run back into the budget branch.
+    expect(captured!.maxBytes).toBeUndefined();
+    expect(captured!.softMaxBytes).toBeUndefined();
+    // lossy slider gets its conventional 80 default.
+    expect(captured!.lossy).toBe(80);
+  });
+});

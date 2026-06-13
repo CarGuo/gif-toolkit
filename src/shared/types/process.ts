@@ -208,6 +208,16 @@ export interface TaskProgress {
     afterBytes: number;
     /** afterBytes / beforeBytes; always > 1.05 when this field exists. */
     ratio: number;
+    /**
+     * P1-3 — true when the toolbox budget branch explicitly fell back to a
+     * byte-for-byte copy of the input because no produced artefact was
+     * smaller than the source. beforeBytes / afterBytes / ratio are still
+     * filled in (with ratio == 1.0) so existing UI tooltips render
+     * coherent numbers; `reverted` is the dedicated "no benefit" flag the
+     * renderer can branch on for a stronger warning state than the
+     * generic > 1.05 regression badge.
+     */
+    reverted?: boolean;
   };
 }
 

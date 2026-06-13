@@ -54,11 +54,29 @@ const findCallSites = (src: string): CallSite[] => {
   const lines = src.split('\n');
   const sites: CallSite[] = [];
   for (let i = 0; i < lines.length; i++) {
-    // Match both `const result = await compressLoop(` and
-    // `const compressed = await compressLoop(` — every binding form.
-    const m = lines[i].match(/^\s*(?:const|let)\s+(\w+)\s*=\s*await\s+compressLoop\s*\(/);
-    if (!m) continue;
-    const resultVar = m[1];
+    // Two binding forms are accepted:
+    //   1. `const|let X = await (compressLoop|toolboxBudgetCompress)(`
+    //   2. `? await (compressLoop|toolboxBudgetCompress)(`  — ternary arm;
+    //      walk back up to 5 lines to find the enclosing `const|let X =`.
+    const direct = lines[i].match(
+      /^\s*(?:const|let)\s+(\w+)\s*=\s*await\s+(?:compressLoop|toolboxBudgetCompress)\s*\(/
+    );
+    const ternary = !direct && lines[i].match(
+      /^\s*[?:]\s*await\s+(?:compressLoop|toolboxBudgetCompress)\s*\(/
+    );
+    if (!direct && !ternary) continue;
+    let resultVar: string | null = null;
+    if (direct) {
+      resultVar = direct[1];
+    } else {
+      // Ternary arm — walk back up to 30 lines to find the enclosing
+      // `const|let X = <something>` that owns this expression.
+      for (let k = i - 1; k >= Math.max(0, i - 30); k--) {
+        const up = lines[k].match(/^\s*(?:const|let)\s+(\w+)\s*=/);
+        if (up) { resultVar = up[1]; break; }
+      }
+      if (!resultVar) continue;
+    }
     const compressLine = i + 1;
     // Search forward (within 200 lines) for the first copyFile of
     // <resultVar>.finalPath OR the matching allPhasesFailed guard.
@@ -87,12 +105,14 @@ describe('processor.ts — compressLoop fan-out invariants (P1 #6)', () => {
     const src = await fsp.readFile(PROCESSOR_PATH, 'utf8');
     const sites = findCallSites(src);
 
-    // Sanity: the bug report calls out 3 compressLoop sites (regular
-    // GIF, manual reopt, toolbox budget); the audit while writing this
-    // test surfaced 2 more (video→gif segments, toolbox video→gif).
+    // Sanity: 4 compressLoop sites (regular GIF, manual reopt, video→gif
+    // segments, toolbox video→gif fallback) + 2 toolboxBudgetCompress
+    // sites (video→gif budget, gif-optimize budget) = 6 total. The audit
+    // hardened toolboxBudgetCompress to share the same allPhasesFailed
+    // invariant, so both call shapes are policed by this regression.
     // If a future refactor adds another we want this list to grow
     // consciously, not silently.
-    expect(sites.length).toBeGreaterThanOrEqual(5);
+    expect(sites.length).toBeGreaterThanOrEqual(6);
 
     for (const s of sites) {
       // Each site must have BOTH a copy and a guard.
@@ -132,6 +152,11 @@ describe('processor.ts — compressLoop fan-out invariants (P1 #6)', () => {
       const m = line.match(/if\s*\(\s*(\w+)\.allPhasesFailed\s*\)/);
       if (m) guards.push({ line: idx + 1, resultVar: m[1] });
     });
+    // NOTE on counting: there are 6 await sites (see first `it`) but only
+    // 5 distinct `if (X.allPhasesFailed)` lines — the video→gif ternary at
+    // L2477 binds both arms (toolboxBudgetCompress + compressLoop fallback)
+    // to the same `result`, so a single guard at L2522 services both arms.
+    // We therefore assert ≥5 here while sites.length asserts ≥6.
     expect(guards.length).toBeGreaterThanOrEqual(5);
 
     for (const g of guards) {

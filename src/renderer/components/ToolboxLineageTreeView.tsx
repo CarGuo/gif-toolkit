@@ -34,6 +34,7 @@
  *       aborted → #f3f4f6
  *   - line 1 (y=20, fontWeight 600, 12px): KIND_LABELS[kind] ?? kind ?? '原始输入'
  *   - line 2 (y=40, 11px, #666): formatBytes(sizeAfter) [+ ' ⚠️' tspan when sizeRegressionRatio > 1.05]
+ *                                                       [+ ' 自动回退' amber tspan when sizeRegressionReverted, takes priority over ⚠️]
  *   - line 3 (y=58, 10px, #888): localized status word (完成/处理中/失败/已中止)
  *
  * E2E data-testid contract
@@ -41,6 +42,7 @@
  *   - container        : `tb-lineage-tree-view`
  *   - per-node group   : `tb-lineage-tree-node-{nodeId}`     (g element)
  *   - regression badge : `tb-lineage-tree-warn-{nodeId}`     (tspan inside line 2)
+ *   - reverted badge   : `tb-lineage-tree-reverted-{nodeId}` (amber tspan inside line 2, R-SIZE-REGRESSION-REVERT-V1)
  *   - each node g also exposes:
  *       data-status = 'pending' | 'done' | 'failed' | 'aborted'
  *       data-focus  = '1' when focusNodeId === nodeId else '0'
@@ -292,7 +294,9 @@ export function ToolboxLineageTreeView(props: ToolboxLineageTreeViewProps): JSX.
             const kindLabel = n.kind ? (KIND_LABELS[n.kind] ?? n.kind) : '原始输入';
             const sizeText =
               typeof n.sizeAfter === 'number' ? formatBytes(n.sizeAfter) : '';
+            const isReverted = n.sizeRegressionReverted === true;
             const isRegression =
+              !isReverted &&
               typeof n.sizeRegressionRatio === 'number' &&
               n.sizeRegressionRatio > REGRESSION_THRESHOLD;
             return (
@@ -318,7 +322,16 @@ export function ToolboxLineageTreeView(props: ToolboxLineageTreeViewProps): JSX.
                 </text>
                 <text x={10} y={40} fontSize={11} fill="#666">
                   {sizeText}
-                  {isRegression ? (
+                  {isReverted ? (
+                    <tspan
+                      data-testid={`tb-lineage-tree-reverted-${n.nodeId}`}
+                      fill="#b45309"
+                      fontWeight={600}
+                    >
+                      <title>这一步未能减小体积,已自动复制原图作为输出</title>
+                      {' 自动回退'}
+                    </tspan>
+                  ) : isRegression ? (
                     <tspan
                       data-testid={`tb-lineage-tree-warn-${n.nodeId}`}
                     >

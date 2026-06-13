@@ -1039,8 +1039,9 @@ const App: React.FC = () => {
 
   const onManualOptimizeConfirm = useCallback(async (req: ManualOptimizeRequest) => {
     if (!manualOpt) return;
-    const { media, gifPath } = manualOpt;
+    const { media, gifPath, progress: p } = manualOpt;
     setManualOpt(null);
+    const hadForceBypass = Array.isArray(p.phaseFailures) && p.phaseFailures.includes('aspect-ratio-bypass');
     await onProcessOne(media, {
       reoptimizeFromGifPath: gifPath,
       maxBytes: req.maxBytes,
@@ -1055,6 +1056,10 @@ const App: React.FC = () => {
       colorsFloor: req.colorsFloor,
       optimizeLevel: req.optimizeLevel,
       dither: req.dither,
+      // R-XXX — if this task was already force-allowed once (e.g. had
+      // aspect-ratio-bypass in its phaseFailures), don't make the user
+      // click through the spec failure again for a re-optimize.
+      forceAllowSmallSide: hadForceBypass ? true : undefined,
     });
   }, [manualOpt, onProcessOne]);
 

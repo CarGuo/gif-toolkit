@@ -561,6 +561,57 @@ describe('useToolbox', () => {
     expect(fake.db.toolboxHistory.clear).toHaveBeenCalledTimes(1);
   });
 
+  it('R-86 — sticky per-kind params cache survives kind round-trip', async () => {
+    // Regression for R-COMPRESS-V1.1 / R-86: switching kinds used to
+    // overwrite `params` with `defaultParamsFor(k)`, silently discarding
+    // anything the user had just configured. The fix introduces a
+    // ref-backed paramsByKindRef cache so each tool remembers its
+    // last-seen form state for the lifetime of the hook.
+    const { result } = renderHook(() => useToolbox());
+    await flushLoad();
+
+    // 1. Tweak video-to-gif params away from defaults.
+    act(() => {
+      result.current.setParams({ fps: 18, width: 400, engine: 'ffmpeg' });
+    });
+    expect(result.current.params).toEqual({ fps: 18, width: 400, engine: 'ffmpeg' });
+
+    // 2. Switch to gif-optimize and configure budget mode.
+    act(() => {
+      result.current.setKind('gif-optimize');
+    });
+    expect(result.current.kind).toBe('gif-optimize');
+    // Setting budget params (mimics what ToolboxPanel's setMethod would write).
+    act(() => {
+      result.current.setParams({ method: 'budget', maxBytes: 2 * 1024 * 1024 });
+    });
+    expect(result.current.params).toMatchObject({
+      method: 'budget',
+      maxBytes: 2 * 1024 * 1024
+    });
+
+    // 3. Detour through a third kind to prove the cache survives more
+    //    than a single round-trip.
+    act(() => {
+      result.current.setKind('gif-resize');
+    });
+    expect(result.current.params).toEqual({ targetWidth: 480 });
+
+    // 4. Return to gif-optimize → budget selection must be restored.
+    act(() => {
+      result.current.setKind('gif-optimize');
+    });
+    expect(result.current.params.method).toBe('budget');
+    expect(result.current.params.maxBytes).toBe(2 * 1024 * 1024);
+
+    // 5. Return to video-to-gif → original tweaks must be restored.
+    act(() => {
+      result.current.setKind('video-to-gif');
+    });
+    expect(result.current.params.fps).toBe(18);
+    expect(result.current.params.width).toBe(400);
+  });
+
   it('duplicate done events for the same id are idempotent', async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     delete (window as any).giftk;

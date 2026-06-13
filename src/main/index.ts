@@ -657,6 +657,39 @@ async function createWindow(): Promise<void> {
     mainWindow?.show();
   });
 
+  // On macOS: clicking the red close button hides the window + Dock icon
+  // instead of quitting. Since we already put an icon in the top menu bar
+  // (tray), keeping the bottom one in the Dock is redundant. The user can
+  // get the window back via tray "显示主窗" / Cmd+Tab / clicking the Dock
+  // icon (if still visible). We also pair window show/hide with Dock icon
+  // visibility, so when the user closes the last window, the Dock entry
+  // disappears cleanly.
+  if (process.platform === 'darwin') {
+    mainWindow.on('close', (event) => {
+      log('mainWindow close: preventing default, hiding instead');
+      event.preventDefault();
+      mainWindow?.hide();
+    });
+    mainWindow.on('hide', () => {
+      log('mainWindow hidden -> hide Dock icon');
+      try {
+        const dock = (app as unknown as { dock?: { hide: () => void } }).dock;
+        dock?.hide();
+      } catch (e) {
+        log(`dock.hide failed: ${(e as Error).message}`);
+      }
+    });
+    mainWindow.on('show', () => {
+      log('mainWindow shown -> show Dock icon');
+      try {
+        const dock = (app as unknown as { dock?: { show: () => void } }).dock;
+        dock?.show();
+      } catch (e) {
+        log(`dock.show failed: ${(e as Error).message}`);
+      }
+    });
+  }
+
   // Wire the per-session log broadcaster to the new window so live
   // tail updates (`session:log:append` etc.) reach the renderer.
   if (mainWindow) attachSessionLogBroadcast(mainWindow);

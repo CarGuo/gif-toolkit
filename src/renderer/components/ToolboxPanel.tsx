@@ -799,9 +799,24 @@ export function ParamForm({ kind, params, setParams, mediaInfo, inputPath, onTar
 
   const setMethod = useCallback((m: ToolboxOptimizeMethod) => {
     setParams((prev) => {
-      // Reset only fields that don't apply to the new method, so the user
-      // doesn't accidentally carry stale `dropEveryN=2` into a `lossy` run.
+      // P1-2 / R-85 — 切换 method 时清掉互不相关字段,避免 chip 「<2MB」
+      // 选了 budget 又切到 lossy 后 maxBytes 残留误导用户(以为预算还在),
+      // 反向切回 budget 时 lossy/colors/dropEveryN 也应清掉以免单步 picker
+      // 路径误以为用户显式给了 lossy 而绕开 budget 主路。
       const next: ToolboxParams = { ...prev, method: m };
+      if (m !== 'budget') {
+        next.maxBytes = undefined;
+        next.softMaxBytes = undefined;
+      }
+      if (m !== 'lossy' && m !== 'wechat-safe') {
+        next.lossy = undefined;
+      }
+      if (m !== 'color-reduction' && m !== 'color-dither') {
+        next.colors = undefined;
+      }
+      if (m !== 'drop-every-nth') {
+        next.dropEveryN = undefined;
+      }
       if (m === 'lossy') {
         next.lossy = prev.lossy ?? 80;
       }

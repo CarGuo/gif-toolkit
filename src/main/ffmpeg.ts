@@ -855,7 +855,7 @@ export async function gifsicleMethod(
   input: string,
   output: string,
   method: 'lossy' | 'color-reduction' | 'color-dither' | 'drop-every-nth' | 'drop-duplicates' | 'optimize-transparency' | 'wechat-safe',
-  opts: { lossy?: number; colors?: number; dropEveryN?: number; signal?: AbortSignal } = {}
+  opts: { lossy?: number; colors?: number; dropEveryN?: number; optimizeLevel?: GifOptimizeLevel; dither?: GifDither; signal?: AbortSignal } = {}
 ): Promise<void> {
   // R-41 — webp passthrough wrapper, see gifsicleOptimize for the
   // rationale. We route the work into a tmp .gif round-trip so the
@@ -869,21 +869,51 @@ export async function gifsicleMethod(
   const lossy = Number.isFinite(opts.lossy) ? Math.max(0, Math.min(200, Math.floor(opts.lossy as number))) : 80;
   const colors = Number.isFinite(opts.colors) ? Math.max(2, Math.min(256, Math.floor(opts.colors as number))) : 128;
   const dropN = Number.isFinite(opts.dropEveryN) ? Math.max(2, Math.min(10, Math.floor(opts.dropEveryN as number))) : 2;
+  // R-81 alignment — honour the same -O / dither knobs that gifsicleOptimize
+  // already accepts. The method picker used to hard-code -O3 + an implicit
+  // floyd-steinberg dither; this lets explicit-mode users (and the
+  // method-picker branch in processor.ts) cap visual damage / lock the
+  // optimisation level without forking yet another helper.
+  const oLevel: GifOptimizeLevel = opts.optimizeLevel === 1 || opts.optimizeLevel === 2 || opts.optimizeLevel === 3
+    ? opts.optimizeLevel
+    : 3;
+  const oDither: GifDither = opts.dither === 'none' || opts.dither === 'floyd-steinberg' || opts.dither === 'ordered'
+    ? opts.dither
+    : 'floyd-steinberg';
+  const oFlag = `-O${oLevel}`;
+  // Mirror gifsicleOptimize's dither-arg policy: dither only matters when the
+  // palette is reduced (colors < 256). 'none' is a deliberate "off" signal —
+  // pass through with no --dither flag (gifsicle defaults to no dither anyway,
+  // so omitting is equivalent and keeps the argv minimal).
+  const ditherArgFor = (effectiveColors: number): string | null => {
+    if (effectiveColors >= 256) return null;
+    if (oDither === 'none') return null;
+    return oDither === 'ordered' ? '--dither=ordered' : '--dither=floyd-steinberg';
+  };
 
   switch (method) {
     case 'lossy': {
-      const args = ['-O3'];
+      const args = [oFlag];
       if (lossy > 0 && gifsicleSupportsLossy()) args.push(`--lossy=${lossy}`);
       args.push(input, '-o', output);
       await run(gifsicle, args, { signal: opts.signal });
       return;
     }
     case 'color-reduction': {
-      await run(gifsicle, ['-O3', '--colors', String(colors), '--color-method', 'blend-diversity', input, '-o', output], { signal: opts.signal });
+      const args = [oFlag, '--colors', String(colors), '--color-method', 'blend-diversity'];
+      const d = ditherArgFor(colors);
+      if (d) args.push(d);
+      args.push(input, '-o', output);
+      await run(gifsicle, args, { signal: opts.signal });
       return;
     }
     case 'color-dither': {
-      await run(gifsicle, ['-O3', '--colors', String(colors), '--dither', input, '-o', output], { signal: opts.signal });
+      // 'color-dither' is the explicit "I want dithering" picker, so we
+      // honour oDither's choice when set, but default to floyd-steinberg
+      // (the legacy `--dither` bareword) when the caller picked 'none'
+      // here — otherwise the picker becomes a no-op vs. color-reduction.
+      const ditherFlag = oDither === 'ordered' ? '--dither=ordered' : '--dither=floyd-steinberg';
+      await run(gifsicle, [oFlag, '--colors', String(colors), ditherFlag, input, '-o', output], { signal: opts.signal });
       return;
     }
     case 'drop-every-nth': {
@@ -899,7 +929,7 @@ export async function gifsicleMethod(
       for (let i = 0; i < frameCount; i += 1) {
         if (i % dropN === dropN - 1) indices.push(`#${i}`);
       }
-      const args = ['-O3'];
+      const args = [oFlag];
       if (indices.length > 0) {
         args.push('--delete');
         args.push(...indices);
@@ -909,11 +939,11 @@ export async function gifsicleMethod(
       return;
     }
     case 'drop-duplicates': {
-      await run(gifsicle, ['-O3', '--no-extensions', input, '-o', output], { signal: opts.signal });
+      await run(gifsicle, [oFlag, '--no-extensions', input, '-o', output], { signal: opts.signal });
       return;
     }
     case 'optimize-transparency': {
-      await run(gifsicle, ['-O3', '--use-colormap=web', input, '-o', output], { signal: opts.signal });
+      await run(gifsicle, [oFlag, '--use-colormap=web', input, '-o', output], { signal: opts.signal });
       return;
     }
     case 'wechat-safe': {

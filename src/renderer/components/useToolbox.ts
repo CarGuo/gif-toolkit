@@ -176,6 +176,36 @@ const TERMINAL: ReadonlySet<TaskProgress['status']> = new Set([
 export function useToolbox(): UseToolboxResult {
   const [kind, setKindInner] = useState<ToolboxKind>('video-to-gif');
   const [params, setParamsInner] = useState<ToolboxParams>(() => defaultParamsFor('video-to-gif'));
+  // R-COMPRESS-V1.1 / R-86 — sticky per-kind params cache.
+  //
+  // Previously `setKind` reset params to `defaultParamsFor(k)` every
+  // time the user switched tool, which silently discarded any chips /
+  // tweaks the user had just configured (e.g. picking "目标体积 < 2MB"
+  // on gif-optimize, then flipping to gif-resize to peek and back —
+  // the budget selection was gone).
+  //
+  // We now keep one ToolboxParams per ToolboxKind in a ref-backed map
+  // so each tool remembers its last-seen form state for the lifetime
+  // of the hook. A ref (not state) is used on purpose: this cache is
+  // only read inside `setKind` and `applyPreset`; rendering does not
+  // depend on it (the visible `params` state still drives the panel),
+  // so triggering a re-render on every keystroke would be wasted work.
+  // Writes happen in three places: setKind (snapshot prev, restore
+  // next), setParams (mirror live form state) and applyPreset (so a
+  // preset survives a same-session round-trip away and back).
+  const paramsByKindRef = useRef<Partial<Record<ToolboxKind, ToolboxParams>>>({});
+  // Mirror the live `kind` into a ref so `setParams` can synchronously
+  // attribute the new value to the *currently active* tool without
+  // taking a stale closure on `kind` (setParams is a stable useCallback
+  // with [] deps).
+  const kindRef = useRef<ToolboxKind>(kind);
+  kindRef.current = kind;
+  // Seed the cache with the initial tool's params so the first
+  // setKind() away preserves whatever the user touched before
+  // switching (instead of snapshotting `undefined`).
+  if (paramsByKindRef.current[kind] === undefined) {
+    paramsByKindRef.current[kind] = params;
+  }
   const [jobs, setJobs] = useState<ToolboxJobView[]>([]);
   // R-TRIM-CROP-SINGLE — Trim/Crop must operate on exactly one queued
   // file at a time; track via id (not path) to disambiguate duplicates.
@@ -244,7 +274,18 @@ export function useToolbox(): UseToolboxResult {
     }
 
     setKindInner(k);
-    setParamsInner(defaultParamsFor(k));
+    // R-86 — sticky per-kind cache. Snapshot the params the user was
+    // looking at under the *previous* kind, then restore (or seed) the
+    // new kind's slot. We read prev via the functional setParamsInner
+    // signature so we don't depend on a stale `params` closure.
+    setParamsInner((prevParams) => {
+      const prevKind = kindRef.current;
+      paramsByKindRef.current[prevKind] = prevParams;
+      const cached = paramsByKindRef.current[k];
+      const nextParams = cached !== undefined ? cached : defaultParamsFor(k);
+      paramsByKindRef.current[k] = nextParams;
+      return nextParams;
+    });
     // R-38 — keep already-queued jobs across kind switches whenever the
     // new kind's input-extension whitelist is compatible. Previously we
     // wiped jobs unconditionally, which felt punitive when a user just
@@ -257,7 +298,17 @@ export function useToolbox(): UseToolboxResult {
 
   const setParams = useCallback(
     (p: ToolboxParams | ((prev: ToolboxParams) => ToolboxParams)): void => {
-      setParamsInner((prev) => (typeof p === 'function' ? (p as (x: ToolboxParams) => ToolboxParams)(prev) : p));
+      setParamsInner((prev) => {
+        const next = typeof p === 'function'
+          ? (p as (x: ToolboxParams) => ToolboxParams)(prev)
+          : p;
+        // R-86 — mirror the live form value into the per-kind cache so
+        // a subsequent setKind() round-trip restores exactly what the
+        // user last saw. Attribute to `kindRef.current` (not a stale
+        // closure on `kind`) because setParams is a stable callback.
+        paramsByKindRef.current[kindRef.current] = next;
+        return next;
+      });
     },
     []
   );
@@ -558,6 +609,11 @@ export function useToolbox(): UseToolboxResult {
       if (!allowed.has(ext)) return;
       setKindInner(nextKind);
       setParamsInner(nextParams);
+      // R-86 — a preset click means "I want exactly this config for
+      // this tool"; record it in the sticky cache so that a subsequent
+      // setKind() away-and-back doesn't silently regress to either the
+      // pre-preset chip selection or the kind's static defaults.
+      paramsByKindRef.current[nextKind] = nextParams;
       setProgress({});
       setLastOutputDir(null);
       setJobs([

@@ -753,6 +753,357 @@ async function compressLoop(
   };
 }
 
+/* ----------------------------------------------------------------------
+ * toolboxBudgetCompress — ezgif-style "shrink until it fits" loop.
+ *
+ * Why a SEPARATE function rather than reusing compressLoop?
+ *   compressLoop is the main pipeline's converger and bakes in an
+ *   "aspect-ratio-preserving short side >= minSize" invariant (HARD_MIN_SIZE
+ *   = 240, default options.minSize = 450). For a 720x1280 source that
+ *   means Phase C's longSideFloor is
+ *       max(450, ceil(1280 * 450 / 720)) = 800
+ *   which equals the original long side — Phase C therefore CANNOT
+ *   shrink further. Real-world users dropping an 18MB phone GIF into the
+ *   toolbox and asking for "<= 2MB" then watch the loop give up with
+ *   "still 18MB after every phase". That is the exact ezgif use-case
+ *   the toolbox claims to support.
+ *
+ *   toolboxBudgetCompress deliberately drops the minSize=450 floor and
+ *   only enforces an absolute 200px long-side safety net. It is also
+ *   intentionally MUCH simpler than compressLoop: 5 iterations of
+ *   "scale by sqrt(target/current), pick lossy from size ratio, run one
+ *   gifsicle pass" plus one aggressive last-resort. Convergence beats
+ *   sophistication when the user has already picked a hard byte budget.
+ *
+ *   See:
+ *     R-83-toolbox-budget-ignores-minsize  — the rule that explains why
+ *       this branch is allowed to violate the global minSize=450 floor.
+ *     SC-XX-budget-chip-must-converge      — scenario: dragging a large
+ *       phone GIF into the toolbox with "<= 2MB" must produce a file
+ *       <= 2MB OR the loop must report "reverted" (output bigger than
+ *       input → caller copies the original back so the chain can
+ *       continue with the unchanged source).
+ * -------------------------------------------------------------------- */
+
+interface ToolboxBudgetResult {
+  finalPath: string;
+  sizeMB: number;
+  width: number;
+  given: boolean;
+  phaseFailures: string[];
+  allPhasesFailed: boolean;
+  /** True iff the best artefact we produced was >= the input size, so the
+   *  caller fell back to a copy of the input. Mirrors ezgif's "no benefit"
+   *  outcome — the toolbox surfaces this so the UI can warn the user. */
+  reverted: boolean;
+  /**
+   * P0-3 / P1-1 — true when the best artefact is <= the soft cap (the
+   * "best" target, derived from `opts.softMaxBytes`). Implies the hard cap
+   * was also met. When `softMaxBytes` is unset / equals hard, this collapses
+   * to "we met the hard cap" — i.e. true iff `given === false`.
+   */
+  reachedSoft: boolean;
+}
+
+async function toolboxBudgetCompress(
+  inputGif: string,
+  workDir: string,
+  baseName: string,
+  opts: ProcessOptions,
+  emit: CompressEmit,
+  signal?: AbortSignal
+): Promise<ToolboxBudgetResult> {
+  const TOTAL_STEPS = 7; // probe + up to 5 rounds + last-resort
+  let stepCounter = 0;
+  const phaseFailures: string[] = [];
+  const ABSOLUTE_MIN_SIDE = 200;
+
+  const recordPhaseFailure = (phase: string, err: unknown): void => {
+    const msg = (err as Error)?.message || String(err);
+    const short = msg.length > 200 ? `${msg.slice(0, 200)}…` : msg;
+    phaseFailures.push(`${phase}: ${short}`);
+    log(`toolboxBudgetCompress ${phase} failed: ${short}`);
+    emit({
+      message: `${phase} failed (continuing)`,
+      percent: Math.min(95, 60 + stepCounter * 5),
+      substep: 'phase-failed',
+      stepIndex: ++stepCounter,
+      totalSteps: TOTAL_STEPS,
+      detail: short
+    });
+  };
+
+  // ---------- Phase 0: probe ----------
+  let origW = 0;
+  let origH = 0;
+  try {
+    const info = await probe(inputGif);
+    origW = info.width || 0;
+    origH = info.height || 0;
+  } catch (e) {
+    recordPhaseFailure('probe', e);
+  }
+
+  const longestSide = Math.max(origW, origH);
+  const initialSize = await statSizeMB(inputGif);
+  const hardMB = opts.maxBytes / (1024 * 1024);
+  // P0-3 / P1-1 — soft cap. compressLoop (line ~285) computes this exact
+  // expression; we mirror it so a chained pipeline that uses both functions
+  // gets identical convergence targets. `softMaxBytes` may be 0 / undefined /
+  // greater than hard — clamp to [0.1, hardMB] for sanity.
+  const softMB = Math.max(0.1, Math.min(hardMB, opts.softMaxBytes / (1024 * 1024)));
+  const hasDistinctSoft = softMB < hardMB - 1e-6;
+  // Back-compat alias: most of the legacy code below referred to a single
+  // `targetMB`. We keep the variable name pointing at the hard cap (the
+  // "must fit" target) because the previous behaviour only honoured that
+  // value. The soft cap is consulted explicitly at the early-stop sites.
+  const targetMB = hardMB;
+
+  emit({
+    message: 'probing initial size',
+    percent: 30,
+    substep: 'probing',
+    stepIndex: ++stepCounter,
+    totalSteps: TOTAL_STEPS,
+    detail: `${origW}x${origH} -> ${initialSize.toFixed(2)}MB (→soft=${softMB.toFixed(2)}MB / hard=${hardMB.toFixed(2)}MB)`,
+    currentSizeMB: initialSize
+  });
+
+  // Already small enough: return input as-is (no copy here; caller copies
+  // to outputBaseDir for both the under-target and reverted code paths).
+  if (initialSize <= targetMB) {
+    return {
+      finalPath: inputGif,
+      sizeMB: initialSize,
+      width: origW,
+      given: false,
+      phaseFailures,
+      allPhasesFailed: false,
+      reverted: false,
+      reachedSoft: initialSize <= softMB
+    };
+  }
+
+  const widthForSide = (side: number): number => {
+    if (longestSide <= 0 || origW <= 0) return side;
+    return Math.max(1, Math.round(origW * (side / longestSide)));
+  };
+
+  const pickLossy = (sizeRatio: number): number => {
+    if (sizeRatio > 4) return 180;
+    if (sizeRatio > 2.5) return 150;
+    if (sizeRatio > 1.6) return 120;
+    if (sizeRatio > 1.2) return 90;
+    return 60;
+  };
+
+  let bestPath = inputGif;
+  let bestSize = initialSize;
+  let bestWidth = origW;
+  let producedAny = false;
+  // P0-3 — once we've produced any artefact <= hardMB, subsequent rounds
+  // start aiming at softMB (the "best" target). chooseCompressionTargetMB
+  // is the shared selector so behaviour matches compressLoop.
+  let hasReachedHard = false;
+
+  let curSrc = inputGif;
+  let curSide = longestSide > 0 ? longestSide : ABSOLUTE_MIN_SIDE;
+  let curSize = initialSize;
+
+  const MAX_ROUNDS = 5;
+  for (let round = 1; round <= MAX_ROUNDS; round += 1) {
+    checkCancel(signal);
+    const { targetMB: roundTargetMB, tier: roundTier } = chooseCompressionTargetMB(
+      hasReachedHard,
+      hardMB,
+      softMB
+    );
+    const ratioRaw = Math.sqrt(roundTargetMB / Math.max(0.001, curSize));
+    const ratio = Math.max(0.4, Math.min(0.95, ratioRaw));
+    const nextSideRaw = Math.floor(curSide * ratio);
+    const nextSide = Math.max(ABSOLUTE_MIN_SIDE, nextSideRaw);
+    const nextWidth = widthForSide(nextSide);
+    const lossy = pickLossy(curSize / Math.max(0.001, roundTargetMB));
+
+    const resized = path.join(workDir, `${baseName}.tb.r${round}.s${nextSide}.gif`);
+    const optimized = path.join(workDir, `${baseName}.tb.r${round}.s${nextSide}.l${lossy}.gif`);
+
+    emit({
+      message: `round ${round}/${MAX_ROUNDS}: shrink to long=${nextSide} lossy=${lossy} (→${roundTier}=${roundTargetMB.toFixed(2)}MB)`,
+      percent: Math.min(90, 40 + round * 10),
+      substep: 'shrinking',
+      stepIndex: ++stepCounter,
+      totalSteps: TOTAL_STEPS,
+      detail: `curSize=${curSize.toFixed(2)}MB →soft=${softMB.toFixed(2)}MB / hard=${hardMB.toFixed(2)}MB ratio=${ratio.toFixed(3)} w=${nextWidth}`,
+      currentSizeMB: curSize
+    });
+
+    try {
+      await imageResizeKeepAspect(curSrc, resized, nextWidth, signal);
+    } catch (e) {
+      if (isAbortError(e)) throw new CancelledError();
+      recordPhaseFailure(`round-${round}-resize`, e);
+      continue;
+    }
+
+    try {
+      await gifsicleOptimize(resized, optimized, lossy, 256, signal);
+    } catch (e) {
+      if (isAbortError(e)) throw new CancelledError();
+      recordPhaseFailure(`round-${round}-gifsicle`, e);
+      continue;
+    }
+
+    const outSize = await statSizeMB(optimized);
+    producedAny = true;
+    if (outSize < bestSize) {
+      bestPath = optimized;
+      bestSize = outSize;
+      bestWidth = nextWidth;
+    }
+    emit({
+      message: `round ${round} done: ${outSize.toFixed(2)}MB (→soft=${softMB.toFixed(2)}MB / hard=${hardMB.toFixed(2)}MB)`,
+      percent: Math.min(92, 45 + round * 10),
+      substep: 'round-done',
+      stepIndex: ++stepCounter,
+      totalSteps: TOTAL_STEPS,
+      detail: `long=${nextSide} lossy=${lossy} -> ${outSize.toFixed(2)}MB`,
+      currentSizeMB: outSize
+    });
+
+    // P0-3 / P1-1 — two-tier early stop. When soft != hard we first try
+    // to undercut softMB (cheapest exit, gives the user the "best" file);
+    // failing that, undercutting hardMB is also a valid exit because that
+    // was the user's "must fit" budget. When soft == hard the soft check
+    // collapses into the hard check (one comparison, identical outcome).
+    if (hasDistinctSoft && outSize <= softMB) {
+      return {
+        finalPath: optimized,
+        sizeMB: outSize,
+        width: nextWidth,
+        given: false,
+        phaseFailures,
+        allPhasesFailed: false,
+        reverted: false,
+        reachedSoft: true
+      };
+    }
+    if (outSize <= hardMB) {
+      // Mark hard as reached so the next round (if any) aims at soft.
+      hasReachedHard = true;
+      // When soft == hard, hitting hard is the only success criterion;
+      // exit immediately like before. Otherwise keep looping so we can
+      // try to also undercut soft within MAX_ROUNDS budget.
+      if (!hasDistinctSoft) {
+        return {
+          finalPath: optimized,
+          sizeMB: outSize,
+          width: nextWidth,
+          given: false,
+          phaseFailures,
+          allPhasesFailed: false,
+          reverted: false,
+          reachedSoft: true
+        };
+      }
+    }
+
+    curSrc = optimized;
+    curSide = nextSide;
+    curSize = outSize;
+    // If we've already hit the absolute floor and still missed, no point
+    // looping with identical dimensions — bail to last-resort.
+    if (nextSide <= ABSOLUTE_MIN_SIDE) break;
+  }
+
+  // ---------- Last-resort aggressive pass ----------
+  checkCancel(signal);
+  const lastSide = ABSOLUTE_MIN_SIDE;
+  const lastWidth = widthForSide(lastSide);
+  const lastOut = path.join(workDir, `${baseName}.tb.last.s${lastSide}.l200.c64.gif`);
+  emit({
+    message: `last-resort: long=${lastSide} lossy=200 colors=64`,
+    percent: 95,
+    substep: 'last-resort',
+    stepIndex: ++stepCounter,
+    totalSteps: TOTAL_STEPS,
+    detail: `→soft=${softMB.toFixed(2)}MB / hard=${hardMB.toFixed(2)}MB still missed (best ${bestSize.toFixed(2)}MB)`,
+    currentSizeMB: bestSize
+  });
+  try {
+    const lastResized = path.join(workDir, `${baseName}.tb.last.s${lastSide}.gif`);
+    await imageResizeKeepAspect(bestPath, lastResized, lastWidth, signal);
+    await gifsicleOptimize(lastResized, lastOut, 200, 64, signal);
+    const lastSize = await statSizeMB(lastOut);
+    producedAny = true;
+    if (lastSize < bestSize) {
+      bestPath = lastOut;
+      bestSize = lastSize;
+      bestWidth = lastWidth;
+    }
+    emit({
+      message: `last-resort done: ${lastSize.toFixed(2)}MB`,
+      percent: 97,
+      substep: 'last-resort-done',
+      stepIndex: ++stepCounter,
+      totalSteps: TOTAL_STEPS,
+      detail: `long=${lastSide} lossy=200 colors=64 -> ${lastSize.toFixed(2)}MB`,
+      currentSizeMB: lastSize
+    });
+  } catch (e) {
+    if (isAbortError(e)) throw new CancelledError();
+    recordPhaseFailure('last-resort', e);
+  }
+
+  const allPhasesFailed = !producedAny;
+  const reverted = allPhasesFailed || bestSize >= initialSize;
+
+  if (reverted) {
+    // Caller expects a path it can copy from. Materialise the input as
+    // the "fallback artefact" inside workDir so downstream chain steps
+    // see a stable file, not the original source path the user dragged in.
+    const revertOut = path.join(workDir, `${baseName}.tb.reverted.gif`);
+    try {
+      await fsp.copyFile(inputGif, revertOut);
+      return {
+        finalPath: revertOut,
+        sizeMB: initialSize,
+        width: origW,
+        given: true,
+        phaseFailures,
+        allPhasesFailed,
+        reverted: true,
+        reachedSoft: false
+      };
+    } catch (e) {
+      recordPhaseFailure('revert-copy', e);
+      // Fall through with inputGif directly; caller's copyFile will still
+      // succeed off the original source path.
+      return {
+        finalPath: inputGif,
+        sizeMB: initialSize,
+        width: origW,
+        given: true,
+        phaseFailures,
+        allPhasesFailed,
+        reverted: true,
+        reachedSoft: false
+      };
+    }
+  }
+
+  return {
+    finalPath: bestPath,
+    sizeMB: bestSize,
+    width: bestWidth,
+    given: bestSize > hardMB,
+    phaseFailures,
+    allPhasesFailed: false,
+    reverted: false,
+    reachedSoft: bestSize <= softMB
+  };
+}
+
 /* ----------------------- Thumbnail prefetch ----------------------- */
 
 const THUMB_CACHE_MAX = 200;
@@ -2114,26 +2465,56 @@ async function processToolboxJob({ job, outputBaseDir, emit, signal, batchTaken 
         message: 'optimizing gif',
         elapsedMs: elapsed()
       });
-      const result = await compressLoop(
-        tmpGif,
-        work,
-        inputStem,
-        opts,
-        (info2) =>
-          emit({
-            taskId: job.id,
-            status: 'compressing',
-            percent: Math.min(95, info2.percent),
-            substep: info2.substep,
-            stepIndex: info2.stepIndex,
-            totalSteps: info2.totalSteps,
-            detail: info2.detail,
-            currentSizeMB: info2.currentSizeMB,
-            message: info2.message,
-            elapsedMs: elapsed()
-          }),
-        signal
-      );
+      // R-83-toolbox-budget-ignores-minsize / R-87-video-to-gif-also-budget —
+      // 当用户在 toolbox video→gif 路径显式给定 maxBytes 时，跳过
+      // compressLoop（其 minSize=450 floor 会让 1080×1920 这类竖屏
+      // 视频在 Phase C 算出 longSideFloor=800 而无法继续缩边），
+      // 改走 toolboxBudgetCompress 的 ezgif 风格 "shrink-until-it-fits"
+      // 循环，与 gif-optimize budget 分支保持同一根因修复。
+      // 未显式指定 maxBytes 时维持现状：compressLoop 走 DEFAULT_OPTIONS
+      // 的 4MB hard / 2MB soft，保留对称收敛行为。
+      const userBudget = typeof job.params.maxBytes === 'number';
+      const result = userBudget
+        ? await toolboxBudgetCompress(
+            tmpGif,
+            work,
+            inputStem,
+            opts,
+            (info2) =>
+              emit({
+                taskId: job.id,
+                status: 'compressing',
+                percent: Math.min(95, info2.percent),
+                substep: info2.substep,
+                stepIndex: info2.stepIndex,
+                totalSteps: info2.totalSteps,
+                detail: info2.detail,
+                currentSizeMB: info2.currentSizeMB,
+                message: info2.message,
+                elapsedMs: elapsed()
+              }),
+            signal
+          )
+        : await compressLoop(
+            tmpGif,
+            work,
+            inputStem,
+            opts,
+            (info2) =>
+              emit({
+                taskId: job.id,
+                status: 'compressing',
+                percent: Math.min(95, info2.percent),
+                substep: info2.substep,
+                stepIndex: info2.stepIndex,
+                totalSteps: info2.totalSteps,
+                detail: info2.detail,
+                currentSizeMB: info2.currentSizeMB,
+                message: info2.message,
+                elapsedMs: elapsed()
+              }),
+            signal
+          );
       // P1 (#6) FIX (extension to the toolbox video→gif path) — same
       // contract: when every compress phase failed, refuse to copy
       // the un-compressed input into the output dir and emit failed
@@ -2239,15 +2620,22 @@ async function processToolboxJob({ job, outputBaseDir, emit, signal, batchTaken 
 
   if (job.kind === 'gif-optimize') {
     // Three execution modes (R-35 #2):
-    //   (a) explicit `method` picker — single-axis gifsicle pass via
-    //       gifsicleMethod (lossy / colors / drop frames / dedupe / etc).
-    //   (b) explicit lossy + colors pair (legacy explicit mode) when no
-    //       `method` was set — single gifsicle --lossy=N --colors=K pass.
-    //   (c) iterative compressLoop when user supplied size budget
-    //       — that's the "shrink to <= 2MB" autopilot mode.
-    // We pick based on which fields the user actually filled in. The
-    // method picker takes precedence over both legacy fields because
-    // it's the most explicit user intent.
+    //   (a) iterative toolboxBudgetCompress when the user declared a byte
+    //       budget (maxBytes / softMaxBytes) OR explicitly picked method
+    //       'budget' — that's the "shrink to <= 2MB" autopilot mode.
+    //   (b) explicit `method` picker (lossy / colors / drop frames / dedupe
+    //       / etc) — single-axis gifsicle pass via gifsicleMethod.
+    //   (c) explicit lossy + colors pair (legacy explicit mode) — single
+    //       gifsicle --lossy=N --colors=K pass.
+    //   (d) fallthrough: budget mode with the default budget knobs.
+    // R-COMPRESS-V1.1 / R-85 / R-05 — **byte budget dominates single-step
+    // algorithm selection.** If the user said "must be ≤ 2MB", we honour
+    // that even when they also accidentally left an old `method='lossy'`
+    // selection sitting around. A method picker that produces a 5MB
+    // artefact when a 2MB cap is in effect is a worse failure than the
+    // budget loop running with a slightly less-aggressive method bias —
+    // so hasBudget wins over hasMethod. The two legacy fields keep their
+    // relative priority below the budget branch.
     const hasMethod = typeof job.params.method === 'string';
     const hasExplicit = typeof job.params.lossy === 'number' || typeof job.params.colors === 'number';
     const hasBudget = typeof job.params.maxBytes === 'number' || typeof job.params.softMaxBytes === 'number';
@@ -2256,21 +2644,38 @@ async function processToolboxJob({ job, outputBaseDir, emit, signal, batchTaken 
     // transparently round-trip through a tmp .gif when needed.
     const optOutExt = path.extname(job.inputPath).toLowerCase() || '.gif';
 
-    if (hasMethod && job.params.method !== 'budget') {
+    // P0-2 — hasBudget / method==='budget' short-circuits both legacy
+    // single-pass branches. Drop through to the budget block below.
+    const goBudget = hasBudget || job.params.method === 'budget';
+
+    if (!goBudget && hasMethod) {
       const method = job.params.method as Exclude<NonNullable<ToolboxParams['method']>, 'budget'>;
       const lossy = job.params.lossy ?? 80;
       const colors = job.params.colors ?? 128;
       const dropEveryN = job.params.dropEveryN ?? 2;
+      // P0-5 — surface -O / dither user knobs into the method picker as
+      // well; previously gifsicleMethod hard-coded -O3 + floyd-steinberg,
+      // which meant the renderer's "no dither" / "-O1" selections were
+      // silently ignored when the user also picked a method.
+      const oLevel = opts.optimizeLevel ?? 3;
+      const oDither = opts.dither ?? 'floyd-steinberg';
       emit({
         taskId: job.id,
         status: 'compressing',
         percent: 30,
         substep: 'optimizing',
-        message: `gifsicle method=${method}`,
+        message: `gifsicle method=${method} -O${oLevel} dither=${oDither}`,
         elapsedMs: elapsed()
       });
       const finalOut = path.join(outputBaseDir, fileNameFor(fakeMedia, optOutExt, batchTaken));
-      await gifsicleMethod(job.inputPath, finalOut, method, { lossy, colors, dropEveryN, signal });
+      await gifsicleMethod(job.inputPath, finalOut, method, {
+        lossy,
+        colors,
+        dropEveryN,
+        optimizeLevel: oLevel,
+        dither: oDither,
+        signal
+      });
       const sizeMB = await statSizeMB(finalOut);
       emit({
         taskId: job.id,
@@ -2284,7 +2689,7 @@ async function processToolboxJob({ job, outputBaseDir, emit, signal, batchTaken 
       return;
     }
 
-    if (!hasMethod && hasExplicit && !hasBudget) {
+    if (!goBudget && !hasMethod && hasExplicit) {
       const lossy = job.params.lossy ?? 0;
       const colors = job.params.colors ?? 256;
       // R-81 — explicit one-shot also honours -O / dither knobs.
@@ -2315,6 +2720,10 @@ async function processToolboxJob({ job, outputBaseDir, emit, signal, batchTaken 
       });
       return;
     }
+    // Budget branch (default fallthrough). Captures the user's source
+    // bytes up-front so the reverted-emit can attach a coherent
+    // sizeRegression record without re-statting after the in-place copy.
+    const inputBytes = Math.round((await statSizeMB(job.inputPath)) * 1024 * 1024);
     emit({
       taskId: job.id,
       status: 'compressing',
@@ -2323,7 +2732,12 @@ async function processToolboxJob({ job, outputBaseDir, emit, signal, batchTaken 
       message: 'optimizing gif (size budget)',
       elapsedMs: elapsed()
     });
-    const result = await compressLoop(
+    // R-83-toolbox-budget-ignores-minsize — toolbox 「按目标体积优化」
+    // 走独立的 toolboxBudgetCompress，绕开 compressLoop 里
+    // minSize=450 的硬下界，避免 720x1280 这类竖屏 GIF 在 Phase C
+    // 算出 longSideFloor=800 而无法继续缩边的死局。compressLoop 本身
+    // 不动，其他路径继续依赖它的对称收敛行为。
+    const result = await toolboxBudgetCompress(
       job.inputPath,
       work,
       inputStem,
@@ -2367,6 +2781,49 @@ async function processToolboxJob({ job, outputBaseDir, emit, signal, batchTaken 
     }
     const finalOut = path.join(outputBaseDir, fileNameFor(fakeMedia, '.opt.gif', batchTaken));
     await fsp.copyFile(result.finalPath, finalOut);
+    if (result.reverted) {
+      // R-83 / P1-3 — toolbox budget run produced an artefact >= input
+      // size; we copied the original back so the chain can keep going,
+      // but surface both a distinct substep AND a sizeRegression record
+      // (ratio = 1.0, reverted = true) so the UI can render the dedicated
+      // "no benefit" warning state instead of just the substep tag.
+      emit({
+        taskId: job.id,
+        status: 'done',
+        percent: 100,
+        substep: 'size-regression-reverted',
+        outputs: [finalOut],
+        currentSizeMB: result.sizeMB,
+        phaseFailures: result.phaseFailures.length > 0 ? result.phaseFailures : undefined,
+        sizeRegression: {
+          beforeBytes: inputBytes,
+          afterBytes: inputBytes,
+          ratio: 1.0,
+          reverted: true
+        },
+        message: `gif optimize: 产物比原图大,已回退原图 (${result.sizeMB.toFixed(2)}MB)`,
+        elapsedMs: elapsed()
+      });
+      return;
+    }
+    if (result.given) {
+      // P1-5 — produced an artefact smaller than input but still over the
+      // hard cap. Surface a distinct substep + message so the UI can show
+      // "未达目标" without confusing it with a normal success.
+      const hardMB = opts.maxBytes / (1024 * 1024);
+      emit({
+        taskId: job.id,
+        status: 'done',
+        percent: 100,
+        substep: 'hard-target-missed',
+        outputs: [finalOut],
+        currentSizeMB: result.sizeMB,
+        phaseFailures: result.phaseFailures.length > 0 ? result.phaseFailures : undefined,
+        message: `gif optimized (${result.sizeMB.toFixed(2)}MB · 未达目标 ≤${hardMB.toFixed(1)}MB)`,
+        elapsedMs: elapsed()
+      });
+      return;
+    }
     emit({
       taskId: job.id,
       status: 'done',

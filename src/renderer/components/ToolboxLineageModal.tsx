@@ -460,7 +460,9 @@ export function ToolboxLineageModal(props: ToolboxLineageModalProps): JSX.Elemen
             in flight; cleared automatically on done/failed/cancelled
             via the hook's currentProgress lifecycle. See
             ToolboxLineageProgress.tsx for the badge/bar/detail markup. */}
-        {lineage.isRunning || lineage.currentProgress?.sizeRegression ? (
+        {lineage.isRunning
+          || lineage.currentProgress?.sizeRegression
+          || lineage.currentProgress?.substep === 'size-regression-reverted' ? (
           <LineageProgressRow progress={lineage.currentProgress} />
         ) : null}
 
