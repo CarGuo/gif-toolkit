@@ -1,7 +1,14 @@
 import path from 'path';
 import { promises as fsp } from 'fs';
+import { spawn } from 'child_process';
 import { app } from 'electron';
-import { YtDlp, helpers, type VideoInfo, type VideoFormat } from 'ytdlp-nodejs';
+import { helpers, type VideoInfo, type VideoFormat } from 'ytdlp-nodejs';
+// R-84 — all `getInfo`/`download` work goes through getInfoSpawn /
+// downloadYtdlpSections (raw spawn) so DEFAULT_UA + bilibili Referer are
+// guaranteed on the command line. The `ytdlp-nodejs` YtDlp class is
+// intentionally NOT instantiated anywhere in this module — using its
+// `getInfoAsync()` would silently drop the headers and re-introduce
+// HTTP 412 for the R-14 embed-resolve flow.
 import { log } from '../logger';
 import { isPrivateHost } from '../helpers';
 import { sanitizeAllowlistedHeaders } from '../../shared/headers';
@@ -34,11 +41,14 @@ import type { ResolvedMedia } from '../../shared/types';
 // evergreen desktop Chrome UA, and inject `Referer: https://www.bilibili.com`
 // when the page URL is on a bilibili.com / b23.tv host. See
 // rules/R-84-ytdlp-default-headers.md for full rationale + repro.
-const DEFAULT_UA =
+// R-84 — exported for ytdlpHeaders.test.ts regression. The test pins the
+// exact UA string + bilibili host matcher so a future refactor cannot
+// silently drop them and re-introduce the HTTP 412 path the rule fixed.
+export const DEFAULT_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
   '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-function bilibiliReferer(pageUrl: string): string | null {
+export function bilibiliReferer(pageUrl: string): string | null {
   try {
     const host = new URL(pageUrl).hostname.toLowerCase();
     if (
@@ -50,7 +60,6 @@ function bilibiliReferer(pageUrl: string): string | null {
   return null;
 }
 
-let cached: YtDlp | null = null;
 // Cached actual binary path (varies by platform: yt-dlp_macos / yt-dlp.exe /
 // yt-dlp / yt-dlp_linux_aarch64 …). Populated by checkYtdlp / ensureYtdlp.
 let cachedBinPath: string | null = null;
@@ -213,8 +222,8 @@ async function readVersion(bin: string): Promise<string | undefined> {
   return new Promise((resolve) => {
     try {
       // Lazy import to avoid pulling child_process at module load time.
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const { spawn } = require('child_process') as typeof import('child_process');
+      // R-84 / test-mockability — use the top-of-file spawn import so
+      // vitest module mocks intercept; runtime requires no change.
       const child = spawn(bin, ['--version'], { stdio: ['ignore', 'pipe', 'ignore'] });
       let out = '';
       child.stdout.on('data', (c: Buffer) => { out += c.toString(); });
@@ -280,20 +289,10 @@ export async function ensureYtdlp(): Promise<string> {
     if (process.platform !== 'win32') {
       try { await fsp.chmod(finalPath, 0o755); } catch { /* ignore */ }
     }
-    cached = null;
     log(`yt-dlp downloaded: ${finalPath}`);
     return finalPath;
   })().finally(() => { ensureInflight = null; });
   return ensureInflight;
-}
-
-function getInstance(bin: string): YtDlp {
-  // Always rebuild if the binary path changed (e.g. ensure() just downloaded).
-  if (!cached || (cached as unknown as { _binaryPath?: string })._binaryPath !== bin) {
-    cached = new YtDlp({ binaryPath: bin });
-    (cached as unknown as { _binaryPath?: string })._binaryPath = bin;
-  }
-  return cached;
 }
 
 /**
@@ -363,14 +362,16 @@ export function ensurePublicHttp(u: string): string {
  * cancel". This function fixes it by spawning the binary directly,
  * tracking the child, and SIGKILL'ing it the moment the signal fires.
  */
-function getInfoSpawn(bin: string, pageUrl: string, signal?: AbortSignal): Promise<VideoInfo> {
+// R-84 — exported so ytdlpHeaders.test.ts can stub `spawn` and assert
+// `--user-agent <DEFAULT_UA>` + `--referer <bilibili>` end up on the
+// child-process argv without needing the full `ensureYtdlp()` bootstrap.
+export function getInfoSpawn(bin: string, pageUrl: string, signal?: AbortSignal): Promise<VideoInfo> {
   return new Promise<VideoInfo>((resolve, reject) => {
     if (signal?.aborted) {
       reject(new Error('aborted'));
       return;
     }
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { spawn } = require('child_process') as typeof import('child_process');
+    // R-84 / test-mockability — module-scope spawn so vitest mocks intercept.
     const args = [
       '--no-warnings',
       '--no-progress',
@@ -445,18 +446,15 @@ export async function resolveDirectUrl(pageUrl: string, signal?: AbortSignal): P
   } catch (e) {
     throw new YtDlpNotInstalledError(ytdlpBinaryPath(), (e as Error).message);
   }
-  // R-53 — when a signal is provided, drive yt-dlp via spawn so abort
-  // actually kills the child. Otherwise fall back to the ytdlp-nodejs
-  // wrapper for the no-signal callers (resolveEmbed in the existing
-  // R-14 path keeps using getInstance() so its connection caching
-  // and diagnostics survive untouched).
-  let info: VideoInfo;
-  if (signal) {
-    info = await getInfoSpawn(bin, pageUrl, signal);
-  } else {
-    const yt = getInstance(bin);
-    info = (await yt.getInfoAsync(pageUrl)) as VideoInfo;
-  }
+  // R-84-ytdlp-default-headers — ALL callers (with or without signal)
+  // must go through getInfoSpawn so DEFAULT_UA and the bilibili Referer
+  // are guaranteed to land on the command line. The old `if (signal)`
+  // fallback to `ytdlp-nodejs.getInfoAsync()` silently dropped those
+  // headers and re-introduced HTTP 412 for the R-14 embed-resolve flow
+  // (which calls resolveDirectUrl without a signal). getInfoSpawn already
+  // treats `signal === undefined` as "no abort wiring", so unifying the
+  // path costs nothing on the cancel side and closes the header hole.
+  const info: VideoInfo = await getInfoSpawn(bin, pageUrl, signal);
   if (!info || !info.formats) throw new Error('yt-dlp returned no formats');
   const best = pickBestFormat(info.formats);
   if (!best || !best.url) throw new Error('no playable format found');
@@ -557,8 +555,7 @@ export async function downloadYtdlpSections(
   if (ref) args.push('--referer', ref);
   args.push(pageUrl);
 
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { spawn } = require('child_process') as typeof import('child_process');
+  // R-84 / test-mockability — module-scope spawn so vitest mocks intercept.
   await new Promise<void>((resolve, reject) => {
     const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let stderr = '';

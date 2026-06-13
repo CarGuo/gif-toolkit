@@ -115,7 +115,25 @@ export async function downloadToFile(
   };
   if (opts.signal) cfg.signal = opts.signal as AbortSignal;
 
-  const res = await axios.get<NodeJS.ReadableStream>(url, cfg);
+  let res: Awaited<ReturnType<typeof axios.get<NodeJS.ReadableStream>>>;
+  try {
+    res = await axios.get<NodeJS.ReadableStream>(url, cfg);
+  } catch (e) {
+    // R-84 — Bilibili / certain CDNs return HTTP 412 when the request
+    // lacks the right Referer / UA. Wrap the raw axios error with a
+    // structured hint so the renderer toast can tell the user *why* it
+    // failed without making them read a stack trace.
+    const err = e as { response?: { status?: number }; isAxiosError?: boolean; message?: string };
+    if (err?.response?.status === 412) {
+      const hint = '远程返回 HTTP 412 (Precondition Failed)。常见原因：缺少 Referer / User-Agent 或来源页校验失败。' +
+        '若是 Bilibili，请确认 Referer 已注入 https://www.bilibili.com/。';
+      const wrapped = new Error(`${hint} [url=${url}]`) as Error & { httpStatus?: number; hint?: string };
+      wrapped.httpStatus = 412;
+      wrapped.hint = hint;
+      throw wrapped;
+    }
+    throw e;
+  }
 
   const total = Number(res.headers['content-length']) || null;
   if (total && total > maxBytes) {

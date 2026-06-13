@@ -80,9 +80,19 @@ npm run typecheck
 
 ## 已知后续项
 
-- `resolveDirectUrl` 走 `ytdlp-nodejs` 而非 spawn,UA/Referer 注入入口
-  是库的 options 对象。**当前轮未统一**,下一轮单独修;在修之前不要
-  在 `resolveDirectUrl` 内 fallback 调 spawn(那是绕过本规则的捷径)。
+- ~~`resolveDirectUrl` 走 `ytdlp-nodejs` 而非 spawn~~ —— **2026-06 闭环**:
+  H-2 修复中统一删除 `if (signal) getInfoSpawn else ytdlp-nodejs` 二分支,
+  所有 `resolveDirectUrl` / `getInfoSpawn` 调用都走 raw spawn,
+  argv 上保证带 `--user-agent <DEFAULT_UA>` + bilibili 时带 `--referer
+  https://www.bilibili.com`。回归测试 [tests/main/ytdlpHeaders.test.ts](file:///Users/guoshuyu/workspace/gif-toolkit/tests/main/ytdlpHeaders.test.ts)
+  锁住该契约,共 13 it 覆盖 `bilibiliReferer` / `DEFAULT_UA` /
+  `getInfoSpawn` / `downloadYtdlpSections` 全部入口。
+
+## 额外回归(2026-06 review-swarm 沉淀)
+
+- `axios.get` 在 [src/main/downloader.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/downloader.ts) 拿到 412 时必须 throw 结构化 `{ httpStatus, hint }` 错误,
+  hint 文案要点名 Referer/UA,renderer 错误 toast 直接展示。这是 M-3 沉淀,
+  防止 412 被裸 axios 错误字符串吞掉造成用户看到 "Request failed with status code 412" 而不知所措。
 
 ## 关联
 

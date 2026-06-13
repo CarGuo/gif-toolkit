@@ -59,12 +59,19 @@ import {
   deriveNextKinds,
   asLineageNode,
   ancestorsTo,
-  toSqlRow,
   fromSqlRow,
   pickHydrateFocus,
   maxNumericSuffix,
   makeRootNode
 } from './useToolboxLineageHelpers';
+import {
+  type PendingStep,
+  type ToolboxBridge,
+  getBridge,
+  getDbBridge,
+  persistRow,
+  buildTerminalRow
+} from './useToolboxLineageBridges';
 
 export type { LineageTreeNode, LineageNode } from './useToolboxLineageHelpers';
 
@@ -106,98 +113,6 @@ export interface UseToolboxLineageResult {
   hydrateFromChain: (chainId: string) => Promise<void>;
   /** Explicit fork-point selection. Alias for focusNode with clearer intent. */
   branchFromNode: (nodeId: string) => void;
-}
-
-interface ToolboxBridge {
-  startToolboxChain(payload: {
-    chainId: string;
-    inputPath: string;
-    steps: Array<{ id: string; kind: ToolboxKind; params: ToolboxParams }>;
-    outputDirOverride?: string;
-    /** R-TB-LOG-V1 — tree-wide chainId; main uses it as the session
-     *  log id so the entire branching lineage shares one timeline. */
-    lineageChainId?: string;
-    /** R-TB-LOG-V1 — display label for the log session row. */
-    chainInputName?: string;
-  }): Promise<{ ok: boolean; chainId: string; outputDir: string }>;
-  cancelToolboxChain(chainId: string): Promise<{ ok: boolean }>;
-  resumeToolboxChain(
-    chainId: string,
-    stepIndex: number,
-    paramsPatch: Partial<ToolboxParams>
-  ): Promise<{ ok: boolean }>;
-  onProgress(cb: (p: TaskProgress) => void): () => void;
-}
-
-interface DbBridge {
-  chainLineageNodes?: {
-    listByChain(chainId: string): Promise<ChainLineageNodeRow[]>;
-    upsert(row: ChainLineageNodeRow): Promise<void>;
-  };
-}
-
-function getBridge(): ToolboxBridge {
-  const w = window as unknown as { giftk?: ToolboxBridge };
-  if (!w.giftk) throw new Error('toolbox lineage: window.giftk preload bridge missing');
-  return w.giftk;
-}
-
-function getDbBridge(): DbBridge['chainLineageNodes'] | null {
-  try {
-    const w = window as unknown as { giftk?: { db?: DbBridge } };
-    return w.giftk?.db?.chainLineageNodes ?? null;
-  } catch {
-    return null;
-  }
-}
-
-/** Fire-and-forget upsert; never blocks the UI, never throws. */
-function persistRow(row: LineageTreeNode): void {
-  const repo = getDbBridge();
-  if (!repo) return;
-  void repo.upsert(toSqlRow(row)).catch(() => undefined);
-}
-
-/** Build a terminal-state row reusing the pending node's fixed fields. */
-function buildTerminalRow(
-  pending: PendingStep,
-  status: ChainLineageNodeStatus,
-  outputPath: string | null,
-  sizeAfter: number | null,
-  sizeRegressionRatio: number | null,
-  sizeRegressionReverted?: boolean
-): LineageTreeNode {
-  return {
-    nodeId: pending.nodeId,
-    parentNodeId: pending.parentNodeId,
-    chainId: pending.treeChainId,
-    ipcChainId: pending.ipcChainId,
-    kind: pending.kind,
-    params: pending.params,
-    inputPath: pending.inputPath,
-    outputPath,
-    sizeBefore: pending.sizeBefore,
-    sizeAfter,
-    sizeRegressionRatio,
-    sizeRegressionReverted,
-    status,
-    createdAt: pending.createdAt,
-    doneAt: Date.now()
-  };
-}
-
-interface PendingStep {
-  ipcChainId: string;
-  treeChainId: string;
-  nodeId: string;
-  parentNodeId: string;
-  kind: ToolboxKind;
-  params: ToolboxParams;
-  inputPath: string;
-  sizeBefore: number | null;
-  createdAt: number;
-  resolve: (n: LineageNode) => void;
-  reject: (err: Error) => void;
 }
 
 export function useToolboxLineage(): UseToolboxLineageResult {
@@ -411,7 +326,7 @@ export function useToolboxLineage(): UseToolboxLineageResult {
     if (bridge2) {
       const wireIdx = typeof p.stepIndex === 'number' ? p.stepIndex : 1;
       const zeroBased = Math.max(0, wireIdx - 1);
-      bridge2.resumeToolboxChain(pendingIpcId, zeroBased, {}).catch((err) => {
+      bridge2.resumeToolboxChain(pendingIpcId, zeroBased, {}).catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : String(err);
         const cur = pendingRef.current;
         if (cur && cur.ipcChainId === pendingIpcId) {

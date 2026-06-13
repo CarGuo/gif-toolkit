@@ -9,7 +9,7 @@ import { sniffViaSystemChrome, findInstalledBrowsers } from './systemChromeSniff
 import { sniffViaYtdlp } from './ytdlpDirectSniff';
 import { previewMedia, startBatch, cancelAllTasks, cancelTask, prefetchThumbnail, startToolbox, startToolboxChain, validateChainCompatibility, resumeToolboxChain, cancelToolboxChain, runToolboxTrialJob } from './processor';
 import { killAllProcs, probe as probeMedia, extractFrameDataUrl, extractFrameStrip, toolboxTrim } from './ffmpeg';
-import { log } from './logger';
+import { log, registerLoggerIpc } from './logger';
 import {
   openSession as openLogSession,
   closeSession as closeLogSession,
@@ -62,6 +62,12 @@ import { registerShortcuts, unregisterAllShortcuts } from './globalShortcut';
 import { sweepTmpDir, sessionTmpRegistry } from './tmpCleanup';
 import { checkLatestRelease, type UpdateCheckResult } from './updater';
 import os from 'node:os';
+
+// R-LOGGER-LAZY — register the `app:logBuffer` IPC handler exactly
+// once during main bootstrap. The logger module itself is now
+// side-effect free so node-side smoke runners can import it under a
+// stubbed `electron` without crashing on the handler call.
+registerLoggerIpc();
 
 // Some networks block UDP/QUIC which makes Chromium's TLS over QUIC fall back
 // to a hard ERR_CONNECTION_RESET on the headless sniffer fallback. Disabling

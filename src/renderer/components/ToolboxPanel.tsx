@@ -882,6 +882,14 @@ export function ParamForm({ kind, params, setParams, mediaInfo, inputPath, onTar
         <NumField label="结束 (秒)" value={params.endSec} onChange={(v) => patch('endSec', v)} min={0} step={0.1} placeholder="尾部" />
         <NumField label="目标体积 (KB)" value={params.maxBytes ? Math.round(params.maxBytes / 1024) : undefined}
           onChange={(v) => patch('maxBytes', v ? v * 1024 : undefined)} min={0} placeholder="不限" hint="开启后启用 4-Phase 压缩" />
+        {/* R-05 双层目标 UI 对称 — gif-optimize 的 budget UI 同时暴露 hard
+            (maxBytes) + soft (softMaxBytes),video-to-gif 之前只暴露 hard,
+            导致 4-Phase compressLoop 永远只追硬上限、丢失"达 soft 即提前
+            停止"加速,收敛轮次偏多。后端 processor.ts 会 clamp soft<=hard
+            所以填不填都不会出错。 */}
+        <NumField label="软阈值 (KB)" value={params.softMaxBytes ? Math.round(params.softMaxBytes / 1024) : undefined}
+          onChange={(v) => patch('softMaxBytes', v ? v * 1024 : undefined)} min={50} placeholder="可选"
+          hint="达到该体积即提前停止,留空走默认 2MB" />
       </div>
     );
   }
