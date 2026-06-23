@@ -44,6 +44,7 @@
 - `optionalDependencies.gifski` 存在性通过 main 的 `getGifskiPath()` + `cachedGifski` 负缓存判定。
 - gifski 不存在时：UI 显示 segmented 但 gifski 选项 **disabled** + tooltip 提示"未安装"；不许悄悄 fallback 到 ffmpeg（用户会以为他选了 hq）。
 - gifski 路径下，PNG 序列必须落在 `os.tmpdir()/giftk-gifski-<stamp>/frame-%06d.png` 并 `finally` 清理；AbortSignal 必须传透到 ffmpeg + gifski 两个子进程。
+- **注（R-GIFSKI-PRIMARY 落地后）**：自 [R-GIFSKI-PRIMARY](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-GIFSKI-PRIMARY.md) 起，`gif-optimize` task 默认尝试 gifski（`compressWithGifskiThenFallback`）；本条仍约束 **`video-to-gif` kind 的 engine 选择 UI（显式 hq 选项）**——`gif-optimize` 的内部静默 fallback 由 R-GIFSKI-PRIMARY 规则 3 明文允许。
 
 ### R-COMPRESS-V1.6 · 真实 e2e 不许 mock window.giftk
 - 6 件每件都必须有一个 `tests/e2e/realPipeline/suite-r-compress-v1-ui.ts` 内的 SUITE RCV1-A/B/C/D/E/F。

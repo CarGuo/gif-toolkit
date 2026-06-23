@@ -67,7 +67,7 @@
     "ytdlp-nodejs": "^3.4.4"
   },
   "optionalDependencies": {
-    "gifski": "^1.7.1"
+    "gifski": "1.7.1"
   },
   "devDependencies": {
     "@electron/rebuild": "3.7.2",
@@ -132,7 +132,8 @@
       "node_modules/ytdlp-nodejs/bin/**",
       "node_modules/better-sqlite3/**",
       "node_modules/bindings/**",
-      "node_modules/file-uri-to-path/**"
+      "node_modules/file-uri-to-path/**",
+      "node_modules/gifski/bin/**/*"
     ],
     "mac": {
       "icon": "build/icon.icns",

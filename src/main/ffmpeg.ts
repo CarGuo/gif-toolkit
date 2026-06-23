@@ -767,6 +767,120 @@ export async function videoToGifGifski(
   }
 }
 
+/**
+ * R-GIFSKI-PRIMARY — re-encode an existing GIF through gifski.
+ *
+ * Pipeline:
+ *   ① ffmpeg decodes the source GIF into a numbered PNG sequence in a
+ *      tmp dir (`-vsync 0` so we get one PNG per source frame, no
+ *      retiming).
+ *   ② gifski reads the PNG sequence and writes the destination GIF at
+ *      the requested `quality` (1..100).
+ *
+ * Why bother (vs gifsicle --lossy=N):
+ *   On the spec's IMG_6253.MOV benchmark, gifsicle 1.96 --lossy=80 lands
+ *   around 1.8MiB while gifski q=60 reaches ~640KiB at comparable
+ *   perceptual quality — gifski's lossy palette quantiser is several
+ *   generations ahead. See /tmp/giftk-bench/run-gifski.sh + SC-32.
+ *
+ * Throws when gifski isn't installed (no silent fallback — that's the
+ * caller's job; see `compressWithGifskiThenFallback` in processor.ts).
+ * Cleans the tmp PNG dir in `finally` (success / cancel / throw).
+ */
+export async function gifskiReencode(args: {
+  inputGif: string;
+  outputGif: string;
+  /** gifski --quality, clamped to [1, 100]. Default 80 = ezgif-ish sweet spot. */
+  quality?: number;
+  /** Output cadence; when omitted we probe the source GIF (fallback 15). */
+  fps?: number;
+  signal?: AbortSignal;
+  onLog?: (s: string) => void;
+}): Promise<void> {
+  const ffmpeg = getFfmpegPath();
+  const gifski = getGifskiPath();
+  if (!gifski) {
+    throw new Error(
+      'gifski binary not available — install the optional `gifski` npm package, ' +
+      'or fall back to gifsicle for this re-encode'
+    );
+  }
+
+  const { inputGif, outputGif, signal, onLog } = args;
+  const quality = Math.max(1, Math.min(100, Math.round(args.quality ?? 80)));
+
+  // Probe fps from source GIF when caller didn't supply one. gifski needs
+  // an explicit --fps because its default 20 + "keep every supplied
+  // frame" semantics would speed/slow non-20fps sources.
+  let fps = typeof args.fps === 'number' && Number.isFinite(args.fps) && args.fps > 0
+    ? args.fps
+    : 0;
+  if (fps <= 0) {
+    try {
+      const info = await probe(inputGif);
+      if (info.frameRate > 0 && Number.isFinite(info.frameRate)) {
+        fps = info.frameRate;
+      }
+    } catch (e) {
+      onLog?.(`gifskiReencode probe failed (using fallback 15fps): ${(e as Error).message}`);
+    }
+    if (fps <= 0) fps = 15;
+  }
+  // Clamp to gifski's accepted range; gifski rejects fps > 100.
+  fps = Math.max(1, Math.min(100, Math.round(fps)));
+
+  const stamp = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  const framesDir = path.join(osTmpdir(), `giftk-gifski-reenc-${stamp}`);
+  await fsp.mkdir(framesDir, { recursive: true });
+  const framePattern = path.join(framesDir, 'frame-%06d.png');
+
+  try {
+    if (signal?.aborted) throw makeCancelledError();
+
+    // ① ffmpeg → PNG sequence. -vsync 0 keeps the original frame count
+    // (no duplicate / drop) so gifski sees exactly the source frames.
+    await run(
+      ffmpeg,
+      [
+        '-hide_banner',
+        '-loglevel', 'error',
+        '-y',
+        '-i', inputGif,
+        '-vsync', '0',
+        '-f', 'image2',
+        framePattern
+      ],
+      { onStderr: (s) => onLog?.(`ffmpeg(gifski-reenc-extract): ${s.trim()}`), signal }
+    );
+    if (signal?.aborted) throw makeCancelledError();
+
+    // gifski refuses to overwrite; delete any stale output.
+    try { await fsp.unlink(outputGif); } catch { /* ENOENT ok */ }
+
+    const entries = (await fsp.readdir(framesDir))
+      .filter((f) => f.endsWith('.png'))
+      .sort();
+    if (entries.length === 0) {
+      throw new Error('gifski reencode: ffmpeg produced no PNG frames');
+    }
+    const cliArgs = [
+      '--fps', String(fps),
+      '--quality', String(quality),
+      '--quiet',
+      '-o', outputGif,
+      ...entries.map((f) => path.join(framesDir, f))
+    ];
+    await run(gifski, cliArgs, { onStderr: (s) => onLog?.(`gifski-reenc: ${s.trim()}`), signal });
+    if (signal?.aborted) throw makeCancelledError();
+  } finally {
+    try {
+      await fsp.rm(framesDir, { recursive: true, force: true });
+    } catch (e) {
+      onLog?.(`gifski reencode cleanup: ${(e as Error).message}`);
+    }
+  }
+}
+
 export interface GifsicleOptimizeOpts {
   optimizeLevel?: GifOptimizeLevel;
   dither?: GifDither;

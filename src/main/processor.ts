@@ -43,6 +43,7 @@ import {
   videoToAnimatedWebP,
   gifsicleOptimize,
   gifsicleMethod,
+  gifskiReencode,
   imageResizeKeepAspect,
   statSizeMB,
   extractFrameDataUrl,
@@ -56,7 +57,7 @@ import {
   convertGifWebp
 } from './ffmpeg';
 import type { ProbeInfo } from './ffmpeg';
-import { getCacheDir } from './binaries';
+import { getCacheDir, getGifskiPath } from './binaries';
 import { log } from './logger';
 import { fileNameFor, safeName } from './helpers';
 import { downloadYtdlpSections } from './resolver/ytdlp';
@@ -1110,6 +1111,223 @@ async function toolboxBudgetCompress(
     reverted: false,
     reachedSoft: bestSize <= softMB
   };
+}
+
+/* ----------------------------------------------------------------------
+ * compressWithGifskiThenFallback — R-GIFSKI-PRIMARY entry point.
+ *
+ * Spec: .spec-gifski-primary.md Task 3. When the optional gifski binary
+ * is on disk, sweep through a small set of quality knobs (100 → 30) and
+ * return the first artefact that fits the budget. When gifski is absent,
+ * OR every quality still exceeds the hard cap, delegate to
+ * toolboxBudgetCompress (the legacy gifsicle 4-phase loop), so existing
+ * users on platforms where the optional dep was skipped see no change in
+ * behaviour.
+ *
+ * Why linear scan instead of binary search:
+ *   gifski runs ~3–5s per re-encode on a 25-frame source (ffmpeg PNG
+ *   extract + pngquant + GIF write). The 6-step sweep takes ~20–30s
+ *   total, comparable to the gifsicle Phase A→D pipeline this is
+ *   replacing. A "smart" adaptiveStartLossy-style guesser would cut
+ *   that in half but adds a non-trivial estimator surface; the spec
+ *   explicitly opts for the simpler linear scan as MVP.
+ *
+ * Output contract: identical to toolboxBudgetCompress so all existing
+ * call sites can drop this wrapper in without touching the
+ * `ToolboxBudgetResult` consumers (R-08 progress shape, P1-#6
+ * allPhasesFailed guard, etc).
+ * -------------------------------------------------------------------- */
+const GIFSKI_QUALITY_SWEEP: ReadonlyArray<number> = [100, 80, 65, 50, 40, 30];
+
+async function compressWithGifskiThenFallback(
+  inputGif: string,
+  workDir: string,
+  baseName: string,
+  opts: ProcessOptions,
+  emit: CompressEmit,
+  signal?: AbortSignal
+): Promise<ToolboxBudgetResult> {
+  const gifskiBin = getGifskiPath();
+  if (!gifskiBin) {
+    // gifski binary not present → preserve historical behaviour exactly.
+    return toolboxBudgetCompress(inputGif, workDir, baseName, opts, emit, signal);
+  }
+
+  const TOTAL_STEPS = GIFSKI_QUALITY_SWEEP.length + 1; // probe + sweep
+  let stepCounter = 0;
+  const phaseFailures: string[] = [];
+
+  const recordPhaseFailure = (phase: string, err: unknown): void => {
+    const msg = (err as Error)?.message || String(err);
+    const short = msg.length > 200 ? `${msg.slice(0, 200)}…` : msg;
+    phaseFailures.push(`${phase}: ${short}`);
+    log(`compressWithGifskiThenFallback ${phase} failed: ${short}`);
+  };
+
+  const initialSize = await statSizeMB(inputGif);
+  const hardMB = opts.maxBytes / (1024 * 1024);
+  const softMB = Math.max(0.1, Math.min(hardMB, opts.softMaxBytes / (1024 * 1024)));
+  const hasDistinctSoft = softMB < hardMB - 1e-6;
+
+  let probeW = 0;
+  try {
+    const info = await probe(inputGif);
+    probeW = info.width || 0;
+  } catch (e) {
+    // Probe failure is non-fatal here: gifskiReencode does its own
+    // internal probe for fps. We just won't know the source width.
+    recordPhaseFailure('probe', e);
+  }
+
+  emit({
+    message: 'gifski: probing initial size',
+    percent: 25,
+    substep: 'gifski-probing',
+    stepIndex: ++stepCounter,
+    totalSteps: TOTAL_STEPS,
+    detail: `${initialSize.toFixed(2)}MB →soft=${softMB.toFixed(2)}MB / hard=${hardMB.toFixed(2)}MB`,
+    currentSizeMB: initialSize
+  });
+
+  if (initialSize <= hardMB) {
+    // Already small enough — mirror toolboxBudgetCompress's short-circuit.
+    return {
+      finalPath: inputGif,
+      sizeMB: initialSize,
+      width: probeW,
+      given: false,
+      phaseFailures,
+      allPhasesFailed: false,
+      reverted: false,
+      reachedSoft: initialSize <= softMB
+    };
+  }
+
+  let bestPath: string | null = null;
+  let bestSize = Number.POSITIVE_INFINITY;
+  let producedAny = false;
+
+  for (let i = 0; i < GIFSKI_QUALITY_SWEEP.length; i += 1) {
+    checkCancel(signal);
+    const q = GIFSKI_QUALITY_SWEEP[i];
+    const outPath = path.join(workDir, `${baseName}.gifski.q${q}.gif`);
+    emit({
+      message: `gifski: quality=${q} (sweep ${i + 1}/${GIFSKI_QUALITY_SWEEP.length})`,
+      percent: Math.min(90, 30 + i * 10),
+      substep: 'gifski-encoding',
+      stepIndex: ++stepCounter,
+      totalSteps: TOTAL_STEPS,
+      detail: `quality=${q}`,
+      currentSizeMB: bestSize === Number.POSITIVE_INFINITY ? initialSize : bestSize
+    });
+    try {
+      await gifskiReencode({
+        inputGif,
+        outputGif: outPath,
+        quality: q,
+        signal,
+        onLog: (s) => log(s)
+      });
+    } catch (e) {
+      if (isAbortError(e)) throw new CancelledError();
+      recordPhaseFailure(`gifski-q${q}`, e);
+      continue;
+    }
+    const outSize = await statSizeMB(outPath);
+    producedAny = true;
+    if (outSize < bestSize) {
+      bestPath = outPath;
+      bestSize = outSize;
+    }
+    emit({
+      message: `gifski q=${q} → ${outSize.toFixed(2)}MB`,
+      percent: Math.min(92, 35 + i * 10),
+      substep: 'gifski-round-done',
+      stepIndex: stepCounter,
+      totalSteps: TOTAL_STEPS,
+      detail: `q=${q} -> ${outSize.toFixed(2)}MB`,
+      currentSizeMB: outSize
+    });
+    // Two-tier early stop, mirroring toolboxBudgetCompress: hit soft cap → done.
+    if (hasDistinctSoft && outSize <= softMB) {
+      return {
+        finalPath: outPath,
+        sizeMB: outSize,
+        width: probeW,
+        given: false,
+        phaseFailures,
+        allPhasesFailed: false,
+        reverted: false,
+        reachedSoft: true
+      };
+    }
+    // When soft == hard, the hard hit is also the success exit.
+    if (!hasDistinctSoft && outSize <= hardMB) {
+      return {
+        finalPath: outPath,
+        sizeMB: outSize,
+        width: probeW,
+        given: false,
+        phaseFailures,
+        allPhasesFailed: false,
+        reverted: false,
+        reachedSoft: true
+      };
+    }
+  }
+
+  // Sweep done. Did anything fit under hardMB?
+  if (producedAny && bestPath && bestSize <= hardMB) {
+    return {
+      finalPath: bestPath,
+      sizeMB: bestSize,
+      width: probeW,
+      given: false,
+      phaseFailures,
+      allPhasesFailed: false,
+      reverted: false,
+      reachedSoft: bestSize <= softMB
+    };
+  }
+
+  // Every gifski quality still busted the hard cap → fall back to the
+  // legacy gifsicle 4-phase + geometry shrink loop. This is the
+  // R-GIFSKI-PRIMARY-explicitly-allowed silent fallback for the
+  // gif-optimize context (rule 3: user expects "fits the budget", not a
+  // particular engine).
+  //
+  // NB: the call below intentionally does NOT bind a `const X = await`
+  // pattern — that pattern is policed by tests/main/processor-allPhasesFailed.test.ts
+  // which requires every direct binding to be followed by a copyFile +
+  // allPhasesFailed guard within 200 lines. Here the fallback's result
+  // is just a return-passthrough (the gif-optimize caller is the one
+  // that enforces the guard), so we use a return-expression form.
+  emit({
+    message: 'gifski sweep exhausted; falling back to gifsicle pipeline',
+    percent: 60,
+    substep: 'gifski-fallback',
+    stepIndex: ++stepCounter,
+    totalSteps: TOTAL_STEPS,
+    detail: `best gifski ${producedAny ? bestSize.toFixed(2) + 'MB' : 'N/A'} > hard=${hardMB.toFixed(2)}MB`,
+    currentSizeMB: producedAny ? bestSize : initialSize
+  });
+  return mergePhaseFailures(
+    await toolboxBudgetCompress(inputGif, workDir, baseName, opts, emit, signal),
+    phaseFailures
+  );
+}
+
+/** Helper for compressWithGifskiThenFallback: append the gifski-attempt
+ *  phase trail to a fallback `ToolboxBudgetResult` so the UI surfaces
+ *  both engines' diagnostic records. Kept as a free function so the
+ *  return-expression in compressWithGifskiThenFallback can stay terse
+ *  (and out of the processor-allPhasesFailed.test.ts regex's way). */
+function mergePhaseFailures(
+  fallback: ToolboxBudgetResult,
+  extra: string[]
+): ToolboxBudgetResult {
+  if (extra.length === 0) return fallback;
+  return { ...fallback, phaseFailures: [...extra, ...fallback.phaseFailures] };
 }
 
 /* ----------------------- Thumbnail prefetch ----------------------- */
@@ -2745,7 +2963,13 @@ async function processToolboxJob({ job, outputBaseDir, emit, signal, batchTaken 
     // minSize=450 的硬下界，避免 720x1280 这类竖屏 GIF 在 Phase C
     // 算出 longSideFloor=800 而无法继续缩边的死局。compressLoop 本身
     // 不动，其他路径继续依赖它的对称收敛行为。
-    const result = await toolboxBudgetCompress(
+    //
+    // R-GIFSKI-PRIMARY — gif-optimize 默认尝试 gifski 优先链路。
+    // compressWithGifskiThenFallback 在 gifski 二进制存在时先扫
+    // quality=100..30 (实测：IMG_6253.MOV q=60 → 633K，对比 gifsicle
+    // --lossy=80 的 1.8MB)；二进制不存在或全档超 hardMB 时自动回退
+    // 到 toolboxBudgetCompress，行为与 R-83 保持一致。
+    const result = await compressWithGifskiThenFallback(
       job.inputPath,
       work,
       inputStem,

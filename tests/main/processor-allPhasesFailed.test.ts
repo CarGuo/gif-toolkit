@@ -55,14 +55,21 @@ const findCallSites = (src: string): CallSite[] => {
   const sites: CallSite[] = [];
   for (let i = 0; i < lines.length; i++) {
     // Two binding forms are accepted:
-    //   1. `const|let X = await (compressLoop|toolboxBudgetCompress)(`
-    //   2. `? await (compressLoop|toolboxBudgetCompress)(`  — ternary arm;
+    //   1. `const|let X = await (compressLoop|toolboxBudgetCompress|compressWithGifskiThenFallback)(`
+    //   2. `? await (compressLoop|toolboxBudgetCompress|compressWithGifskiThenFallback)(`  — ternary arm;
     //      walk back up to 5 lines to find the enclosing `const|let X =`.
+    //
+    // R-GIFSKI-PRIMARY: the gif-optimize budget call site was replaced
+    // with `compressWithGifskiThenFallback`, a wrapper that returns the
+    // same `ToolboxBudgetResult` shape (so the downstream
+    // `result.allPhasesFailed` + `fsp.copyFile(result.finalPath)` guard
+    // pair is unchanged). The regex is extended to cover the wrapper so
+    // this static-shape test continues to police the contract.
     const direct = lines[i].match(
-      /^\s*(?:const|let)\s+(\w+)\s*=\s*await\s+(?:compressLoop|toolboxBudgetCompress)\s*\(/
+      /^\s*(?:const|let)\s+(\w+)\s*=\s*await\s+(?:compressLoop|toolboxBudgetCompress|compressWithGifskiThenFallback)\s*\(/
     );
     const ternary = !direct && lines[i].match(
-      /^\s*[?:]\s*await\s+(?:compressLoop|toolboxBudgetCompress)\s*\(/
+      /^\s*[?:]\s*await\s+(?:compressLoop|toolboxBudgetCompress|compressWithGifskiThenFallback)\s*\(/
     );
     if (!direct && !ternary) continue;
     let resultVar: string | null = null;
