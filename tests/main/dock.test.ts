@@ -105,13 +105,13 @@ describe('dockActionMeta', () => {
 });
 
 describe('dockRecorderParams', () => {
-  it('uses mp4-then-gif so dock recordings pass through the compressed video-to-gif chain', () => {
+  it('uses gif-direct so dock recordings come out as GIF directly (recompress only when oversize)', () => {
     _resetDockRecorderParamsForTest();
     const params = dockRecorderParams({ displayId: 1, x: 10, y: 20, w: 320, h: 240 });
-    expect(params.mode).toBe('mp4-then-gif');
+    expect(params.mode).toBe('gif-direct');
     expect(params.softMaxBytes).toBe(2 * 1024 * 1024);
     expect(params.maxBytes).toBe(4 * 1024 * 1024);
-    expect(params.maxWidth).toBe(720);
+    expect(params.maxLongSide).toBe(800);
   });
 
   it('captures inside the visible red frame so the recording does not include the overlay border', () => {
@@ -139,7 +139,7 @@ describe('dockRecorderParams', () => {
   /*  dock，避免「两套录屏」体验脱节（SC-DOCK-PARAMS-ISOLATED）。         */
   /* ------------------------------------------------------------------ */
 
-  it('sticky: rememberDockRecorderParams 之后, dockRecorderParams 透传 fps/mode/maxBytes/maxWidth/captureCursor/captureAudio', () => {
+  it('sticky: rememberDockRecorderParams 之后, dockRecorderParams 透传 fps/mode/maxBytes/maxLongSide/captureCursor/captureAudio', () => {
     _resetDockRecorderParamsForTest();
     rememberDockRecorderParams({
       region: { displayId: 99, x: 1, y: 2, w: 3, h: 4 }, // region 应被忽略
@@ -150,7 +150,7 @@ describe('dockRecorderParams', () => {
       captureAudio: true,
       softMaxBytes: 1 * 1024 * 1024,
       maxBytes: 8 * 1024 * 1024,
-      maxWidth: 1080,
+      maxLongSide: 1080,
     });
     const params = dockRecorderParams({ displayId: 1, x: 10, y: 20, w: 320, h: 240 });
     expect(params.region).toEqual({ displayId: 1, x: 10, y: 20, w: 320, h: 240 });
@@ -161,10 +161,10 @@ describe('dockRecorderParams', () => {
     expect(params.captureAudio).toBe(true);
     expect(params.softMaxBytes).toBe(1 * 1024 * 1024);
     expect(params.maxBytes).toBe(8 * 1024 * 1024);
-    expect(params.maxWidth).toBe(1080);
+    expect(params.maxLongSide).toBe(1080);
   });
 
-  it('sticky: _reset 后 dockRecorderParams 回到 hardcode 默认值（fps=15/mode=mp4-then-gif/maxWidth=720）', () => {
+  it('sticky: _reset 后 dockRecorderParams 回到 hardcode 默认值（fps=15/mode=gif-direct/maxLongSide=800）', () => {
     rememberDockRecorderParams({
       region: { displayId: 1, x: 0, y: 0, w: 100, h: 100 },
       mode: 'gif-direct',
@@ -174,13 +174,13 @@ describe('dockRecorderParams', () => {
       captureAudio: true,
       softMaxBytes: 1,
       maxBytes: 2,
-      maxWidth: 9999,
+      maxLongSide: 9999,
     });
     _resetDockRecorderParamsForTest();
     const params = dockRecorderParams({ displayId: 1, x: 10, y: 20, w: 320, h: 240 });
-    expect(params.mode).toBe('mp4-then-gif');
+    expect(params.mode).toBe('gif-direct');
     expect(params.fps).toBe(15);
-    expect(params.maxWidth).toBe(720);
+    expect(params.maxLongSide).toBe(800);
     expect(params.captureCursor).toBe(true);
     expect(params.captureAudio).toBe(false);
   });

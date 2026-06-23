@@ -31,6 +31,7 @@ import {
 } from './recorder';
 import { openRegionSelectorOverlay, cancelOverlayIfAny } from './recorderOverlay';
 import type { RecorderParams, RecorderProgress } from '../shared/types/recorder';
+import { RECORDER_DEFAULT_LONG_SIDE } from '../shared/types/recorder';
 import {
   DEFAULT_OPTIONS,
   TOOLBOX_INPUT_EXTENSIONS,
@@ -2272,6 +2273,14 @@ ipcMain.handle('recorder:start', async (_e, payload: unknown) => {
   if (!params || !params.region) {
     throw new Error('recorder:start requires params.region');
   }
+  // R-REC-DESKTOP-AREA #gif-direct-only — v2.3 起 mode 只剩 'gif-direct'，
+  // 旧客户端 / 测试若传 'mp4-then-gif' 一律收敛到合法值，避免 type
+  // narrow 出错；maxLongSide 缺失时兜底到 RECORDER_DEFAULT_LONG_SIDE
+  // 以免下游 buildRecorderArgs 拿到 undefined。
+  params.mode = 'gif-direct';
+  if (typeof params.maxLongSide !== 'number' || !Number.isFinite(params.maxLongSide)) {
+    params.maxLongSide = RECORDER_DEFAULT_LONG_SIDE;
+  }
   // R-DOCK-FLOATING #shared-pref — 把用户在主窗 RecorderPanel 设置的录制
   // 偏好（fps / mode / max bytes / max width / capture audio / capture cursor）
   // sticky 到 dock 录制路径，下一次悬浮球触发 dock-record-region 时会读这份
@@ -2339,13 +2348,8 @@ ipcMain.handle('recorder:start', async (_e, payload: unknown) => {
 
   // 不 await done — 返回 sessionId 给 renderer 立即拿到，
   // 后续完成事件通过 'recorder:progress' (substep=done|cancelled|error) 推送，
-  // **由 recorder.ts 内 close handler 一次性 emit**（已按 mode 区分 gifPath 语义：
-  // gif-direct → emit gifPath；mp4-then-gif → emit 不带 gifPath，留给 renderer 续接
-  // video-to-gif chain）。
-  //
-  // 注意：这里**不能**再二次 fan-out done 事件；之前的实现无条件把 outputPath 当
-  // gifPath emit，导致 mp4-then-gif 模式下 renderer 把 mp4 误判为最终 GIF，从而
-  // 跳过 video-to-gif chain。
+  // 由 recorder.ts 内 close handler 一次性 emit。v2.3 起 gif-direct 是唯一
+  // 路径，done 永远带 gifPath（= outputPath），renderer 直接收作终态。
   done.catch((e: Error) => {
     // recorder.ts close handler 已经 emit 了 error 进度；这里只兜底 log，
     // 防止 unhandledRejection。

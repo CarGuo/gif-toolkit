@@ -1,6 +1,6 @@
 /**
  * R-DOCK-FLOATING — Minimal preload exposed to the floating dock
- * BrowserWindow. **Intentionally tiny** — only 9 handlers the dock UI
+ * BrowserWindow. **Intentionally tiny** — only 10 handlers the dock UI
  * needs (R-11 whitelist). No `giftk.*` IPC, no FS, no shell.
  *
  * v2 起追加：
@@ -12,9 +12,12 @@
  *    clipboard.writeText（renderer 侧不可访问 navigator.clipboard
  *    on transparent/alwaysOnTop window）
  *
+ * v2.3 起追加：
+ *  - getLongSide / setLongSide(n)：dock chip 切换 gif-direct 最长边
+ *
  * Adding a new method here requires:
  *  1. Matching main-process `ipcMain.handle('dock:xxx', ...)`.
- *  2. Updating R-DOCK-FLOATING rule file's whitelist count (= 9).
+ *  2. Updating R-DOCK-FLOATING rule file's whitelist count (= 10).
  *  3. Telling tests/main/dock.test.ts so the action-enum exhaustiveness
  *     case knows about it.
  */
@@ -55,6 +58,12 @@ contextBridge.exposeInMainWorld('giftkDock', {
   },
   async copyErrorMessage(text: string): Promise<{ ok: boolean }> {
     return ipcRenderer.invoke('dock:copyErrorMessage', String(text ?? '')) as Promise<{ ok: boolean }>;
+  },
+  async getLongSide(): Promise<{ longSide: number }> {
+    return ipcRenderer.invoke('dock:getLongSide') as Promise<{ longSide: number }>;
+  },
+  async setLongSide(n: number): Promise<{ ok: boolean; longSide: number }> {
+    return ipcRenderer.invoke('dock:setLongSide', n) as Promise<{ ok: boolean; longSide: number }>;
   },
   onState(cb: (state: DockState) => void): () => void {
     const handler = (_e: unknown, payload: DockState): void => {

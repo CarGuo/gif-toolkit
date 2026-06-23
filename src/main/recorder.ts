@@ -85,7 +85,7 @@ export { extractFfmpegStderrSummary, formatFfmpegExitError } from './recorderStd
 
 export function buildRecorderArgs(input: BuildRecorderArgsInput): string[] {
   const { platform, params, avfoundationDeviceIndex, outputPath } = input;
-  const { region, fps, maxDurationSec, captureCursor, captureAudio, mode } = params;
+  const { region, fps, maxDurationSec, captureCursor, maxLongSide } = params;
   // R-REC-DESKTOP-AREA #dpr-scale — 仅 darwin avfoundation 需要把 CSS px
   // 换算成 device px；win/linux 抓帧本身就是 device px，传 1.0 即可。
   // 防御：sf<=0 / NaN 也强制 1.0，避免被脏数据放大成 0 触发 throw。
@@ -99,7 +99,7 @@ export function buildRecorderArgs(input: BuildRecorderArgsInput): string[] {
   const cropExpr = `crop=${cropW}:${cropH}:${cropX}:${cropY}`;
   const fpsArg = String(Math.max(1, Math.min(60, Math.round(fps))));
   const dur = String(Math.max(1, Math.min(600, Math.round(maxDurationSec))));
-  const wantGifDirect = mode === 'gif-direct';
+  const longSide = typeof maxLongSide === 'number' && Number.isFinite(maxLongSide) ? Math.floor(maxLongSide) : 0;
 
   // 把 loglevel 从 'error' 抬到 'warning'：libx264 width-not-divisible /
   // avfoundation device not found 这类**致命错也走 warning 通道**，以前
@@ -114,44 +114,43 @@ export function buildRecorderArgs(input: BuildRecorderArgsInput): string[] {
    * GIF 直出 filter graph。引用 ffmpeg 官方推荐写法（single-pass
    * palette + paletteuse new=1 让每帧重算 palette diff，色彩接近两段法
    * 但只读源一次）。stats_mode=single 比 full 更省内存，适合录屏。
-   * mac 时把 crop 串到 split 之前；win/linux 直接 split。
+   *
+   * v2.3 顺序锁：`crop -> scale(longSide) -> split[a][b] -> palettegen -> paletteuse`。
+   * scale 表达式：宽分支 `if(gte(iw,ih),min(L,iw),-2)` —— 宽边为长边时取
+   * `min(L, iw)` 等比缩到 L，否则给 -2 让 ffmpeg 按高比例算出偶数宽；
+   * 高分支对称。`-2` 而非 `-1` 是为对齐 R-REC-DESKTOP-AREA #even-pixel
+   * （libx264/yuv420p 历史包袱，GIF palette 也吃偶数对齐更稳）。
+   * longSide<=0 退化为不加 scale，向后兼容老 IPC（R-REC-DESKTOP-AREA
+   * #long-side-scale）。
    */
-  function gifFilterComplex(cropPrefix?: string): string {
-    const head = cropPrefix ? `${cropPrefix},` : '';
-    return `${head}split [a][b];[a] palettegen=stats_mode=single [p];[b][p] paletteuse=new=1`;
+  function gifFilterComplex(cropPrefix?: string, longSideArg = 0): string {
+    const parts: string[] = [];
+    if (cropPrefix) parts.push(cropPrefix);
+    if (longSideArg > 0) {
+      const L = longSideArg;
+      parts.push(`scale='if(gte(iw,ih),min(${L},iw),-2)':'if(lt(iw,ih),min(${L},ih),-2)'`);
+    }
+    parts.push('split [a][b]');
+    const head = parts.join(',');
+    return `${head};[a] palettegen=stats_mode=single [p];[b][p] paletteuse=new=1`;
   }
-
-  /** mp4 编码尾参数。
-   *  #faststart (SC-REC-MP4-UNPLAYABLE) — `+faststart` 把 moov 搬到文件头；
-   *  `+frag_keyframe+empty_moov` 持续写 fragmented moov，让 SIGKILL 兜底
-   *  后已写部分仍可播；`+genpts` 保证时间戳稳健。 */
-  const mp4Tail = [
-    '-c:v', 'libx264',
-    '-preset', 'ultrafast',
-    '-pix_fmt', 'yuv420p',
-    '-fflags', '+genpts',
-    '-movflags', '+faststart+frag_keyframe+empty_moov',
-    outputPath,
-  ];
 
   if (platform === 'darwin') {
     if (typeof avfoundationDeviceIndex !== 'number') {
       throw new Error('avfoundationDeviceIndex required on darwin');
     }
-    const audioPart = captureAudio ? `:${avfoundationDeviceIndex}` : ':none';
+    // GIF 没有音轨语义；captureAudio 一律忽略（即便 sticky cache 残留 true 也不再串入）。
     const head = [
       ...common,
       '-f', 'avfoundation',
       '-framerate', fpsArg,
       '-capture_cursor', captureCursor ? '1' : '0',
       '-capture_mouse_clicks', '0',
-      '-i', `${avfoundationDeviceIndex}${audioPart}`,
+      '-i', `${avfoundationDeviceIndex}:none`,
       '-t', dur,
     ];
-    const result = wantGifDirect
-      ? [...head, '-filter_complex', gifFilterComplex(cropExpr), '-f', 'gif', outputPath]
-      : [...head, '-vf', cropExpr, ...mp4Tail];
-    log(`recorder argv: platform=${platform} sf=${sf} region=${region.x},${region.y} ${region.w}x${region.h} crop=${cropExpr} outputPath=${outputPath}`);
+    const result = [...head, '-filter_complex', gifFilterComplex(cropExpr, longSide), '-f', 'gif', outputPath];
+    log(`recorder argv: platform=${platform} sf=${sf} region=${region.x},${region.y} ${region.w}x${region.h} crop=${cropExpr} longSide=${longSide} outputPath=${outputPath}`);
     return result;
   }
 
@@ -165,24 +164,17 @@ export function buildRecorderArgs(input: BuildRecorderArgsInput): string[] {
       '-offset_y', String(cropY),
       '-video_size', `${cropW}x${cropH}`,
       '-i', 'desktop',
+      '-t', dur,
+      '-filter_complex', gifFilterComplex(undefined, longSide),
+      '-f', 'gif',
+      outputPath,
     ];
-    // 用户没装 stereo mix 时这条会失败，由 spawn 错误透出；
-    // gif-direct 下保留 args 兼容 mp4-then-gif，ffmpeg 会忽略 -f gif 的音频流。
-    if (captureAudio) {
-      args.push('-f', 'dshow', '-i', 'audio=virtual-audio-capturer');
-    }
-    args.push('-t', dur);
-    if (wantGifDirect) {
-      args.push('-filter_complex', gifFilterComplex(), '-f', 'gif', outputPath);
-    } else {
-      args.push(...mp4Tail);
-    }
-    log(`recorder argv: platform=${platform} sf=${sf} region=${region.x},${region.y} ${region.w}x${region.h} crop=${cropExpr} outputPath=${outputPath}`);
+    log(`recorder argv: platform=${platform} sf=${sf} region=${region.x},${region.y} ${region.w}x${region.h} crop=${cropExpr} longSide=${longSide} outputPath=${outputPath}`);
     return args;
   }
 
   // linux / x11grab
-  const linuxHead = [
+  const linuxArgs = [
     ...common,
     '-f', 'x11grab',
     '-framerate', fpsArg,
@@ -190,12 +182,12 @@ export function buildRecorderArgs(input: BuildRecorderArgsInput): string[] {
     '-video_size', `${cropW}x${cropH}`,
     '-i', `:0.0+${cropX},${cropY}`,
     '-t', dur,
+    '-filter_complex', gifFilterComplex(undefined, longSide),
+    '-f', 'gif',
+    outputPath,
   ];
-  const linuxResult = wantGifDirect
-    ? [...linuxHead, '-filter_complex', gifFilterComplex(), '-f', 'gif', outputPath]
-    : [...linuxHead, ...mp4Tail];
-  log(`recorder argv: platform=${platform} sf=${sf} region=${region.x},${region.y} ${region.w}x${region.h} crop=${cropExpr} outputPath=${outputPath}`);
-  return linuxResult;
+  log(`recorder argv: platform=${platform} sf=${sf} region=${region.x},${region.y} ${region.w}x${region.h} crop=${cropExpr} longSide=${longSide} outputPath=${outputPath}`);
+  return linuxArgs;
 }
 
 /* ------------------------------------------------------------------ */
@@ -436,10 +428,10 @@ export function startRecorder(args: StartRecorderArgs): StartRecorderResult {
   // R-87 — 注册到 sessionTmpRegistry，防止 tmp 清扫误删本会话产物（即便
   // 现在落在 ~/Downloads/GifToolkit/recordings，也防呆一道）。
   try { sessionTmpRegistry.registerSession(tmpDir); } catch { /* registry 可能在测试环境未初始化 */ }
-  // R-REC-DESKTOP-AREA #双模式：mode 决定输出扩展名。gif-direct 直接落 .gif，
-  // mp4-then-gif 落 .mp4 由 renderer 续接 video-to-gif chain。
-  // 文件名带时间戳让用户在 Finder/Explorer 里一眼看出是什么时候录的。
-  const ext = args.params.mode === 'gif-direct' ? 'gif' : 'mp4';
+  // R-REC-DESKTOP-AREA #gif-direct-only — 整条录屏链路统一直出 GIF。
+  // 不再按 mode 分支 .mp4 / .gif，文件名带时间戳让用户在 Finder/Explorer
+  // 一眼看出是什么时候录的。
+  const ext = 'gif';
   const ts = formatRecordingTimestamp(new Date());
   const outputPath = path.join(tmpDir, `rec-${ts}-${sessionId}.${ext}`);
 
@@ -503,13 +495,12 @@ export function startRecorder(args: StartRecorderArgs): StartRecorderResult {
           // ffmpeg `-t` 自动停时 code=0；用户 'q' graceful stop 也 code=0；
           // SIGKILL 时 code=null。
           if (code === 0 || cancelled) {
-            // R-REC-DESKTOP-AREA #双模式：gif-direct 时录制完即是 GIF 终态，
-            // 直接把 outputPath 当 gifPath emit，renderer 不再走 toolbox chain；
-            // mp4-then-gif 时 gifPath 留空，由 renderer 继续 video-to-gif chain
-            // 再 emit 真正的 done with gifPath。
-            const isGifDirect = args.params.mode === 'gif-direct';
+            // R-REC-DESKTOP-AREA #gif-direct-only — 录制完即是终态 GIF，
+            // emit done 时直接把 outputPath 当 gifPath 给 caller，不再
+            // 走 toolbox video-to-gif chain。超 maxBytes 时 dock 链路
+            // 由 maybeRecompressOversizeGif 接 gif-optimize 兜底压缩。
             emit(session, cancelled ? 'cancelled' : 'done', 100, cancelled ? '已取消' : '录制完成', {
-              gifPath: cancelled ? undefined : (isGifDirect ? session.outputPath : undefined),
+              gifPath: cancelled ? undefined : session.outputPath,
             });
             resolve({ outputPath: session.outputPath, cancelled });
             return;

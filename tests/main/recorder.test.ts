@@ -2,10 +2,12 @@
  * R-REC-DESKTOP-AREA — recorder argv builder tests.
  *
  * 验证 [buildRecorderArgs](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/recorder.ts) 这把纯函数的契约：
- *   - darwin avfoundation 走 `-vf crop=` 区域映射
- *   - win32 gdigrab 走 `-offset_x` / `-video_size`
- *   - linux x11grab 走 `-i :0.0+X,Y`
- *   - fps / 时长 / cursor / audio 各自的开关
+ *   - darwin avfoundation：filter_complex 内含 crop=
+ *   - win32 gdigrab：`-offset_x` / `-video_size` 原生区域
+ *   - linux x11grab：`-i :0.0+X,Y` 原生区域
+ *   - fps / 时长 / cursor 各自的开关
+ *   - v2.3 gif-direct-only：永远 single-pass 直出 GIF，maxLongSide>0
+ *     时 filter_complex 串入 scale 滤镜按最长边等比缩
  *
  * recorder.ts 间接 import electron.systemPreferences；stub 掉避免
  * node-only 环境 throw。binaries.ts 也走 electron app.getPath，一并 stub。
@@ -25,7 +27,7 @@ const { buildRecorderArgs, toEvenSize, toEvenOffset, parseAvfoundationScreenDevi
 
 const baseParams = {
   region: { displayId: 1, x: 100, y: 200, w: 640, h: 480 },
-  mode: 'mp4-then-gif' as const,
+  mode: 'gif-direct' as const,
   fps: 15,
   maxDurationSec: 20,
   captureCursor: true,
@@ -33,49 +35,57 @@ const baseParams = {
   softMaxBytes: 2 * 1024 * 1024,
   maxBytes: 4 * 1024 * 1024,
   maxWidth: 720,
+  // 默认 0 = 不缩放，让既有 crop 断言保持有效（区域 = 输出尺寸）。
+  maxLongSide: 0,
 };
 
-describe('buildRecorderArgs', () => {
-  it('darwin: emits avfoundation + crop filter with region', () => {
+describe('buildRecorderArgs (gif-direct only)', () => {
+  it('darwin: emits avfoundation + filter_complex with crop, no audio when captureAudio=false', () => {
     const argv = buildRecorderArgs({
       platform: 'darwin',
       params: baseParams,
       avfoundationDeviceIndex: 1,
-      outputPath: '/tmp/out.mp4',
+      outputPath: '/tmp/out.gif',
     });
     const joined = argv.join(' ');
     expect(joined).toContain('-f avfoundation');
     expect(joined).toContain('-framerate 15');
     expect(joined).toContain('-capture_cursor 1');
     expect(joined).toContain('-i 1:none');
-    expect(joined).toContain('-vf crop=640:480:100:200');
+    expect(joined).toContain('-filter_complex');
+    expect(joined).toContain('crop=640:480:100:200');
+    expect(joined).toContain('palettegen=stats_mode=single');
+    expect(joined).toContain('paletteuse=new=1');
+    expect(joined).toContain('-f gif');
     expect(joined).toContain('-t 20');
-    expect(argv[argv.length - 1]).toBe('/tmp/out.mp4');
+    expect(argv[argv.length - 1]).toBe('/tmp/out.gif');
   });
 
-  it('darwin: captureAudio=true wires audio device index', () => {
+  it('darwin: captureAudio=true 在 gif-direct 下被忽略（GIF 没音轨）', () => {
     const argv = buildRecorderArgs({
       platform: 'darwin',
       params: { ...baseParams, captureAudio: true },
       avfoundationDeviceIndex: 2,
-      outputPath: '/tmp/out.mp4',
+      outputPath: '/tmp/out.gif',
     });
-    expect(argv.join(' ')).toContain('-i 2:2');
+    // 入参形如 `${idx}:none`，永远不出现 `${idx}:${idx}` 这种音频映射
+    expect(argv.join(' ')).toContain('-i 2:none');
+    expect(argv.join(' ')).not.toContain('-i 2:2');
   });
 
   it('darwin: throws without avfoundationDeviceIndex', () => {
     expect(() => buildRecorderArgs({
       platform: 'darwin',
       params: baseParams,
-      outputPath: '/tmp/out.mp4',
+      outputPath: '/tmp/out.gif',
     })).toThrow(/avfoundationDeviceIndex/);
   });
 
-  it('win32: emits gdigrab with offset + video_size', () => {
+  it('win32: emits gdigrab with offset + video_size + filter_complex (no crop prefix)', () => {
     const argv = buildRecorderArgs({
       platform: 'win32',
       params: baseParams,
-      outputPath: 'C:\\tmp\\out.mp4',
+      outputPath: 'C:\\tmp\\out.gif',
     });
     const joined = argv.join(' ');
     expect(joined).toContain('-f gdigrab');
@@ -84,41 +94,40 @@ describe('buildRecorderArgs', () => {
     expect(joined).toContain('-video_size 640x480');
     expect(joined).toContain('-i desktop');
     expect(joined).toContain('-draw_mouse 1');
-    expect(joined).not.toContain('-f dshow');
+    expect(joined).toContain('-filter_complex');
+    // win 的 filter graph 不应再加 crop（gdigrab 抓出来本来就是区域）
+    const fcIdx = argv.indexOf('-filter_complex');
+    expect(argv[fcIdx + 1]).not.toContain('crop=');
+    expect(joined).toContain('-f gif');
   });
 
-  it('win32: captureAudio=true appends dshow audio input', () => {
-    const argv = buildRecorderArgs({
-      platform: 'win32',
-      params: { ...baseParams, captureAudio: true },
-      outputPath: 'C:\\tmp\\out.mp4',
-    });
-    expect(argv.join(' ')).toContain('-f dshow');
-  });
-
-  it('linux: emits x11grab with screen offset syntax', () => {
+  it('linux: emits x11grab with screen offset syntax + filter_complex (no crop prefix)', () => {
     const argv = buildRecorderArgs({
       platform: 'linux',
       params: baseParams,
-      outputPath: '/tmp/out.mp4',
+      outputPath: '/tmp/out.gif',
     });
     const joined = argv.join(' ');
     expect(joined).toContain('-f x11grab');
     expect(joined).toContain('-i :0.0+100,200');
     expect(joined).toContain('-video_size 640x480');
+    expect(joined).toContain('-filter_complex');
+    const fcIdx = argv.indexOf('-filter_complex');
+    expect(argv[fcIdx + 1]).not.toContain('crop=');
+    expect(joined).toContain('-f gif');
   });
 
   it('clamps fps to 1..60 (rounded int)', () => {
     const argv1 = buildRecorderArgs({
       platform: 'linux',
       params: { ...baseParams, fps: 0 },
-      outputPath: '/tmp/out.mp4',
+      outputPath: '/tmp/out.gif',
     });
     expect(argv1.join(' ')).toContain('-framerate 1');
     const argv2 = buildRecorderArgs({
       platform: 'linux',
       params: { ...baseParams, fps: 999 },
-      outputPath: '/tmp/out.mp4',
+      outputPath: '/tmp/out.gif',
     });
     expect(argv2.join(' ')).toContain('-framerate 60');
   });
@@ -127,13 +136,13 @@ describe('buildRecorderArgs', () => {
     const argv1 = buildRecorderArgs({
       platform: 'linux',
       params: { ...baseParams, maxDurationSec: 0 },
-      outputPath: '/tmp/out.mp4',
+      outputPath: '/tmp/out.gif',
     });
     expect(argv1.join(' ')).toContain('-t 1');
     const argv2 = buildRecorderArgs({
       platform: 'linux',
       params: { ...baseParams, maxDurationSec: 99999 },
-      outputPath: '/tmp/out.mp4',
+      outputPath: '/tmp/out.gif',
     });
     expect(argv2.join(' ')).toContain('-t 600');
   });
@@ -143,159 +152,106 @@ describe('buildRecorderArgs', () => {
       platform: 'darwin',
       params: { ...baseParams, captureCursor: false },
       avfoundationDeviceIndex: 1,
-      outputPath: '/tmp/out.mp4',
+      outputPath: '/tmp/out.gif',
     });
     expect(darwin.join(' ')).toContain('-capture_cursor 0');
     const win = buildRecorderArgs({
       platform: 'win32',
       params: { ...baseParams, captureCursor: false },
-      outputPath: 'C:\\tmp\\out.mp4',
+      outputPath: 'C:\\tmp\\out.gif',
     });
     expect(win.join(' ')).toContain('-draw_mouse 0');
   });
 
-  it('always includes -y and libx264 output', () => {
+  it('always includes -y and -f gif output, never libx264 / mp4', () => {
     for (const platform of ['darwin', 'win32', 'linux'] as const) {
       const argv = buildRecorderArgs({
         platform,
         params: baseParams,
-        avfoundationDeviceIndex: platform === 'darwin' ? 1 : undefined,
-        outputPath: '/tmp/out.mp4',
-      });
-      expect(argv).toContain('-y');
-      expect(argv).toContain('libx264');
-      expect(argv).toContain('-pix_fmt');
-      expect(argv).toContain('yuv420p');
-    }
-  });
-
-  /* ------------------------------------------------------------------ */
-  /*  SC-REC-MP4-UNPLAYABLE — mp4 tail must include +faststart and       */
-  /*  +frag_keyframe+empty_moov so partial / SIGKILLed recordings stay   */
-  /*  playable instead of dying with a missing moov atom.                */
-  /* ------------------------------------------------------------------ */
-
-  it('mp4-then-gif: emits -movflags +faststart+frag_keyframe+empty_moov on every platform', () => {
-    for (const platform of ['darwin', 'win32', 'linux'] as const) {
-      const argv = buildRecorderArgs({
-        platform,
-        params: baseParams,
-        avfoundationDeviceIndex: platform === 'darwin' ? 1 : undefined,
-        outputPath: '/tmp/out.mp4',
-      });
-      const idx = argv.indexOf('-movflags');
-      expect(idx).toBeGreaterThan(-1);
-      expect(argv[idx + 1]).toBe('+faststart+frag_keyframe+empty_moov');
-      // +genpts 同样必须存在，避免某些采集卡丢 PTS 导致整段不可解。
-      const idxF = argv.indexOf('-fflags');
-      expect(idxF).toBeGreaterThan(-1);
-      expect(argv[idxF + 1]).toBe('+genpts');
-    }
-  });
-
-  it('gif-direct: -movflags 不应出现（GIF 输出本身没有 moov atom 概念）', () => {
-    for (const platform of ['darwin', 'win32', 'linux'] as const) {
-      const argv = buildRecorderArgs({
-        platform,
-        params: { ...baseParams, mode: 'gif-direct' as const },
         avfoundationDeviceIndex: platform === 'darwin' ? 1 : undefined,
         outputPath: '/tmp/out.gif',
       });
+      expect(argv).toContain('-y');
+      expect(argv).toContain('-f');
+      expect(argv).toContain('gif');
+      expect(argv).not.toContain('libx264');
+      expect(argv).not.toContain('-c:v');
+      expect(argv).not.toContain('yuv420p');
       expect(argv).not.toContain('-movflags');
     }
   });
 
   /* ------------------------------------------------------------------ */
-  /*  R-REC-DESKTOP-AREA #双模式 — gif-direct contract                    */
+  /*  R-REC-DESKTOP-AREA #long-side-scale — maxLongSide 触发 scale 滤镜   */
   /* ------------------------------------------------------------------ */
 
-  const gifParams = { ...baseParams, mode: 'gif-direct' as const };
-
-  it('gif-direct darwin: emits filter_complex with crop+palettegen+paletteuse, drops libx264', () => {
-    const argv = buildRecorderArgs({
-      platform: 'darwin',
-      params: gifParams,
-      avfoundationDeviceIndex: 1,
-      outputPath: '/tmp/out.gif',
-    });
-    const joined = argv.join(' ');
-    expect(joined).toContain('-filter_complex');
-    expect(joined).toContain('crop=640:480:100:200');
-    expect(joined).toContain('palettegen=stats_mode=single');
-    expect(joined).toContain('paletteuse=new=1');
-    expect(joined).toContain('-f gif');
-    expect(argv).not.toContain('libx264');
-    expect(argv).not.toContain('-c:v');
-    expect(argv).not.toContain('yuv420p');
-    expect(argv[argv.length - 1]).toBe('/tmp/out.gif');
-  });
-
-  it('gif-direct win32: gdigrab supplies region natively, filter_complex has no crop prefix', () => {
-    const argv = buildRecorderArgs({
-      platform: 'win32',
-      params: gifParams,
-      outputPath: 'C:\\tmp\\out.gif',
-    });
-    const joined = argv.join(' ');
-    expect(joined).toContain('-f gdigrab');
-    expect(joined).toContain('-offset_x 100');
-    expect(joined).toContain('-video_size 640x480');
-    expect(joined).toContain('-filter_complex');
-    expect(joined).toContain('palettegen=stats_mode=single');
-    expect(joined).toContain('paletteuse=new=1');
-    // win 的 filter graph 不应再加 crop （gdigrab 抓出来本来就是区域）
-    const fcIdx = argv.indexOf('-filter_complex');
-    expect(argv[fcIdx + 1]).not.toContain('crop=');
-    expect(joined).toContain('-f gif');
-    expect(argv).not.toContain('libx264');
-  });
-
-  it('gif-direct linux: x11grab supplies region, filter_complex has no crop prefix', () => {
-    const argv = buildRecorderArgs({
-      platform: 'linux',
-      params: gifParams,
-      outputPath: '/tmp/out.gif',
-    });
-    const joined = argv.join(' ');
-    expect(joined).toContain('-f x11grab');
-    expect(joined).toContain('-i :0.0+100,200');
-    expect(joined).toContain('-filter_complex');
-    const fcIdx = argv.indexOf('-filter_complex');
-    expect(argv[fcIdx + 1]).not.toContain('crop=');
-    expect(joined).toContain('-f gif');
-    expect(argv).not.toContain('libx264');
-  });
-
-  it('gif-direct on all platforms still respects fps + duration clamp and -y', () => {
+  it('gif-direct: maxLongSide=800 在 split 之前串 scale 滤镜', () => {
     for (const platform of ['darwin', 'win32', 'linux'] as const) {
       const argv = buildRecorderArgs({
         platform,
-        params: { ...gifParams, fps: 999, maxDurationSec: -5 },
+        params: { ...baseParams, maxLongSide: 800 },
         avfoundationDeviceIndex: platform === 'darwin' ? 1 : undefined,
         outputPath: '/tmp/out.gif',
       });
-      expect(argv).toContain('-y');
-      expect(argv.join(' ')).toContain('-framerate 60');
-      expect(argv.join(' ')).toContain('-t 1');
-      expect(argv).toContain('-f');
+      const fcIdx = argv.indexOf('-filter_complex');
+      expect(fcIdx).toBeGreaterThan(-1);
+      const fc = argv[fcIdx + 1];
+      // scale 必须在 split 之前出现
+      const scalePos = fc.indexOf('scale=');
+      const splitPos = fc.indexOf('split');
+      expect(scalePos).toBeGreaterThan(-1);
+      expect(splitPos).toBeGreaterThan(-1);
+      expect(scalePos).toBeLessThan(splitPos);
+      // 表达式中常数等于 800
+      expect(fc).toContain('min(800,iw)');
+      expect(fc).toContain('min(800,ih)');
     }
   });
 
-  it('mp4-then-gif (default) still emits libx264 mp4, never -f gif', () => {
-    for (const platform of ['darwin', 'win32', 'linux'] as const) {
+  it('gif-direct: maxLongSide=600 / 1080 对应 expression 中常数等于 L', () => {
+    for (const L of [600, 1080]) {
       const argv = buildRecorderArgs({
-        platform,
-        params: baseParams, // mode: 'mp4-then-gif'
-        avfoundationDeviceIndex: platform === 'darwin' ? 1 : undefined,
-        outputPath: '/tmp/out.mp4',
+        platform: 'linux',
+        params: { ...baseParams, maxLongSide: L },
+        outputPath: '/tmp/out.gif',
       });
-      expect(argv).toContain('libx264');
-      // 不应该出现 `-f gif` 输出格式
-      const idxF = argv.lastIndexOf('-f');
-      // 最后一个 -f 应该是 capture device (avfoundation/gdigrab/x11grab) 或 dshow
-      expect(argv[idxF + 1]).not.toBe('gif');
-      expect(argv).not.toContain('-filter_complex');
+      const fcIdx = argv.indexOf('-filter_complex');
+      const fc = argv[fcIdx + 1];
+      expect(fc).toContain(`min(${L},iw)`);
+      expect(fc).toContain(`min(${L},ih)`);
+      // -2 保偶
+      expect(fc).toContain('-2');
     }
+  });
+
+  it('gif-direct: maxLongSide<=0 不串 scale，filter graph 与旧版相同', () => {
+    for (const longSide of [0, -1]) {
+      const argv = buildRecorderArgs({
+        platform: 'linux',
+        params: { ...baseParams, maxLongSide: longSide },
+        outputPath: '/tmp/out.gif',
+      });
+      const fcIdx = argv.indexOf('-filter_complex');
+      const fc = argv[fcIdx + 1];
+      expect(fc).not.toContain('scale=');
+      // 仍然是 split + palettegen + paletteuse
+      expect(fc).toContain('split');
+      expect(fc).toContain('palettegen=stats_mode=single');
+      expect(fc).toContain('paletteuse=new=1');
+    }
+  });
+
+  it('gif-direct: 区域已小于 maxLongSide 时表达式仍含 min(L,iw) 由 ffmpeg 运行时自然 no-op', () => {
+    // 区域 320x200, maxLongSide=800：表达式照写 min(800, 320) 由 ffmpeg 解出 320
+    const argv = buildRecorderArgs({
+      platform: 'linux',
+      params: { ...baseParams, region: { displayId: 1, x: 0, y: 0, w: 320, h: 200 }, maxLongSide: 800 },
+      outputPath: '/tmp/out.gif',
+    });
+    const fcIdx = argv.indexOf('-filter_complex');
+    const fc = argv[fcIdx + 1];
+    expect(fc).toContain('min(800,iw)');
+    expect(fc).toContain('min(800,ih)');
   });
 });
 
@@ -340,15 +296,15 @@ describe('buildRecorderArgs — even-pixel applies to x/y too', () => {
       platform: 'darwin',
       params: { ...baseParams, region: { displayId: 1, x: 101, y: 203, w: 275, h: 223 } },
       avfoundationDeviceIndex: 1,
-      outputPath: '/tmp/out.mp4',
+      outputPath: '/tmp/out.gif',
     });
-    expect(argv.join(' ')).toContain('-vf crop=274:222:100:202');
+    expect(argv.join(' ')).toContain('crop=274:222:100:202');
   });
   it('win32: 奇数 offset 偶数化到 -offset_x/-offset_y', () => {
     const argv = buildRecorderArgs({
       platform: 'win32',
       params: { ...baseParams, region: { displayId: 1, x: 101, y: 203, w: 275, h: 223 } },
-      outputPath: 'C:\\tmp\\out.mp4',
+      outputPath: 'C:\\tmp\\out.gif',
     });
     const j = argv.join(' ');
     expect(j).toContain('-offset_x 100');
@@ -359,7 +315,7 @@ describe('buildRecorderArgs — even-pixel applies to x/y too', () => {
     const argv = buildRecorderArgs({
       platform: 'linux',
       params: { ...baseParams, region: { displayId: 1, x: 101, y: 203, w: 275, h: 223 } },
-      outputPath: '/tmp/out.mp4',
+      outputPath: '/tmp/out.gif',
     });
     const j = argv.join(' ');
     expect(j).toContain('-i :0.0+100,202');

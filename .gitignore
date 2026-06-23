@@ -11,3 +11,5 @@ playwright-report
 .win-smoke/
 .mac-smoke/
 /index.html
+tmp
+.git-commit-msg.tmp

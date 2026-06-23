@@ -15,20 +15,27 @@
 export const RECORDER_FPS_PRESETS: readonly number[] = [5, 10, 15, 24] as const;
 
 /**
- * 录屏输出模式（R-REC-DESKTOP-AREA #双模式）。
+ * 录屏输出模式。
  *
- *   - 'mp4-then-gif'（默认）— ffmpeg 录 mp4 → renderer 自动串
- *     `video-to-gif` chain → 复用 Phase A-D 双层目标压缩。
- *     用户视角"直接出 GIF"，质量最好。
+ * v2.3 起整条录屏链路统一为 `gif-direct`（ffmpeg single-pass
+ * `palettegen=stats_mode=single + paletteuse=new=1` 直出 GIF）。
+ * 超出 `maxBytes` 时主进程自动接 toolbox `gif-optimize` chain 二分到
+ * `≤ maxBytes` 兜底（见 [maybeRecompressOversizeGif](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/dockRecording.ts)）。
  *
- *   - 'gif-direct'           — ffmpeg single-pass
- *     `palettegen=stats_mode=single + paletteuse=new=1` 直出 GIF。
- *     不进 compressLoop，没有软硬目标二分；录完即拿，CPU 占用更高、
- *     文件偏大，但延迟最低。显式开关，不静默 fallback（R-COMPRESS-V1.5）。
+ * 类型保留单例字符串字面量，仅是为了让既有 import 路径不破。任何新
+ * 分支（mp4-then-gif / webm 等）都不应再加进来，请改走 toolbox chain。
  */
-export type RecorderMode = 'mp4-then-gif' | 'gif-direct';
+export type RecorderMode = 'gif-direct';
 
-export const RECORDER_DEFAULT_MODE: RecorderMode = 'mp4-then-gif';
+export const RECORDER_DEFAULT_MODE: RecorderMode = 'gif-direct';
+
+/**
+ * GIF 直出最长边（px）预设。dock chip + RecorderPanel 输入都从这里取。
+ * 800 是 WeChat / Telegram / Slack 等主流 IM 客户端的平衡点（清晰但
+ * 体积可控），600 适合长录文本演示，1080 适合短录高清演示。
+ */
+export const RECORDER_LONG_SIDE_PRESETS = [600, 800, 1080] as const;
+export const RECORDER_DEFAULT_LONG_SIDE = 800;
 
 /** 最大单次录制时长上限（秒）。沿用 R-22 maxSegmentSec 哲学避免误录天荒地老。 */
 export const RECORDER_MAX_DURATION_SEC = 60;
@@ -76,6 +83,9 @@ export interface RecorderParams {
   maxBytes: number;
   /** GIF 最长边像素上限，沿用 ProcessOptions.maxWidth 命名。 */
   maxWidth: number;
+  /** GIF 直出最长边（px）上限，触发 ffmpeg `scale` 滤镜等比缩放。
+   *  推荐 600/800/1080；<= 0 表示不缩放。 */
+  maxLongSide: number;
 }
 
 /** macOS 屏幕录制权限三态。其它平台稳定返回 'granted'（无需权限）。 */

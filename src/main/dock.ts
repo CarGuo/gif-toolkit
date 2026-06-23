@@ -15,7 +15,7 @@ import {
 import { sniffClipboardURL, openOutputDir, type TrayDeps } from './tray';
 import { openRegionSelectorOverlay, showStaticOverlayForRegion, closeStaticOverlay } from './recorderOverlay';
 import { startRecorder, stopRecorder, cancelRecorder, detectMacScreenDevice } from './recorder';
-import { captureRegionInsideFrame, convertDockRecordingToGif, dockRecorderParams } from './dockRecording';
+import { captureRegionInsideFrame, dockRecorderParams, maybeRecompressOversizeGif, getDockLongSide, setDockLongSide } from './dockRecording';
 import { notifyDockRecordingFinished, notifyDockRecordingFailed } from './dockNotify';
 import type { RecorderProgress, RecorderRegion } from '../shared/types/recorder';
 
@@ -29,6 +29,8 @@ const HIDE_CHANNEL_INVOKE = 'dock:hide';
 const RECORDER_GET_CHANNEL_INVOKE = 'dock:getRecorderState';
 const REVEAL_LAST_CHANNEL_INVOKE = 'dock:revealLastRecording';
 const COPY_ERROR_CHANNEL_INVOKE = 'dock:copyErrorMessage';
+const GET_LONG_SIDE_CHANNEL_INVOKE = 'dock:getLongSide';
+const SET_LONG_SIDE_CHANNEL_INVOKE = 'dock:setLongSide';
 
 export interface DockDeps {
   /** 暴露给 dock 让它 show / hide / focus 主窗口；与 TrayDeps 共用一份。 */
@@ -271,16 +273,14 @@ async function startDockRecording(deps: DockDeps): Promise<void> {
         if (r.cancelled) {
           applyRecorderEvent({ type: 'cancelled' });
         } else {
-          // R-DOCK-FLOATING #fan-out — dock 自治链路的 toolbox chain 进度
-          // 必须广播到主窗 process:progress，让 HistoryPanel / RecorderPanel
-          // 感知 dock 录制转 GIF 的实时状态（否则用户在主窗看不到 dock 链路）。
+          // R-REC-DESKTOP-AREA #recompress-oversize — 超 maxBytes 才接 gif-optimize；progress fan-out 到主窗。
           const mainWin = deps.trayDeps.getMainWindow();
-          const gifPath = await convertDockRecordingToGif({
-            mp4Path: r.outputPath,
+          const gifPath = await maybeRecompressOversizeGif({
+            gifPath: r.outputPath,
             outputBaseDir: recOutDir ?? path.dirname(r.outputPath),
             params,
             emit: (p) => {
-              deps.log(`dock recording: gif chain ${p.status} ${p.percent}% ${p.message ?? ''}`);
+              deps.log(`dock recording: recompress chain ${p.status} ${p.percent}% ${p.message ?? ''}`);
               if (mainWin && !mainWin.isDestroyed()) {
                 try { mainWin.webContents.send('process:progress', p); } catch { /* best-effort */ }
               }
@@ -365,31 +365,16 @@ export async function dispatchDockAction(action: DockActionKind, deps: DockDeps)
         await openOutputDir(deps.trayDeps);
         break;
       }
-      case 'dock-record-region': {
-        void startDockRecording(deps);
-        break;
-      }
-      case 'dock-record-stop': {
-        void stopDockRecording(deps);
-        break;
-      }
-      case 'dock-record-cancel': {
-        void cancelDockRecording(deps);
-        break;
-      }
-      case 'show-main': {
-        await deps.trayDeps.showOrCreateMainWindow();
-        break;
-      }
+      case 'dock-record-region': { void startDockRecording(deps); break; }
+      case 'dock-record-stop': { void stopDockRecording(deps); break; }
+      case 'dock-record-cancel': { void cancelDockRecording(deps); break; }
+      case 'show-main': { await deps.trayDeps.showOrCreateMainWindow(); break; }
       case 'hide-main': {
         const w = deps.trayDeps.getMainWindow();
         if (w && !w.isDestroyed()) w.hide();
         break;
       }
-      case 'quit-app': {
-        app.quit();
-        break;
-      }
+      case 'quit-app': { app.quit(); break; }
       default: {
         const exhaustive: never = action;
         return { ok: false, reason: `unknown action ${String(exhaustive)}` };
@@ -450,6 +435,14 @@ function wireIpcOnce(deps: DockDeps): void {
       deps.log(`dock copyErrorMessage failed: ${(e as Error).message}`);
       return { ok: false };
     }
+  });
+
+  // v2.3 最长边 chip：写入 dockRecording 模块级 lastLongSide。
+  ipcMain.handle(GET_LONG_SIDE_CHANNEL_INVOKE, () => ({ longSide: getDockLongSide() }));
+  ipcMain.handle(SET_LONG_SIDE_CHANNEL_INVOKE, (_e, raw: unknown) => {
+    const n = typeof raw === 'number' ? raw : Number(raw);
+    const ok = setDockLongSide(Number.isFinite(n) ? n : NaN);
+    return { ok, longSide: getDockLongSide() };
   });
 
   ipcMain.handle(DRAG_CHANNEL_INVOKE, (_e, raw: unknown) => {

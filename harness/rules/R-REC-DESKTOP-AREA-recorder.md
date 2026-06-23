@@ -183,3 +183,30 @@ delta 永远算成 0，等于没修。
 = `correctRegionFromOverlayLocal` 没正确算出 delta
 → 第一时间打印 `display.bounds / display.workArea` 两组值，看 `workArea.y - bounds.y` 是不是 ≥ 24
 
+---
+
+## v2.3 起 #gif-direct-only：录屏只走 gif-direct，超阈值再 recompress
+
+**触发原因**：原 `mp4-then-gif` 模式让 dock / panel 在 ffmpeg 录完 mp4 之后必须再串一段 `video-to-gif` toolbox chain，链路长、UI 状态机复杂（chainProgress / pendingMp4Ref 两条流），用户在 dock 上等的不是真录屏而是后续转码。  
+v2.3 起统一收敛为 **gif-direct**：
+
+1. **类型**：[RecorderMode](file:///Users/guoshuyu/workspace/gif-toolkit/src/shared/types/recorder.ts) 收敛为 `'gif-direct'` 单例字面量；新增 `maxLongSide: number`（0=不缩放）+ `RECORDER_LONG_SIDE_PRESETS = [600, 800, 1080]` + `RECORDER_DEFAULT_LONG_SIDE = 800`。**不要**再加回 `'mp4-then-gif'`/`'gif-via-mp4'` 等任何分支。
+2. **buildRecorderArgs**：必须 `-f gif` 输出、ext='gif'；`gifFilterComplex` 滤镜顺序固定为 `crop → scale → split → palettegen → paletteuse`；scale 只在 `maxLongSide > 0` 时插入，公式：`scale='if(gte(iw,ih),min(L,iw),-2)':'if(lt(iw,ih),min(L,ih),-2)'`（短边自动 -2 偶数对齐）。**禁止**出现 libx264 / `-c:v` / mp4 任何字符串。
+3. **recompress 兜底**：[maybeRecompressOversizeGif](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/dockRecording.ts) 在录完后 `fs.stat` 拿到 size > `maxBytes` 才接 toolbox `gif-optimize` chain；≤maxBytes 直接返回原 gif，**不要**无脑接 chain。
+4. **dock chip UI**：[dockOverlay.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/dockOverlay.tsx) 在 expanded panel idle 阶段渲染 `[600, 800, 1080, 原]` chip，点击走 `window.giftkDock.setLongSide(n)` → `dock:setLongSide` IPC → [setDockLongSide](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/dockRecording.ts) 白名单校验（`RECORDER_LONG_SIDE_PRESETS ∪ {0}`，其余 reject）。
+5. **panel UI**：[RecorderPanel.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/RecorderPanel.tsx) 删除模式卡片 / `pendingMp4Ref` / `dispatchVideoToGifChain` / `chainIdRef` / `chainProgress`；done handler 简化为 `if (p.gifPath) setLastGif(p.gifPath); setSessionId(null)`。
+6. **handler 兜底**：[src/main/index.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/index.ts) `recorder:start` 必须强制 `params.mode = 'gif-direct'` + 兜底 `maxLongSide = RECORDER_DEFAULT_LONG_SIDE`，防 IPC 入参缺失炸。
+
+### 反向清单（v2.3 起绝对禁止）
+
+- 任何 PR 再引入 `mode: 'mp4-then-gif'` / `'gif-via-mp4'` 字面量 → block
+- 任何 `dispatchVideoToGifChain` / `pendingMp4Ref` / `chainProgress` 出现在 [RecorderPanel.tsx](file:///Users/guoshuyu/workspace/gif-toolkit/src/renderer/components/RecorderPanel.tsx) → block
+- recompress 写成「无条件接 gif-optimize chain」（不看 stat） → 浪费 CPU + 多次有损量化
+- chip 接受 `RECORDER_LONG_SIDE_PRESETS ∪ {0}` 之外的值（如 720 / 1440） → 违反白名单契约
+
+### 验证
+
+- [tests/main/recorder.test.ts](file:///Users/guoshuyu/workspace/gif-toolkit/tests/main/recorder.test.ts) — `mode: 'gif-direct'` + 4 个 scale 用例 + 「never libx264 / mp4」断言
+- [tests/main/dock.test.ts](file:///Users/guoshuyu/workspace/gif-toolkit/tests/main/dock.test.ts) — `dockRecorderParams` 期望 `mode='gif-direct'` + `maxLongSide=800`
+- 见 [SC-31-recorder-direct-gif-and-recompress.md](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-31-recorder-direct-gif-and-recompress.md) 回归场景
+

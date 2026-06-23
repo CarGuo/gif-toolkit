@@ -21,6 +21,7 @@ import type {
   DockRecorderState,
 } from '../shared/types/dock';
 import { DOCK_RECORDER_IDLE_STATE } from '../shared/types/dock';
+import { RECORDER_LONG_SIDE_PRESETS } from '../shared/types/recorder';
 
 declare global {
   interface Window {
@@ -36,6 +37,8 @@ declare global {
       getRecorderState: () => Promise<DockRecorderState>;
       revealLastRecording: () => Promise<{ ok: boolean }>;
       copyErrorMessage: (text: string) => Promise<{ ok: boolean }>;
+      getLongSide: () => Promise<{ longSide: number }>;
+      setLongSide: (n: number) => Promise<{ ok: boolean; longSide: number }>;
       onState: (cb: (state: DockState) => void) => () => void;
       onRecorderState: (cb: (s: DockRecorderState) => void) => () => void;
     };
@@ -88,6 +91,7 @@ function App(): React.ReactElement {
   const [expanded, setExpanded] = useState(false);
   const [state, setState] = useState<DockState>({ visible: true, expanded: false, mainWindowVisible: true });
   const [rec, setRec] = useState<DockRecorderState>(DOCK_RECORDER_IDLE_STATE);
+  const [longSide, setLongSide] = useState<number>(800);
   const [copied, setCopied] = useState(false);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dragRef = useRef<{ started: boolean; moved: boolean } | null>(null);
@@ -95,6 +99,7 @@ function App(): React.ReactElement {
   useEffect(() => {
     void window.giftkDock?.getActions().then(setActions).catch(() => undefined);
     void window.giftkDock?.getRecorderState().then(setRec).catch(() => undefined);
+    void window.giftkDock?.getLongSide().then((r) => setLongSide(r.longSide)).catch(() => undefined);
     const off1 = window.giftkDock?.onState?.((s) => {
       setState(s);
       // R-DOCK-FLOATING #expand-flicker — onState 是主进程权威，本地若已
@@ -109,6 +114,13 @@ function App(): React.ReactElement {
 
   const trigger = useCallback((kind: DockActionKind): void => {
     void window.giftkDock?.trigger(kind).catch(() => undefined);
+  }, []);
+
+  /** dock chip 切换 gif-direct 最长边。仅在 idle 阶段允许调整。 */
+  const onPickLongSide = useCallback((n: number): void => {
+    void window.giftkDock?.setLongSide(n).then((r) => {
+      if (r?.ok) setLongSide(r.longSide);
+    }).catch(() => undefined);
   }, []);
 
   const requestExpanded = useCallback((next: boolean): void => {
@@ -423,6 +435,32 @@ function App(): React.ReactElement {
               </button>
             ))}
           </div>
+
+          {/* v2.3 最长边 chip — 仅 idle 阶段显示，gif-direct scale 控制。 */}
+          {!recording && !showFinalToast && (
+            <div
+              title="录屏最长边 (px)"
+              style={{
+                display: 'flex', alignItems: 'center', gap: 4,
+                padding: '0 6px', borderLeft: `1px solid ${C.border}`, height: 44,
+              }}
+            >
+              <span style={{ fontSize: 9, color: C.textDim, marginRight: 2, lineHeight: 1 }}>L</span>
+              {RECORDER_LONG_SIDE_PRESETS.map((n) => (
+                <button
+                  key={n}
+                  onClick={() => onPickLongSide(n)}
+                  title={`最长边 ${n}px`}
+                  style={chipBtn(longSide === n)}
+                >{n}</button>
+              ))}
+              <button
+                onClick={() => onPickLongSide(0)}
+                title="原始分辨率（不缩放）"
+                style={chipBtn(longSide === 0)}
+              >原</button>
+            </div>
+          )}
         </div>
       )}
 
@@ -523,6 +561,21 @@ function btnStyle(tone: 'danger' | 'primary' | 'default'): React.CSSProperties {
   if (tone === 'danger') return { ...base, background: C.danger, borderColor: '#ff8a8a', color: '#fff', fontWeight: 600 };
   if (tone === 'primary') return { ...base, background: C.primary, borderColor: '#7ab8ff', color: '#0c1118', fontWeight: 600 };
   return base;
+}
+
+/** dock chip：紧凑、单字号、active 高亮（蓝底）。用于最长边切换。 */
+function chipBtn(active: boolean): React.CSSProperties {
+  return {
+    padding: '4px 7px', height: 22,
+    fontSize: 10, lineHeight: 1, fontWeight: 600,
+    borderRadius: 6,
+    background: active ? C.primary : 'rgba(255,255,255,0.06)',
+    color: active ? '#0c1118' : C.textDim,
+    border: `1px solid ${active ? '#7ab8ff' : C.border}`,
+    cursor: 'pointer',
+    flexShrink: 0,
+    transition: 'background 120ms, color 120ms, border-color 120ms',
+  };
 }
 
 const el = document.getElementById('root');
