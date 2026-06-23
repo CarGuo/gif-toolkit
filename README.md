@@ -239,7 +239,7 @@ cd gif-toolkit-1.0.0
 | Video → GIF | 视频转 GIF + 自适应压缩（可选 ffmpeg / gifski 两种引擎） |
 | Video → WebP | 视频转动画 WebP |
 | GIF Resize | 等比缩放宽度 |
-| GIF Optimize | gifsicle `-O3` / lossy / colors / dither |
+| GIF Optimize | gifski 高质量 lossy（主引擎，2~5× 体积比追平 ezgif）+ gifsicle `-O3` / colors / dither 兜底 |
 | GIF WeChat-safe | 三步 sanitize，产物可直接传公众号（≤ 300 帧 / header 干净） |
 | Trim | 裁剪时间区间（无损切片） |
 | Speed | 0.25× ~ 4× 调速 |
@@ -293,7 +293,7 @@ cd gif-toolkit-1.0.0
 
 ## 自适应压缩
 
-四阶段渐进策略，平均约 12 次 gifsicle 调用即可命中目标体积：
+四阶段渐进策略，**Phase B 主引擎现在是 gifski**（quality sweep `[100,80,65,50,40,30]`），gifski 不存在 / 全档超 hardMax 才降级 gifsicle 二分 lossy：
 
 ![四阶段自适应压缩](./docs/images/compression-1-targets.png)
 
@@ -381,7 +381,7 @@ npm run test:e2e         # 完整 122 用例，~1.5min
 
 - [ezgif.com](https://ezgif.com/) — 原始功能与交互参考
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) — 直链解析事实标准
-- [ffmpeg](https://ffmpeg.org/) / [gifsicle](https://www.lcdf.org/gifsicle/) / [sharp](https://sharp.pixelplumbing.com/) — 视频与 GIF 处理三大支柱
+- [ffmpeg](https://ffmpeg.org/) / [gifski](https://gif.ski/) / [gifsicle](https://www.lcdf.org/gifsicle/) / [sharp](https://sharp.pixelplumbing.com/) — 视频与 GIF 处理四大支柱（gifski 自 v1.1 起作为 lossy 主引擎）
 
 ---
 

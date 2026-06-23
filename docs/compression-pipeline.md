@@ -54,11 +54,20 @@ else cap = maxSide
 
 ---
 
-## 3. Phase B — Adaptive lossy 二分(R-04)
+## 3. Phase B — Adaptive lossy(R-04 / R-GIFSKI-PRIMARY)
 
-**目的**:在不动尺寸的前提下,用 gifsicle `--lossy` 把体积压到 softMaxBytes。
+**目的**:在不动尺寸的前提下,把体积压到 softMaxBytes。
 
-**关键设计**:
+**v1.1 起的主路径(gifski-first)**:
+
+1. **gifski quality sweep**(由高到低):`[100, 80, 65, 50, 40, 30]`
+2. 每一档:`ffmpeg 抽 PNG 序列 → gifski 编码 → 量体积`
+3. **first-fit** 命中 softMaxBytes 即 best;若全档都 ≤ hardMax,取最小的那一档作 fallback
+4. **gifski 不存在**(用户裁掉了 [optionalDependencies](file:///Users/guoshuyu/workspace/gif-toolkit/package.json)),或**全档超 hardMax**,降级走下方 gifsicle 二分
+
+详见 [R-GIFSKI-PRIMARY](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-GIFSKI-PRIMARY.md) 与 [SC-32](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-32-gifski-primary-vs-ezgif.md)。实测 IMG_6253.MOV 在 gifsicle 路径 3.2 MB,gifski 路径 669 KB,接近 ezgif `lossy=80`。
+
+**Fallback:gifsicle `--lossy` 二分**(原 v1.0 路径,保留作 safety net):
 
 1. **自适应起点 startLossy**:根据 currentSize/softTarget 比值取
    ```

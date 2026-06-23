@@ -23,6 +23,7 @@
 | 输出文件畸变(很扁/很瘦) | 没走 longSideFloor 守护就缩边了 | [R-06](file:///Users/guoshuyu/workspace/gif-toolkit/AGENTS.md) / [SC-02](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-02-aspect-ratio-early-fail.md) |
 | Phase A 抛 `AspectRatioConstraintError` | 长条图 + minSide 太大,无法满足"长边≤maxSide 同时 短边≥minSide" | [R-06](file:///Users/guoshuyu/workspace/gif-toolkit/AGENTS.md) / [SC-02](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-02-aspect-ratio-early-fail.md) |
 | 压缩巨慢(几百次 gifsicle) | startLossy 没自适应,从 0 一路硬试 | [R-04](file:///Users/guoshuyu/workspace/gif-toolkit/AGENTS.md) / [docs/compression-pipeline.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/compression-pipeline.md) §3 |
+| 输出体积比 ezgif 大 2~5 倍 | 走的 gifsicle fallback,没用上 gifski 主引擎(`getGifskiPath()` 返回 null) | [R-GIFSKI-PRIMARY](file:///Users/guoshuyu/workspace/gif-toolkit/harness/rules/R-GIFSKI-PRIMARY.md) / [SC-32](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-32-gifski-primary-vs-ezgif.md) |
 | 输出体积忽大忽小 | softMax 与 maxBytes 没分级,被 fallback 路径误判为 best | [R-05](file:///Users/guoshuyu/workspace/gif-toolkit/AGENTS.md) / [SC-03](file:///Users/guoshuyu/workspace/gif-toolkit/harness/scenarios/SC-03-soft-vs-hard-target.md) |
 | `gif over 4.0MB, marking skipped` | Phase D 兜底也压不下,**这是预期行为** | [docs/compression-pipeline.md](file:///Users/guoshuyu/workspace/gif-toolkit/docs/compression-pipeline.md) §5 |
 

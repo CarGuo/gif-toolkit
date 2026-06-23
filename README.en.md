@@ -235,7 +235,7 @@ The "Toolbox" tab gives you 10 standalone tools. Drop files onto any tool to bat
 | Video → GIF | Video to GIF + adaptive compression (ffmpeg / gifski engines) |
 | Video → WebP | Video to animated WebP |
 | GIF Resize | Proportional width resize |
-| GIF Optimize | gifsicle `-O3` / lossy / colors / dither |
+| GIF Optimize | gifski high-quality lossy (primary, 2~5× compression ratio matches ezgif) + gifsicle `-O3` / colors / dither fallback |
 | GIF WeChat-safe | Three-step sanitize — output ships straight into WeChat (≤ 300 frames / clean header) |
 | Trim | Time-range cut (lossless) |
 | Speed | 0.25× ~ 4× |
@@ -289,7 +289,7 @@ Plain `axios + cheerio` cannot reach pages that need JS rendering, login cookies
 
 ## Adaptive compression
 
-Four-phase progressive strategy — typically ~12 gifsicle calls to land on target:
+Four-phase progressive strategy. **Phase B is now driven by gifski** (quality sweep `[100,80,65,50,40,30]`); gifsicle binary-search lossy only kicks in as a fallback when gifski is missing or every quality step exceeds hardMax:
 
 ![Four-phase adaptive compression](./docs/images/compression-1-targets.png)
 
@@ -377,7 +377,7 @@ Every new feature / bug fix must ship with tests.
 
 - [ezgif.com](https://ezgif.com/) — original feature & UX reference
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) — de-facto standard for direct-link extraction
-- [ffmpeg](https://ffmpeg.org/) / [gifsicle](https://www.lcdf.org/gifsicle/) / [sharp](https://sharp.pixelplumbing.com/) — the three pillars of video & GIF processing
+- [ffmpeg](https://ffmpeg.org/) / [gifski](https://gif.ski/) / [gifsicle](https://www.lcdf.org/gifsicle/) / [sharp](https://sharp.pixelplumbing.com/) — the four pillars of video & GIF processing (gifski has been the lossy primary since v1.1)
 
 ---
 

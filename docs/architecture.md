@@ -82,10 +82,10 @@ flowchart TB
 | 文件 | 职责 | 关键 export |
 |---|---|---|
 | [index.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/index.ts) | 应用入口、`BrowserWindow`、注册 IPC handlers、`sanitizeOptions` | `app.whenReady` |
-| [binaries.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/binaries.ts) | 解析 ffmpeg/ffprobe/gifsicle 路径(asar.unpacked 修正) | `getFFmpegPath / getGifsiclePath` |
+| [binaries.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/binaries.ts) | 解析 ffmpeg/ffprobe/gifsicle/gifski 路径(asar.unpacked 修正) | `getFFmpegPath / getGifsiclePath / getGifskiPath` |
 | [sniffer.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/sniffer.ts) | 7 条嗅探规则 + dedupKey + matchEmbedProvider | `sniffPage` |
 | [downloader.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/downloader.ts) | 流式下载 + Range + Content-Length | `downloadToTmp` |
-| [ffmpeg.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/ffmpeg.ts) | palette 两遍 + sharp 缩放 + gifsicle 优化 | `videoToGif / gifResize / gifOptimize` |
+| [ffmpeg.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/ffmpeg.ts) | palette 两遍 + sharp 缩放 + gifski 高质量 lossy + gifsicle 几何/帧/调色板优化 | `videoToGif / gifResize / gifOptimize / gifskiReencode` |
 | [processor.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor.ts) | 任务调度(pqueue) + Phase A-D 压缩 + AspectRatioConstraintError | `processOne / startBatch` |
 | [processor-utils.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor-utils.ts) | 纯函数：clampConcurrency / shortSideAfterCap / compressCacheKey / chooseCompressionTargetMB / ACCEPT_TOL 等可单测的常量与算法 | 见 [tests/main/processor-utils.test.ts](file:///Users/guoshuyu/workspace/gif-toolkit/tests/main/processor-utils.test.ts) |
 | [logger.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/logger.ts) | 结构化日志(写到 userData) | `logger` |
