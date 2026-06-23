@@ -99,7 +99,7 @@ export interface ModalsHostProps {
    * 「📤 在上传历史中查看本批」 button to jump from sniff history detail
    * to the matching upload-history batch in the global Uploads tab.
    */
-  setView: React.Dispatch<React.SetStateAction<'home' | 'history' | 'toolbox' | 'uploads'>>;
+  setView: React.Dispatch<React.SetStateAction<'home' | 'history' | 'toolbox' | 'uploads' | 'recorder'>>;
 
   // Toaster
   toasterHandleSetter: Parameters<typeof Toaster>[0]['registerHandle'];

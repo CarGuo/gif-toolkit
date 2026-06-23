@@ -15,13 +15,15 @@ import {
   chooseCompressionTargetMB,
   clampConcurrency,
   compressCacheKey,
+  decideEarlyAccept,
   derivePartialSourceName,
   enumerateSegments,
   extrapolateNextLossy,
   filterSelectedSegments,
   geometricShrinkLongestSide,
   planPhase0,
-  shortSideAfterCap
+  shortSideAfterCap,
+  shouldReplaceBest
 } from '../../src/main/processor-utils';
 
 describe('clampConcurrency', () => {
@@ -176,6 +178,91 @@ describe('extrapolateNextLossy', () => {
 
   it('returns NaN when lastLossy is zero (no sample)', () => {
     expect(extrapolateNextLossy(5, 0, 5, 2)).toBeNaN();
+  });
+});
+
+/* ------------------------- C-02 decideEarlyAccept ------------------------- */
+
+describe('decideEarlyAccept (C-02 symmetric Phase B early-accept)', () => {
+  it('accepts when lastSize is within ±ACCEPT_TOL of target', () => {
+    expect(decideEarlyAccept(2.0, 2.0)).toBe('accept');
+    // Use a tiny margin INSIDE the tolerance so the boundary check survives
+    // FP rounding (2 * 1.12 = 2.2400000000000002 in IEEE-754, which is
+    // strictly > target * (1 + tol) when compared bit-exact).
+    expect(decideEarlyAccept(2.0 * (1 + ACCEPT_TOL * 0.9), 2.0)).toBe('accept');
+    expect(decideEarlyAccept(2.0 * (1 - ACCEPT_TOL * 0.9), 2.0)).toBe('accept');
+  });
+
+  it('asks for more lossy (refine-shrink) when lastSize is too big', () => {
+    // 50 % over target — well beyond ACCEPT_TOL (12 %).
+    expect(decideEarlyAccept(3.0, 2.0)).toBe('refine-shrink');
+  });
+
+  it('asks for LESS lossy (refine-grow) when first try overshoots small', () => {
+    // This is the asymmetry C-02 fixes: pre-fix any undershoot was
+    // "accept", which lost quality silently. 0.5 MB vs 2 MB target is
+    // way below the tolerance band, so we must refine BACK up.
+    expect(decideEarlyAccept(0.5, 2.0)).toBe('refine-grow');
+  });
+
+  it('boundary just outside tolerance triggers a refine (either side)', () => {
+    const eps = 1e-6;
+    expect(decideEarlyAccept(2.0 * (1 + ACCEPT_TOL) + eps, 2.0)).toBe('refine-shrink');
+    expect(decideEarlyAccept(2.0 * (1 - ACCEPT_TOL) - eps, 2.0)).toBe('refine-grow');
+  });
+
+  it('falls back to accept for degenerate inputs (no useful info)', () => {
+    expect(decideEarlyAccept(NaN, 2)).toBe('accept');
+    expect(decideEarlyAccept(2, 0)).toBe('accept');
+    expect(decideEarlyAccept(2, -1)).toBe('accept');
+  });
+
+  it('respects an overridden tolerance', () => {
+    // tight 1 % tolerance — even small drift triggers refine.
+    expect(decideEarlyAccept(2.05, 2.0, 0.01)).toBe('refine-shrink');
+    expect(decideEarlyAccept(1.95, 2.0, 0.01)).toBe('refine-grow');
+  });
+});
+
+/* ------------------------- C-05 shouldReplaceBest ------------------------- */
+
+describe('shouldReplaceBest (C-05 band-tiered, smaller-wins recordBest)', () => {
+  const SOFT = 2;
+  const HARD = 4;
+
+  it('always replaces when there is no current best', () => {
+    expect(shouldReplaceBest(null, { sizeMB: 5 }, SOFT, HARD)).toBe(true);
+    expect(shouldReplaceBest(null, { sizeMB: 0.1 }, SOFT, HARD)).toBe(true);
+  });
+
+  it('prefers under-soft over under-hard', () => {
+    expect(shouldReplaceBest({ sizeMB: 3.5 }, { sizeMB: 1.5 }, SOFT, HARD)).toBe(true);
+  });
+
+  it('prefers under-hard over over-hard', () => {
+    expect(shouldReplaceBest({ sizeMB: 5 }, { sizeMB: 3 }, SOFT, HARD)).toBe(true);
+  });
+
+  it('rejects when incoming is in a worse tier', () => {
+    expect(shouldReplaceBest({ sizeMB: 1.5 }, { sizeMB: 3 }, SOFT, HARD)).toBe(false);
+    expect(shouldReplaceBest({ sizeMB: 3 }, { sizeMB: 5 }, SOFT, HARD)).toBe(false);
+  });
+
+  it('within the same band, prefers strictly smaller (C-05 fix)', () => {
+    // Pre-fix behaviour: once under soft, a LARGER under-soft replaced
+    // best (best drifted toward 2 MB). New behaviour: smaller wins.
+    expect(shouldReplaceBest({ sizeMB: 1.4 }, { sizeMB: 1.9 }, SOFT, HARD)).toBe(false);
+    expect(shouldReplaceBest({ sizeMB: 1.9 }, { sizeMB: 1.4 }, SOFT, HARD)).toBe(true);
+  });
+
+  it('within the over-hard band, smaller is still better (we are at least making progress)', () => {
+    expect(shouldReplaceBest({ sizeMB: 8 }, { sizeMB: 6 }, SOFT, HARD)).toBe(true);
+    expect(shouldReplaceBest({ sizeMB: 6 }, { sizeMB: 8 }, SOFT, HARD)).toBe(false);
+  });
+
+  it('ties prefer the existing best (stability — avoid log churn)', () => {
+    expect(shouldReplaceBest({ sizeMB: 1.5 }, { sizeMB: 1.5 }, SOFT, HARD)).toBe(false);
+    expect(shouldReplaceBest({ sizeMB: 3 }, { sizeMB: 3 }, SOFT, HARD)).toBe(false);
   });
 });
 

@@ -147,6 +147,17 @@ input[type="text"]:focus { border-color: var(--accent); }
   overflow: auto;
   min-height: 0;
 }
+/* R-REC-DESKTOP-AREA v2.4 — 录屏面板与 history/uploads 同款:不能
+   继承 .body 的 360px+1fr 两列(否则 RecorderPanel 内部的
+   "1fr + 320px sticky CTA" 子 grid 会被压在第一列 ~312px 里,左栏
+   文字竖排堆叠、右栏 CTA 卡叠在左栏上、右半屏空白)。改成单列 +
+   overflow:auto 让 RecorderPanel 占满主区,内部两栏 grid 才有足
+   够空间撑开。 */
+.body-recorder {
+  grid-template-columns: 1fr;
+  overflow: auto;
+  min-height: 0;
+}
 .left {
   border-right: 1px solid var(--border);
   display: flex;

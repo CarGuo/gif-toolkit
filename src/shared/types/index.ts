@@ -32,3 +32,5 @@ export * from './system';
 export * from './log';
 export * from './update';
 export * from './chainLineage';
+export * from './recorder';
+export * from './dock';

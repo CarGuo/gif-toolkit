@@ -15,7 +15,7 @@
  */
 import React from 'react';
 
-export type AppView = 'home' | 'history' | 'toolbox' | 'uploads';
+export type AppView = 'home' | 'history' | 'toolbox' | 'uploads' | 'recorder';
 
 export interface TopBarProps {
   view: AppView;
@@ -48,12 +48,21 @@ export interface TopBarProps {
    * 菜单 / About 面板各走自己的入口；这里是主窗口可见入口。
    */
   onCheckForUpdates?: () => void;
+  /**
+   * R-DOCK-FLOATING — floating desktop dock toggle.
+   * `dockEnabled` 反映主进程当前是否有 dock window；undefined 表示
+   * App 还没装载好这个 prop，按钮隐藏。点击调
+   * `window.giftk.dock.{enable,disable}`，主进程会幂等处理。
+   */
+  dockEnabled?: boolean;
+  onToggleDock?: () => void;
 }
 
 export const TopBar: React.FC<TopBarProps> = ({
   view, setView, reloadHistory, historyCount, uploadHistoryCount,
   outputDirLabel, outputDirTitle, onPickDir,
-  onOpenCurrentDir, hasBaseOutputDir, onCheckForUpdates
+  onOpenCurrentDir, hasBaseOutputDir, onCheckForUpdates,
+  dockEnabled, onToggleDock
 }) => {
   return (
     <div className="titlebar">
@@ -105,6 +114,15 @@ export const TopBar: React.FC<TopBarProps> = ({
         </button>
         <button
           type="button"
+          className={`tab-btn ${view === 'recorder' ? 'active' : ''}`}
+          onClick={() => setView('recorder')}
+          aria-pressed={view === 'recorder'}
+          title="区域录屏 → GIF"
+        >
+          录屏
+        </button>
+        <button
+          type="button"
           className={`tab-btn ${view === 'uploads' ? 'active' : ''}`}
           onClick={() => setView('uploads')}
           aria-pressed={view === 'uploads'}
@@ -115,6 +133,19 @@ export const TopBar: React.FC<TopBarProps> = ({
       </div>
       <div className="spacer" />
       <div className="actions">
+        {onToggleDock ? (
+          <button
+            type="button"
+            className="ghost"
+            onClick={onToggleDock}
+            title={dockEnabled ? '关闭桌面悬浮控件' : '启用桌面悬浮控件（一直置顶，快捷启动录屏/工具箱/嗅探）'}
+            aria-pressed={!!dockEnabled}
+            aria-label={dockEnabled ? '关闭桌面悬浮控件' : '启用桌面悬浮控件'}
+            style={{ padding: '0 10px' }}
+          >
+            {dockEnabled ? '🟢 悬浮球' : '⚪ 悬浮球'}
+          </button>
+        ) : null}
         {onCheckForUpdates ? (
           <button
             type="button"

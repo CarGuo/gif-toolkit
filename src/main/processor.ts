@@ -66,9 +66,11 @@ import {
   shortSideAfterCap,
   compressCacheKey,
   chooseCompressionTargetMB,
-  ACCEPT_TOL,
   EARLY_FAST_RATIO,
   SHRINK_FIRST_RATIO,
+  adaptiveStartLossy,
+  decideEarlyAccept,
+  shouldReplaceBest,
   enumerateSegments,
   filterSelectedSegments,
   derivePartialSourceName
@@ -447,23 +449,17 @@ async function compressLoop(
   }
 
   const recordBest = (p: string, s: number, w: number): void => {
-    const wasUnderSoft = bestUnderSoft;
-    const wasUnderHard = bestUnderHard;
-    if (s <= softMB) {
-      if (!wasUnderSoft || s > bestSize) {
-        bestPath = p; bestSize = s; bestWidth = w;
-        bestUnderSoft = true; bestUnderHard = true;
-      }
-    } else if (s <= hardMB) {
-      if (!wasUnderSoft && (!wasUnderHard || s > bestSize)) {
-        bestPath = p; bestSize = s; bestWidth = w;
-        bestUnderHard = true;
-      }
-    } else {
-      if (!wasUnderHard && s < bestSize) {
-        bestPath = p; bestSize = s; bestWidth = w;
-      }
-    }
+    // C-05 — band-tiered, smaller-wins preference. See `shouldReplaceBest`
+    // in processor-utils.ts for the full rationale and the matching
+    // tests in processor-utils.test.ts. The local `bestUnderSoft` /
+    // `bestUnderHard` flags are kept in sync afterwards so the rest of
+    // compressLoop's short-circuits (`if (bestUnderSoft) break;`) keep
+    // working unchanged.
+    const current = bestPath ? { sizeMB: bestSize } : null;
+    if (!shouldReplaceBest(current, { sizeMB: s }, softMB, hardMB)) return;
+    bestPath = p; bestSize = s; bestWidth = w;
+    bestUnderSoft = s <= softMB;
+    bestUnderHard = s <= hardMB;
   };
 
   // ---------- helper: gifsicle pass with O5 cache ----------
@@ -515,14 +511,13 @@ async function compressLoop(
     return s;
   };
 
-  const adaptiveStartLossy = (curMB: number, target: number): number => {
-    const ratio = curMB / Math.max(0.01, target);
-    if (ratio <= 1.2) return 30;
-    if (ratio <= 1.6) return 60;
-    if (ratio <= 2.2) return 90;
-    if (ratio <= 3.0) return 120;
-    if (ratio <= 4.5) return 150;
-    return 180;
+  const adaptiveStartLossyLocal = (curMB: number, target: number): number => {
+    // C-01 — delegate to the single source of truth in processor-utils.ts.
+    // The inlined ladder that used to live here drifted from the unit-tested
+    // version (different thresholds AND different return values), so this
+    // wrapper just forwards. Clamp to the user's lossy ceiling/floor at the
+    // call site (tryOptimize → clampLossy) — keep this wrapper pure-ish.
+    return adaptiveStartLossy(curMB, target);
   };
 
   // ---------- Phase B (revised, O2): single-shot or 1-refine lossy ----------
@@ -546,7 +541,7 @@ async function compressLoop(
     phase: string
   ): Promise<number> => {
     const sizeNow = await statSizeMB(src);
-    const start = adaptiveStartLossy(sizeNow, target);
+    const start = adaptiveStartLossyLocal(sizeNow, target);
     let lastLossy = start;
     let lastSize: number;
     try {
@@ -556,14 +551,18 @@ async function compressLoop(
       recordPhaseFailure(`${phase}-start-lossy=${start}`, e);
       return Number.POSITIVE_INFINITY;
     }
-    // O2 acceptance: within tolerance (either side) → done, no refine needed.
-    if (Math.abs(lastSize - target) / target <= ACCEPT_TOL) return lastSize;
-    if (lastSize <= target) {
-      // Already smaller than target — saving a refine costs at most some
-      // quality. Accept and move on; recordBest already kept this result.
-      return lastSize;
-    }
-    // O2 refine: linear extrapolation, single pass.
+    // C-02 — symmetric early-accept. Pre-fix only honoured "within tol on
+    // the high side OR any undershoot"; that asymmetry routinely produced
+    // 30‑60 %-of-target artefacts (visibly mushy) because adaptiveStartLossy
+    // started aggressive. Now: within tol on either side ⇒ done; over-cap
+    // ⇒ shrink (more lossy); under-cap ⇒ GROW (less lossy) to claw back
+    // quality. See `decideEarlyAccept` in processor-utils.ts for the table.
+    const decision = decideEarlyAccept(lastSize, target);
+    if (decision === 'accept') return lastSize;
+    // O2 refine: linear extrapolation, single pass. Works for both shrink
+    // (lastSize > target → more lossy) and grow (lastSize < target → less
+    // lossy) because extrapolateNextLossy returns whichever side the linear
+    // model lands on.
     const k = (sizeNow - lastSize) / Math.max(1, lastLossy); // MB per lossy unit
     if (k > 0) {
       const lExtrap = lastLossy + (lastSize - target) / k;
@@ -674,6 +673,12 @@ async function compressLoop(
       detail: `aim=${aim.toFixed(1)}MB ratio=${ratio.toFixed(2)} ${curSide}→${nextSide} short=${nextShort} (w=${nextWidth})`
     });
     try {
+      // C-04 — deliberately decode from the ORIGINAL `inputGif`, not from
+      // `curSrc`. `curSrc` may already be a lossy-compressed intermediate
+      // produced by Phase B's gifsicle pass; re-scaling that further would
+      // double-quantise the palette and visibly degrade quality. sharp /
+      // ffmpeg decoding from the pristine source is more CPU but strictly
+      // better quality-per-byte. Do NOT "optimise" this to `curSrc`.
       await imageResizeKeepAspect(inputGif, resized, nextWidth, signal);
       producedAny = true;
     } catch (e) {
@@ -729,6 +734,9 @@ async function compressLoop(
           if (longestSide <= 0 || origW <= 0) return finalSide;
           return Math.max(1, Math.round(origW * (finalSide / longestSide)));
         })();
+        // C-04 — decode from ORIGINAL `inputGif`, see Phase C inline note
+        // above for the (identical) rationale: double-decode is the only
+        // way to avoid stacking palette-quantisation losses.
         await imageResizeKeepAspect(inputGif, finalSrc, finalWidth, signal);
         producedAny = true;
         curSrc = finalSrc;

@@ -881,15 +881,9 @@ export async function gifsicleMethod(
     ? opts.dither
     : 'floyd-steinberg';
   const oFlag = `-O${oLevel}`;
-  // Mirror gifsicleOptimize's dither-arg policy: dither only matters when the
-  // palette is reduced (colors < 256). 'none' is a deliberate "off" signal —
-  // pass through with no --dither flag (gifsicle defaults to no dither anyway,
-  // so omitting is equivalent and keeps the argv minimal).
-  const ditherArgFor = (effectiveColors: number): string | null => {
-    if (effectiveColors >= 256) return null;
-    if (oDither === 'none') return null;
-    return oDither === 'ordered' ? '--dither=ordered' : '--dither=floyd-steinberg';
-  };
+  // C-03 — the previous `ditherArgFor` helper has been inlined into the
+  // 'color-dither' branch (the only remaining caller). 'color-reduction'
+  // is now hard-coded "no dither" by design; see its branch below.
 
   switch (method) {
     case 'lossy': {
@@ -900,9 +894,13 @@ export async function gifsicleMethod(
       return;
     }
     case 'color-reduction': {
-      const args = [oFlag, '--colors', String(colors), '--color-method', 'blend-diversity'];
-      const d = ditherArgFor(colors);
-      if (d) args.push(d);
+      // C-03 — 'color-reduction' is the explicit "no-dither" branch
+      // (mirrors ezgif's "Reduce colors (no dither)" option). It is the
+      // A/B partner of 'color-dither' below — adding dither here would
+      // collapse the two into the same command line and defeat the
+      // method picker. Always omit `--dither` regardless of `opts.dither`
+      // (callers asking for dithered output should pick 'color-dither').
+      const args = [oFlag, '--colors', String(colors), '--color-method', 'blend-diversity', '--no-dither'];
       args.push(input, '-o', output);
       await run(gifsicle, args, { signal: opts.signal });
       return;

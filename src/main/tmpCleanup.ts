@@ -51,7 +51,13 @@ export const ALLOWED_PREFIXES: readonly string[] = [
   // on modal close, but if the renderer crashes mid-preview the dir
   // would otherwise leak — so we list its prefix here so the daily
   // sweep can reap it as a backstop.
-  'giftk-trial-'
+  'giftk-trial-',
+  // R-REC-DESKTOP-AREA — desktop area recorder spools the intermediate
+  // mp4 + sliced gif under <tmpdir>/giftk-rec/ during the recording
+  // session. The toolbox chain that follows promotes the gif to the
+  // user-chosen output dir; the tmp leftovers (mp4 + any stray frames)
+  // are reaped by the daily sweep.
+  'giftk-rec'
 ];
 
 const DEFAULT_MAX_AGE_MS = 24 * 60 * 60 * 1000;

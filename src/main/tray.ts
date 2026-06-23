@@ -41,15 +41,16 @@ function pickTrayIconPath(): string | null {
 function buildTrayImage(): Electron.NativeImage {
   const p = pickTrayIconPath();
   if (!p) return nativeImage.createEmpty();
+  // R-86 #tray-retina — 不要 resize() 后再 setTemplateImage()。
+  // createFromPath 会自动找同目录 `*@2x.png` 作为 Retina representation，
+  // 让 menu bar 在 1× / 2× 屏分别渲染清晰；resize 会摊平 representations，
+  // Retina menu bar 收到一张 18×18 单图后被拉成 36 像素，结果就是看不清/
+  // 显示成"空槽"。直接交给 Electron 管理；setTemplateImage 触发 AppKit
+  // light/dark 自适应 tint。
   const img = nativeImage.createFromPath(p);
   if (process.platform === 'darwin') {
-    // trayTemplate.png is already the right shape (18×18 mask),
-    // but we resize defensively in case future asset replaces it
-    // at a different intrinsic size, and call setTemplateImage so
-    // AppKit performs its light/dark-aware tinting.
-    const resized = img.resize({ width: 18, height: 18 });
-    resized.setTemplateImage(true);
-    return resized;
+    img.setTemplateImage(true);
+    return img;
   }
   return img.resize({ width: 16, height: 16 });
 }

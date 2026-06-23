@@ -734,6 +734,75 @@ const api = {
       ipcRenderer.on('db:flushBeforeQuit', handler);
       return () => ipcRenderer.removeListener('db:flushBeforeQuit', handler);
     }
+  },
+  /* ---------------- Recorder (R-REC-DESKTOP-AREA) ---------------- */
+  /**
+   * 桌面区域录屏。所有 IPC 走主进程独占 ffmpeg（renderer 永远不直接
+   * 调 desktopCapturer / fs / child_process），符合 R-10 / R-11 白名单。
+   */
+  recorder: {
+    listDisplays(): Promise<unknown[]> {
+      return ipcRenderer.invoke('recorder:listDisplays');
+    },
+    checkPermission(): Promise<unknown> {
+      return ipcRenderer.invoke('recorder:checkPermission');
+    },
+    openSystemPrefs(): Promise<{ ok: true }> {
+      return ipcRenderer.invoke('recorder:openSystemPrefs');
+    },
+    /** 拉起 transparent overlay 选区。resolve 时给 region 或 cancelled。 */
+    selectRegion(payload: { displayId?: number }): Promise<unknown> {
+      ensureObject(payload, 'payload');
+      return ipcRenderer.invoke('recorder:selectRegion', payload);
+    },
+    cancelOverlay(): Promise<{ ok: true }> {
+      return ipcRenderer.invoke('recorder:cancelOverlay');
+    },
+    start(payload: { params: unknown; avfoundationDeviceIndex?: number }): Promise<{ sessionId: string; outputPath: string }> {
+      ensureObject(payload, 'payload');
+      return ipcRenderer.invoke('recorder:start', payload);
+    },
+    stop(sessionId: string): Promise<{ ok: boolean }> {
+      ensureString(sessionId, 'sessionId');
+      return ipcRenderer.invoke('recorder:stop', sessionId);
+    },
+    cancel(sessionId: string): Promise<{ ok: boolean }> {
+      ensureString(sessionId, 'sessionId');
+      return ipcRenderer.invoke('recorder:cancel', sessionId);
+    },
+    onProgress(cb: (p: unknown) => void): () => void {
+      const handler = (_: unknown, payload: unknown): void => {
+        try { cb(payload); } catch { /* swallow */ }
+      };
+      ipcRenderer.on('recorder:progress', handler);
+      return () => ipcRenderer.removeListener('recorder:progress', handler);
+    }
+  },
+  /**
+   * R-DOCK-FLOATING — main-window facing dock control (3 IPC).
+   * The dock window's own preload is the much smaller
+   * [src/preload/dockOverlay.ts] (R-11 whitelist, 6 methods).
+   */
+  dock: {
+    enable(): Promise<{ ok: boolean; visible?: boolean; reason?: string }> {
+      return ipcRenderer.invoke('dock:enable');
+    },
+    disable(): Promise<{ ok: boolean }> {
+      return ipcRenderer.invoke('dock:disable');
+    },
+    isVisible(): Promise<boolean> {
+      return ipcRenderer.invoke('dock:isVisible');
+    },
+    /** R-DOCK-FLOATING #唤回路径 — 主窗订阅 dock 的可见性变化（hide /
+     *  show / destroy），让 TopBar 的「悬浮球」按钮按需切换 🟢/⚪ 与
+     *  点击行为（disable vs enable）。返回 unsubscribe。 */
+    onVisibilityChanged(cb: (visible: boolean) => void): () => void {
+      const listener = (_e: unknown, payload: { visible: boolean }): void => {
+        try { cb(!!payload?.visible); } catch { /* best-effort */ }
+      };
+      ipcRenderer.on('dock:visibilityChanged', listener);
+      return () => { try { ipcRenderer.off('dock:visibilityChanged', listener); } catch { /* best-effort */ } };
+    }
   }
 };
 

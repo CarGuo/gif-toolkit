@@ -13,10 +13,11 @@ import { HistoryPanel } from '../components/HistoryPanel';
 import { ToolboxPanel } from '../components/ToolboxPanel';
 import type { ToolboxPanelProps } from '../components/ToolboxPanel';
 import { UploadHistoryPanel } from '../components/UploadHistoryPanel';
+import { RecorderPanel } from '../components/RecorderPanel';
 import type { HistoryRecord } from '../components/useHistory';
 import type { ToolboxKind, ToolboxParams, UploadHistoryRecord } from '../../shared/types';
 
-export type SecondaryViewKind = 'history' | 'toolbox' | 'uploads';
+export type SecondaryViewKind = 'history' | 'toolbox' | 'uploads' | 'recorder';
 
 export interface SecondaryViewsProps {
   view: SecondaryViewKind;
@@ -110,6 +111,13 @@ export const SecondaryViews: React.FC<SecondaryViewsProps> = ({
     return (
       <div className="body body-toolbox" role="region" aria-label="toolbox">
         <ToolboxPanel pendingPreset={pendingPreset} />
+      </div>
+    );
+  }
+  if (view === 'recorder') {
+    return (
+      <div className="body body-recorder" role="region" aria-label="recorder">
+        <RecorderPanel />
       </div>
     );
   }

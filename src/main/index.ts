@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, session, protocol, net, clipboard } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell, session, protocol, net, clipboard, screen } from 'electron';
 import path from 'path';
 import { promises as fsp, statSync, existsSync } from 'fs';
 import crypto from 'crypto';
@@ -22,6 +22,15 @@ import { getCapabilityReport } from './capabilities';
 import { registerUploaderIpc } from './uploader';
 import { openDb, closeDb } from './db';
 import { registerDbIpc, getToolboxChainHistoryRepo } from './db/dbIpc';
+import {
+  startRecorder,
+  stopRecorder,
+  cancelRecorder,
+  checkScreenRecordPermission,
+  detectMacScreenDevice,
+} from './recorder';
+import { openRegionSelectorOverlay, cancelOverlayIfAny } from './recorderOverlay';
+import type { RecorderParams, RecorderProgress } from '../shared/types/recorder';
 import {
   DEFAULT_OPTIONS,
   TOOLBOX_INPUT_EXTENSIONS,
@@ -59,6 +68,15 @@ import {
 } from './resolver';
 import { setupTray, destroyTray, sniffClipboardURL, type TrayDeps } from './tray';
 import { registerShortcuts, unregisterAllShortcuts } from './globalShortcut';
+import {
+  createDockWindow,
+  destroyDockWindow,
+  isDockVisible,
+  notifyDockStateChanged,
+  notifyDockRecorderProgress,
+  type DockDeps,
+} from './dock';
+import { rememberDockRecorderParams } from './dockRecording';
 import { sweepTmpDir, sessionTmpRegistry } from './tmpCleanup';
 import { checkLatestRelease, type UpdateCheckResult } from './updater';
 import os from 'node:os';
@@ -98,6 +116,10 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 let mainWindow: BrowserWindow | null = null;
+/** R-DOCK-FLOATING — captured during tray bootstrap so that the
+ *  mainWindow show/hide listeners can refresh the floating dock's
+ *  `show-main / hide-main` state without re-creating deps. */
+let dockDepsRef: DockDeps | null = null;
 const allowedOutputDirs: Set<string> = new Set();
 
 function safeAppGetPath(name: 'downloads' | 'userData' | 'desktop' | 'documents' | 'home'): string {
@@ -684,6 +706,9 @@ async function createWindow(): Promise<void> {
       } catch (e) {
         log(`dock.hide failed: ${(e as Error).message}`);
       }
+      // R-DOCK-FLOATING — refresh floating dock so show-main/hide-main
+      // buttons reflect the current main-window visibility.
+      try { if (dockDepsRef) notifyDockStateChanged(dockDepsRef); } catch { /* best-effort */ }
     });
     mainWindow.on('show', () => {
       log('mainWindow shown -> show Dock icon');
@@ -693,6 +718,7 @@ async function createWindow(): Promise<void> {
       } catch (e) {
         log(`dock.show failed: ${(e as Error).message}`);
       }
+      try { if (dockDepsRef) notifyDockStateChanged(dockDepsRef); } catch { /* best-effort */ }
     });
   }
 
@@ -2197,6 +2223,148 @@ ipcMain.handle('resolve:embed', async (_e, media: unknown) => {
   }
 });
 
+/* ----------------------- Recorder IPC (R-REC-DESKTOP-AREA) ----------------------- */
+
+ipcMain.handle('recorder:listDisplays', async () => {
+  const { screen } = await import('electron');
+  const primaryId = screen.getPrimaryDisplay().id;
+  return screen.getAllDisplays().map((d) => ({
+    id: d.id,
+    label: d.label || `Display ${d.id}`,
+    bounds: d.bounds,
+    workArea: d.workArea,
+    scaleFactor: d.scaleFactor,
+    isPrimary: d.id === primaryId,
+  }));
+});
+
+ipcMain.handle('recorder:checkPermission', async () => {
+  return checkScreenRecordPermission();
+});
+
+ipcMain.handle('recorder:openSystemPrefs', async () => {
+  if (process.platform === 'darwin') {
+    await shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture');
+  }
+  return { ok: true };
+});
+
+ipcMain.handle('recorder:selectRegion', async (_e, payload: unknown) => {
+  const obj = (payload && typeof payload === 'object') ? payload as Record<string, unknown> : {};
+  const { screen } = await import('electron');
+  const displayId = typeof obj.displayId === 'number'
+    ? obj.displayId
+    : screen.getPrimaryDisplay().id;
+  return openRegionSelectorOverlay({ displayId });
+});
+
+ipcMain.handle('recorder:cancelOverlay', async () => {
+  cancelOverlayIfAny();
+  return { ok: true };
+});
+
+ipcMain.handle('recorder:start', async (_e, payload: unknown) => {
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('recorder:start payload must be object');
+  }
+  const obj = payload as Record<string, unknown>;
+  const params = obj.params as RecorderParams | undefined;
+  if (!params || !params.region) {
+    throw new Error('recorder:start requires params.region');
+  }
+  // R-DOCK-FLOATING #shared-pref — 把用户在主窗 RecorderPanel 设置的录制
+  // 偏好（fps / mode / max bytes / max width / capture audio / capture cursor）
+  // sticky 到 dock 录制路径，下一次悬浮球触发 dock-record-region 时会读这份
+  // 偏好而不是 hardcode，让两条入口体验一致。仅缓存与 region 无关字段。
+  try { rememberDockRecorderParams(params); } catch (e) { log(`rememberDockRecorderParams failed: ${(e as Error).message}`); }
+  // R-REC-DESKTOP-AREA #probe-device — mac 上 avfoundation 设备索引是
+  // 动态的（FaceTime / Continuity Camera / OBS Virtual / 多屏会让
+  // "Capture screen 0" 不再固定在 [1]）。调用方未显式传 device 索引时，
+  // 走 detectMacScreenDevice() spawn 一次 `-list_devices` 真实探测，
+  // 5 分钟缓存。探测失败兜底回 1（保底兼容）。
+  let avfoundationDeviceIndex: number | undefined;
+  if (typeof obj.avfoundationDeviceIndex === 'number') {
+    avfoundationDeviceIndex = obj.avfoundationDeviceIndex;
+  } else if (process.platform === 'darwin') {
+    // 默认 fallback：当下还不知道 region 所在屏，先按 primary 拿一个；
+    // 下面拿到 regionDisplay 后会被精确值覆盖。
+    avfoundationDeviceIndex = await detectMacScreenDevice({ isPrimary: true });
+  }
+
+  // R-DOCK-FLOATING v2 — recorder progress fan-out。除了主窗，dock 也需
+  // 要收到所有 recorder:progress 才能：(a) 在 dock 圆球显示 REC 计时；
+  // (b) 在 done/error 阶段 inline 反馈给用户而无需打开主窗。
+  // notifyDockRecorderProgress 在 dockDepsRef=null 时是 no-op，安全。
+  const fanOutProgress = (p: RecorderProgress): void => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('recorder:progress', p);
+    }
+    try { notifyDockRecorderProgress(p); } catch { /* best-effort */ }
+  };
+
+  // R-REC-DESKTOP-AREA #dpr-scale + #multi-display + #output-dir — 把
+  // region 所在 display 的 scaleFactor 喂给 startRecorder（让 buildRecorderArgs
+  // 把 region.x/y/w/h 从 CSS px 换算成 device px），同时 darwin 上 device
+  // ordinal 按 displays.findIndex 拿对，否则会抓错屏；录制产物落到项目
+  // 统一输出目录的 recordings/ 子目录（不再去 /private/var/folders）。
+  let regionScaleFactor: number | undefined;
+  try {
+    const allDisplays = screen.getAllDisplays();
+    const regionDisplay = allDisplays.find((d) => d.id === params.region.displayId);
+    if (regionDisplay) {
+      regionScaleFactor = regionDisplay.scaleFactor;
+      if (process.platform === 'darwin' && typeof obj.avfoundationDeviceIndex !== 'number') {
+        const primaryId = screen.getPrimaryDisplay().id;
+        const isPrimary = regionDisplay.id === primaryId;
+        const secondaries = allDisplays.filter((d) => d.id !== primaryId);
+        const secondaryOrdinal = Math.max(0, secondaries.findIndex((d) => d.id === regionDisplay.id));
+        avfoundationDeviceIndex = await detectMacScreenDevice({ isPrimary, secondaryOrdinal });
+      }
+    }
+  } catch { /* fallback：sf=undefined → buildRecorderArgs 默认 1.0 */ }
+  const outBase = defaultOutDir();
+  const recOutDir = outBase ? path.join(outBase, 'recordings') : undefined;
+  if (recOutDir) {
+    try { await fsp.mkdir(recOutDir, { recursive: true }); } catch { /* 让 startRecorder 内的 mkdirSync 再兜底 */ }
+    allowedOutputDirs.add(recOutDir);
+  }
+
+  const { sessionId, outputPath, done } = startRecorder({
+    params,
+    avfoundationDeviceIndex,
+    regionScaleFactor,
+    outputDir: recOutDir,
+    onProgress: fanOutProgress,
+  });
+
+  // 不 await done — 返回 sessionId 给 renderer 立即拿到，
+  // 后续完成事件通过 'recorder:progress' (substep=done|cancelled|error) 推送，
+  // **由 recorder.ts 内 close handler 一次性 emit**（已按 mode 区分 gifPath 语义：
+  // gif-direct → emit gifPath；mp4-then-gif → emit 不带 gifPath，留给 renderer 续接
+  // video-to-gif chain）。
+  //
+  // 注意：这里**不能**再二次 fan-out done 事件；之前的实现无条件把 outputPath 当
+  // gifPath emit，导致 mp4-then-gif 模式下 renderer 把 mp4 误判为最终 GIF，从而
+  // 跳过 video-to-gif chain。
+  done.catch((e: Error) => {
+    // recorder.ts close handler 已经 emit 了 error 进度；这里只兜底 log，
+    // 防止 unhandledRejection。
+    log(`recorder:start session ${sessionId} failed: ${e.message}`);
+  });
+
+  return { sessionId, outputPath };
+});
+
+ipcMain.handle('recorder:stop', async (_e, sessionId: unknown) => {
+  if (typeof sessionId !== 'string') throw new Error('sessionId must be string');
+  return stopRecorder(sessionId);
+});
+
+ipcMain.handle('recorder:cancel', async (_e, sessionId: unknown) => {
+  if (typeof sessionId !== 'string') throw new Error('sessionId must be string');
+  return cancelRecorder(sessionId);
+});
+
 /* ----------------------- App lifecycle ----------------------- */
 
 /**
@@ -2486,6 +2654,29 @@ if (!gotLock) {
       log(`tray/shortcut bootstrap failed: ${(e as Error).message}`);
     }
 
+    // R-DOCK-FLOATING — wire the floating dock IPC handlers once,
+    // sharing trayDeps with the tray so all entry points
+    // (tray menu / global shortcut / floating dock) funnel into the
+    // same sniffClipboardURL / showOrCreateMainWindow / 'tray:navigate'
+    // pair. The dock window itself is created lazily on first
+    // `dock:enable` IPC (the renderer's TopBar toggle), so users who
+    // don't want a floating widget pay zero RAM/visibility cost.
+    dockDepsRef = { trayDeps, log };
+    ipcMain.handle('dock:enable', () => {
+      try {
+        createDockWindow(dockDepsRef!);
+        return { ok: true, visible: isDockVisible() };
+      } catch (e) {
+        log(`dock:enable failed: ${(e as Error).message}`);
+        return { ok: false, reason: (e as Error).message };
+      }
+    });
+    ipcMain.handle('dock:disable', () => {
+      destroyDockWindow();
+      return { ok: true };
+    });
+    ipcMain.handle('dock:isVisible', () => isDockVisible());
+
     // R-UPDATE — Silent startup update check. Fires once, 5s after
     // the tray/shortcuts have settled, to avoid competing with the
     // first-paint critical path. We don't await it (network can be
@@ -2552,6 +2743,7 @@ app.on('before-quit', (event) => {
   // These are best-effort and must never throw past this hook.
   try { unregisterAllShortcuts(); } catch { /* best-effort */ }
   try { destroyTray(); } catch { /* best-effort */ }
+  try { destroyDockWindow(); } catch { /* best-effort */ }
   try { sessionTmpRegistry.cleanupSessionSync(); } catch { /* best-effort */ }
 
   // Synchronous side-effects we always want to run regardless of the

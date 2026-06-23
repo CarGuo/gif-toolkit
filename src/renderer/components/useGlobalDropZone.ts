@@ -40,7 +40,7 @@
  */
 import { useEffect } from 'react';
 
-export type AppView = 'home' | 'history' | 'toolbox' | 'uploads';
+export type AppView = 'home' | 'history' | 'toolbox' | 'uploads' | 'recorder';
 
 export type RunOfflineImportFn = (
   path: string | undefined,

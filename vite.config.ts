@@ -8,7 +8,18 @@ export default defineConfig({
   plugins: [react()],
   build: {
     outDir: resolve(__dirname, 'dist/renderer'),
-    emptyOutDir: true
+    emptyOutDir: true,
+    rollupOptions: {
+      input: {
+        // R-REC-DESKTOP-AREA — second renderer entry for the
+        // transparent region-selector overlay BrowserWindow.
+        main: resolve(__dirname, 'src/renderer/index.html'),
+        recorderOverlay: resolve(__dirname, 'src/renderer/recorderOverlay.html'),
+        // R-DOCK-FLOATING — third renderer entry for the floating
+        // desktop dock BrowserWindow.
+        dockOverlay: resolve(__dirname, 'src/renderer/dockOverlay.html')
+      }
+    }
   },
   server: {
     port: 5173,

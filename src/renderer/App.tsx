@@ -327,7 +327,7 @@ const App: React.FC = () => {
   // letting main mkdir a new one each call. This is what fixes the
   // user-visible "我四个任务最后落进了两个目录" bug.
   const recordOutputDirRef = useRef<Map<string, string>>(new Map());
-  const [view, setView] = useState<'home' | 'history' | 'toolbox' | 'uploads'>('home');
+  const [view, setView] = useState<'home' | 'history' | 'toolbox' | 'uploads' | 'recorder'>('home');
 
   // R-COMPRESS-V1 #5 — sniff-history「推荐预设」chip → toolbox prefill.
   // useToolbox is instantiated INSIDE ToolboxPanel (not here), so we
@@ -512,6 +512,47 @@ const App: React.FC = () => {
     }
   }, []);
 
+  // R-DOCK-FLOATING — Floating-dock visibility toggle. `dockEnabled`
+  // here is a MIRROR of `isDockVisible()` in main; it's not an
+  // independent "is dock module enabled" flag. Semantics:
+  //   - visible=true  → click = disable (destroy dock window)
+  //   - visible=false → click = enable (createDockWindow; reuses an
+  //     existing-but-hidden window inside main so users can recover
+  //     dock after a double-click-hide without restarting the app)
+  // 用户痛点："悬浮球双击怎么就消失了，消失了我去哪里打开？？？"
+  // 之前 `dockEnabled` 只反映"曾经点过 enable"，dock 自己 hide() 后
+  // 主窗按钮还显示 🟢，再点会走 disable 分支彻底销毁——这就是无路
+  // 唤回的根因。改成订阅主进程的 dock:visibilityChanged 推送后，
+  // hide() 立即让按钮回到 ⚪，再点就走 enable 唤回。
+  const [dockEnabled, setDockEnabled] = useState<boolean>(false);
+  useEffect(() => {
+    if (!giftk?.dock?.isVisible) return;
+    giftk.dock.isVisible().then((v) => setDockEnabled(!!v)).catch(() => undefined);
+  }, []);
+  useEffect(() => {
+    if (!giftk?.dock?.onVisibilityChanged) return;
+    const off = giftk.dock.onVisibilityChanged((v) => setDockEnabled(!!v));
+    return () => { try { off(); } catch { /* best-effort */ } };
+  }, []);
+  const onToggleDock = useCallback(async () => {
+    if (!giftk?.dock) return;
+    try {
+      // 先以最新 visibility 为准，避免 stale state（推送可能还在路上）
+      const currentlyVisible = giftk.dock.isVisible
+        ? await giftk.dock.isVisible()
+        : dockEnabled;
+      if (currentlyVisible) {
+        await giftk.dock.disable();
+        setDockEnabled(false);
+      } else {
+        const r = await giftk.dock.enable();
+        setDockEnabled(!!r.ok && !!r.visible);
+      }
+    } catch (e) {
+      setLogs((prev) => [...prev, `[dock] toggle failed: ${(e as Error).message}`].slice(-300));
+    }
+  }, [dockEnabled, setLogs]);
+
   // Bottom panel (TaskTable + LogBox) resizable height.
   // Persisted in localStorage so the user's preference survives reloads.
   // Drag gesture + persistence + double-click-to-reset all live in
@@ -652,7 +693,7 @@ const App: React.FC = () => {
   useEffect(() => {
     if (!giftk?.onTrayNavigate) return;
     const off = giftk.onTrayNavigate(({ tab }) => {
-      if (tab === 'history' || tab === 'home' || tab === 'toolbox' || tab === 'uploads') {
+      if (tab === 'history' || tab === 'home' || tab === 'toolbox' || tab === 'uploads' || tab === 'recorder') {
         setView(tab);
         setLogs((prev) => [...prev, `[tray] 已切换到 ${tab} 面板`].slice(-300));
       }
@@ -1318,6 +1359,8 @@ const App: React.FC = () => {
           giftk.openOutputDir(baseOutputDir).catch(() => { /* ignore */ });
         } : undefined}
         onCheckForUpdates={onCheckForUpdates}
+        dockEnabled={dockEnabled}
+        onToggleDock={onToggleDock}
       />
 
       <UpdateModal
@@ -1435,7 +1478,7 @@ const App: React.FC = () => {
       </div>
       ) : (
         <SecondaryViews
-          view={view as 'history' | 'toolbox' | 'uploads'}
+          view={view as 'history' | 'toolbox' | 'uploads' | 'recorder'}
           history={history}
           setHistoryDetail={setHistoryDetail}
           onOpenHistoryDir={onOpenHistoryDir}

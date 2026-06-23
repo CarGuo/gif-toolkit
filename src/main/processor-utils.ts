@@ -139,6 +139,89 @@ export function extrapolateNextLossy(
   return lastLossy + (lastMB - targetMB) / k;
 }
 
+/**
+ * C-02 — symmetric early-accept for Phase B's first lossy sample.
+ *
+ * Pre-fix behaviour: lossySearch accepted ANY `lastSize <= targetMB` and
+ * returned immediately. With an aggressive `adaptiveStartLossy` start
+ * (e.g. ratio=1.0 → lossy=20) this could land the first try at 30‑60 %
+ * of the target — i.e. the user asked for "best 2MB" and got a visibly
+ * mushy 0.7MB. The asymmetry contradicts ACCEPT_TOL's "±12 %" intent.
+ *
+ * `decideEarlyAccept` returns one of three actions:
+ *   - 'accept'         : within tolerance on either side; done.
+ *   - 'refine-shrink'  : lastSize > target by > tol; pick MORE lossy.
+ *   - 'refine-grow'    : lastSize < target by > tol; pick LESS lossy
+ *                        (we overshot — find back the quality).
+ *
+ * Pure function, side-effect free; matching tests pin the boundary.
+ */
+export type EarlyAcceptDecision = 'accept' | 'refine-shrink' | 'refine-grow';
+
+export function decideEarlyAccept(
+  lastSizeMB: number,
+  targetMB: number,
+  tol: number = ACCEPT_TOL
+): EarlyAcceptDecision {
+  if (targetMB <= 0 || !Number.isFinite(lastSizeMB) || !Number.isFinite(targetMB)) {
+    return 'accept';
+  }
+  const diff = (lastSizeMB - targetMB) / targetMB;
+  if (Math.abs(diff) <= tol) return 'accept';
+  return diff > 0 ? 'refine-shrink' : 'refine-grow';
+}
+
+/* ------------------------- C-05 recordBest preference ------------------------- */
+
+/**
+ * Candidate snapshot consumed by `pickBetterCandidate`. Coordinates are
+ * decoupled from the artefact path so the function is trivially testable.
+ */
+export interface CandidateSnapshot {
+  sizeMB: number;
+}
+
+/**
+ * C-05 — choose between two compression candidates given soft / hard caps.
+ *
+ * Pre-fix behaviour ([processor.ts](file:///Users/guoshuyu/workspace/gif-toolkit/src/main/processor.ts) `recordBest`):
+ *   once a candidate was under softMB, ANY later candidate that was also
+ *   under softMB AND larger replaced `best`. Net effect: best drifted
+ *   towards the soft ceiling and the final artefact frequently landed
+ *   at e.g. 1.99MB when an earlier 1.4MB pass was strictly better quality
+ *   per byte. From the "soft cap = best" semantic that's a regression.
+ *
+ * New preference order (most → least preferred):
+ *   1. Under soft is always preferred over over-soft.
+ *   2. Under hard is always preferred over over-hard.
+ *   3. Within the same band (both under soft, or both under hard,
+ *      or both over hard) prefer the SMALLER candidate. Smaller =
+ *      more headroom for the user's downstream pipeline (uploaders,
+ *      embedded viewers, wechat 2MB cap, etc.).
+ *   4. When sizes tie, prefer the existing `best` (stability — avoid
+ *      log churn from cache-hit re-records).
+ *
+ * Returns `true` iff `incoming` should replace `current`.
+ */
+export function shouldReplaceBest(
+  current: CandidateSnapshot | null,
+  incoming: CandidateSnapshot,
+  softMB: number,
+  hardMB: number
+): boolean {
+  if (!current) return true;
+  const tierOf = (s: number): 0 | 1 | 2 => {
+    if (s <= softMB) return 0;
+    if (s <= hardMB) return 1;
+    return 2;
+  };
+  const ct = tierOf(current.sizeMB);
+  const it = tierOf(incoming.sizeMB);
+  if (it !== ct) return it < ct; // lower tier number = better band
+  // Same band: prefer strictly smaller. Equal → keep current for stability.
+  return incoming.sizeMB < current.sizeMB;
+}
+
 /* ------------------------- Geometric shrink target width ------------------------- */
 
 /**
