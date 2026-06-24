@@ -9,6 +9,10 @@ import {
   ACCEPT_TOL,
   DEFAULT_CONCURRENCY,
   EARLY_FAST_RATIO,
+  GIFSKI_ACCEPT_TOL,
+  GIFSKI_Q_MAX,
+  GIFSKI_Q_MIN,
+  GIFSKI_Q_PROBE,
   MAX_CONCURRENCY,
   SHRINK_FIRST_RATIO,
   adaptiveStartLossy,
@@ -16,12 +20,16 @@ import {
   clampConcurrency,
   compressCacheKey,
   decideEarlyAccept,
+  decideGifskiAccept,
   derivePartialSourceName,
   enumerateSegments,
   extrapolateNextLossy,
   filterSelectedSegments,
   geometricShrinkLongestSide,
+  nextGifskiQuality,
   planPhase0,
+  predictGifskiQuality,
+  refineGifskiQuality,
   shortSideAfterCap,
   shouldReplaceBest
 } from '../../src/main/processor-utils';
@@ -460,5 +468,118 @@ describe('derivePartialSourceName (P1.1 partial cache isolation)', () => {
     const partialName = derivePartialSourceName(fullName, { selectedSegments: [0] });
     expect(partialName).not.toBe(fullName);
     expect(partialName).toMatch(/^source\.sections\..+\.mp4$/);
+  });
+});
+
+describe('predictGifskiQuality (single-sample power-curve)', () => {
+  it('returns lower quality when last sample exceeds target', () => {
+    // 4MB at q=80, target 2MB → ratio 0.5, exp 2 → 80 · sqrt(0.5) ≈ 57
+    const q = predictGifskiQuality(80, 4, 2);
+    expect(q).toBeGreaterThan(GIFSKI_Q_MIN);
+    expect(q).toBeLessThan(80);
+    expect(Math.abs(q - 57)).toBeLessThanOrEqual(2);
+  });
+
+  it('returns higher quality when last sample is under target', () => {
+    // 1MB at q=40, target 2MB → ratio 2, exp 2 → 40 · sqrt(2) ≈ 57
+    const q = predictGifskiQuality(40, 1, 2);
+    expect(q).toBeGreaterThan(40);
+    expect(Math.abs(q - 57)).toBeLessThanOrEqual(2);
+  });
+
+  it('clamps to [GIFSKI_Q_MIN, GIFSKI_Q_MAX]', () => {
+    expect(predictGifskiQuality(80, 100, 0.001)).toBe(GIFSKI_Q_MIN);
+    expect(predictGifskiQuality(80, 0.001, 100)).toBe(GIFSKI_Q_MAX);
+  });
+
+  it('returns NaN for degenerate inputs', () => {
+    expect(predictGifskiQuality(0, 1, 1)).toBeNaN();
+    expect(predictGifskiQuality(80, 0, 1)).toBeNaN();
+    expect(predictGifskiQuality(80, 1, 0)).toBeNaN();
+    expect(predictGifskiQuality(NaN, 1, 1)).toBeNaN();
+    expect(predictGifskiQuality(80, NaN, 1)).toBeNaN();
+  });
+});
+
+describe('refineGifskiQuality (two-sample log-log fit)', () => {
+  it('fits a monotone log-log line and solves for target', () => {
+    // Synthetic curve: size = (q/100)^2 · 10  → q=100 → 10MB, q=50 → 2.5MB
+    // Solve target=5MB → q ≈ 100·sqrt(5/10) ≈ 70.7
+    const q = refineGifskiQuality(100, 10, 50, 2.5, 5);
+    expect(q).toBeGreaterThan(GIFSKI_Q_MIN);
+    expect(q).toBeLessThan(GIFSKI_Q_MAX);
+    expect(Math.abs(q - 71)).toBeLessThanOrEqual(2);
+  });
+
+  it('returns NaN when both samples are at the same quality', () => {
+    expect(refineGifskiQuality(80, 4, 80, 4, 2)).toBeNaN();
+  });
+
+  it('returns NaN when the slope is non-monotone (inverted pair)', () => {
+    // q1=80 / mb1=2, q2=50 / mb2=4 — higher quality should be bigger, not smaller.
+    expect(refineGifskiQuality(80, 2, 50, 4, 2)).toBeNaN();
+  });
+
+  it('clamps the solved quality to [GIFSKI_Q_MIN, GIFSKI_Q_MAX]', () => {
+    // Aggressive target far below both samples → would solve to single digits.
+    const q = refineGifskiQuality(100, 10, 80, 6, 0.001);
+    expect(q).toBe(GIFSKI_Q_MIN);
+  });
+});
+
+describe('decideGifskiAccept (symmetric ±tol)', () => {
+  it('accepts within ±GIFSKI_ACCEPT_TOL on both sides', () => {
+    expect(decideGifskiAccept(2, 2)).toBe('accept');
+    expect(decideGifskiAccept(2 * (1 + GIFSKI_ACCEPT_TOL * 0.9), 2)).toBe('accept');
+    expect(decideGifskiAccept(2 * (1 - GIFSKI_ACCEPT_TOL * 0.9), 2)).toBe('accept');
+  });
+
+  it('refines down when oversized beyond tol', () => {
+    expect(decideGifskiAccept(2 * (1 + GIFSKI_ACCEPT_TOL * 2), 2)).toBe('refine-shrink');
+  });
+
+  it('refines up when undersized beyond tol', () => {
+    expect(decideGifskiAccept(2 * (1 - GIFSKI_ACCEPT_TOL * 2), 2)).toBe('refine-grow');
+  });
+
+  it('treats invalid inputs as accept (caller short-circuit)', () => {
+    expect(decideGifskiAccept(NaN, 2)).toBe('accept');
+    expect(decideGifskiAccept(2, 0)).toBe('accept');
+  });
+});
+
+describe('nextGifskiQuality (state machine driver)', () => {
+  it('returns the probe value GIFSKI_Q_PROBE on the first call', () => {
+    expect(nextGifskiQuality([], 2)).toBe(GIFSKI_Q_PROBE);
+  });
+
+  it('uses single-sample extrapolation with one prior sample', () => {
+    const q = nextGifskiQuality([{ quality: 80, sizeMB: 4 }], 2);
+    expect(q).toBeLessThan(80);
+    expect(q).toBeGreaterThan(GIFSKI_Q_MIN);
+  });
+
+  it('uses log-log fit with two or more samples (good curve)', () => {
+    // q=80 → 4MB, q=60 → 2.25MB (consistent with EXP≈2). Target 1MB.
+    const q = nextGifskiQuality(
+      [{ quality: 80, sizeMB: 4 }, { quality: 60, sizeMB: 2.25 }],
+      1
+    );
+    expect(q).toBeLessThan(60);
+    expect(q).toBeGreaterThanOrEqual(GIFSKI_Q_MIN);
+  });
+
+  it('falls back to single-sample when log-log fit is degenerate', () => {
+    // Inverted pair → refineGifskiQuality returns NaN → next falls back.
+    const q = nextGifskiQuality(
+      [{ quality: 80, sizeMB: 2 }, { quality: 50, sizeMB: 4 }],
+      1
+    );
+    expect(Number.isFinite(q)).toBe(true);
+  });
+
+  it('returns NaN for non-positive target', () => {
+    expect(nextGifskiQuality([{ quality: 80, sizeMB: 4 }], 0)).toBeNaN();
+    expect(nextGifskiQuality([{ quality: 80, sizeMB: 4 }], -1)).toBeNaN();
   });
 });

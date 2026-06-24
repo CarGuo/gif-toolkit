@@ -349,3 +349,145 @@ export function derivePartialSourceName(
   const hash = crypto.createHash('sha1').update(normalized).digest('hex').slice(0, 8);
   return `${stem}.sections.${hash}${ext}`;
 }
+
+/* ------------------------- gifski adaptive quality search ------------------------- */
+
+/**
+ * gifski's `--quality` knob behaves roughly like a power curve over output
+ * bytes: dropping from q=100 to q=80 typically halves the size, q=80→q=50
+ * roughly halves again, and so on. Empirically across a wide spread of clips
+ * we get a clean log-log line, so an exponent of ~2 is a usable single-shot
+ * extrapolation model:
+ *
+ *   size(q) ≈ k · q^EXP   with EXP ≈ 2
+ *
+ * Given one sample (q1, mb1) and a target `targetMB`, the inverted formula
+ * predicts the next quality to try:
+ *
+ *   qNext = q1 · (targetMB / mb1)^(1/EXP)
+ *
+ * Returned value is clamped to [GIFSKI_Q_MIN, GIFSKI_Q_MAX]. NaN inputs or
+ * non-positive sizes return NaN so the caller can short-circuit. The actual
+ * winner is decided by `shouldReplaceBest` against all collected samples;
+ * this function is just the "next guess" oracle.
+ */
+export const GIFSKI_Q_MIN = 10;
+export const GIFSKI_Q_MAX = 100;
+export const GIFSKI_Q_PROBE = 80;           // ezgif-ish sweet spot for the first probe
+export const GIFSKI_SIZE_EXP = 2;           // size ≈ k · q^EXP
+export const GIFSKI_ACCEPT_TOL = 0.12;      // ±12 % of target counts as "good enough"
+export const GIFSKI_MAX_TRIES = 3;          // probe + at most 2 refinements
+
+export function predictGifskiQuality(
+  lastQuality: number,
+  lastMB: number,
+  targetMB: number,
+  exp: number = GIFSKI_SIZE_EXP
+): number {
+  if (!Number.isFinite(lastQuality) || !Number.isFinite(lastMB) || !Number.isFinite(targetMB)) {
+    return NaN;
+  }
+  if (lastQuality <= 0 || lastMB <= 0 || targetMB <= 0 || exp <= 0) return NaN;
+  const ratio = targetMB / lastMB;
+  const raw = lastQuality * Math.pow(ratio, 1 / exp);
+  if (!Number.isFinite(raw)) return NaN;
+  return Math.max(GIFSKI_Q_MIN, Math.min(GIFSKI_Q_MAX, Math.round(raw)));
+}
+
+/**
+ * Two-sample log-log refinement. Given two observations on the gifski size
+ * curve `(q1, mb1)` and `(q2, mb2)`, fit `size = k · q^EXP_FIT` and solve
+ * for the quality that lands on `targetMB`. Falls back to NaN when the
+ * samples are degenerate (same quality, same size, monotone-violating, etc.)
+ * so the caller can degrade to the single-sample heuristic.
+ */
+export function refineGifskiQuality(
+  q1: number,
+  mb1: number,
+  q2: number,
+  mb2: number,
+  targetMB: number
+): number {
+  if (
+    !Number.isFinite(q1) || !Number.isFinite(q2) ||
+    !Number.isFinite(mb1) || !Number.isFinite(mb2) ||
+    !Number.isFinite(targetMB)
+  ) return NaN;
+  if (q1 <= 0 || q2 <= 0 || mb1 <= 0 || mb2 <= 0 || targetMB <= 0) return NaN;
+  if (q1 === q2) return NaN;
+  // log-log slope: how many decades of MB per decade of quality.
+  const lq1 = Math.log(q1), lq2 = Math.log(q2);
+  const lm1 = Math.log(mb1), lm2 = Math.log(mb2);
+  const k = (lm2 - lm1) / (lq2 - lq1);
+  // Reject degenerate fits: the curve must be monotone increasing (higher
+  // quality → bigger file). When gifski outputs an inverted pair (rare but
+  // happens on tiny clips with heavy palette quantization), bail.
+  if (!Number.isFinite(k) || k <= 0) return NaN;
+  const b = lm1 - k * lq1;
+  // Solve log(target) = k·log(q) + b → q = exp((log(target) - b) / k)
+  const raw = Math.exp((Math.log(targetMB) - b) / k);
+  if (!Number.isFinite(raw) || raw <= 0) return NaN;
+  return Math.max(GIFSKI_Q_MIN, Math.min(GIFSKI_Q_MAX, Math.round(raw)));
+}
+
+/**
+ * Decide whether a gifski sample is "close enough" to the target. Symmetric:
+ * accepts both undershoot and overshoot within ±GIFSKI_ACCEPT_TOL so we don't
+ * waste a refinement pass on a clip that already landed at 90 % of target.
+ *
+ *   - 'accept'         : within tol on either side.
+ *   - 'refine-shrink'  : currentMB > targetMB by > tol → next quality lower.
+ *   - 'refine-grow'    : currentMB < targetMB by > tol → next quality higher.
+ */
+export type GifskiAcceptDecision = 'accept' | 'refine-shrink' | 'refine-grow';
+
+export function decideGifskiAccept(
+  currentMB: number,
+  targetMB: number,
+  tol: number = GIFSKI_ACCEPT_TOL
+): GifskiAcceptDecision {
+  if (targetMB <= 0 || !Number.isFinite(currentMB) || !Number.isFinite(targetMB)) {
+    return 'accept';
+  }
+  const diff = (currentMB - targetMB) / targetMB;
+  if (Math.abs(diff) <= tol) return 'accept';
+  return diff > 0 ? 'refine-shrink' : 'refine-grow';
+}
+
+/**
+ * Pick the next quality value to try given the running sample history. Caller
+ * appends each `(quality, sizeMB)` it actually ran and asks for the next.
+ *
+ * Strategy:
+ *   - 0 samples → return GIFSKI_Q_PROBE (the initial probe).
+ *   - 1 sample  → single-sample power-curve extrapolation.
+ *   - 2+ samples → log-log fit on the two most recent samples; if the fit is
+ *     degenerate, fall back to single-sample extrapolation from the latest.
+ *
+ * Returns NaN to signal "give up the search, no useful next guess". Pure
+ * function: caller decides whether to actually invoke gifski with the
+ * returned value (e.g. dedup against samples already tried).
+ */
+export interface GifskiSample {
+  quality: number;
+  sizeMB: number;
+}
+
+export function nextGifskiQuality(
+  samples: readonly GifskiSample[],
+  targetMB: number
+): number {
+  if (!Number.isFinite(targetMB) || targetMB <= 0) return NaN;
+  if (samples.length === 0) return GIFSKI_Q_PROBE;
+  const last = samples[samples.length - 1];
+  if (samples.length === 1) {
+    return predictGifskiQuality(last.quality, last.sizeMB, targetMB);
+  }
+  // Two-sample log-log fit on the most recent pair (newest first), then fall
+  // back to single-sample on degenerate slopes.
+  const prev = samples[samples.length - 2];
+  const fit = refineGifskiQuality(prev.quality, prev.sizeMB, last.quality, last.sizeMB, targetMB);
+  if (Number.isFinite(fit)) return fit;
+  return predictGifskiQuality(last.quality, last.sizeMB, targetMB);
+}
+

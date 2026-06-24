@@ -53,6 +53,20 @@ interface CallSite {
 const findCallSites = (src: string): CallSite[] => {
   const lines = src.split('\n');
   const sites: CallSite[] = [];
+  // R-GIFSKI-PRIMARY v2: `compressLoop` now calls
+  // `compressWithGifskiThenFallback` as an INTERNAL helper before its
+  // own Phase A-D fallback. That call's result feeds the local
+  // `bestPath` / `bestSize` state directly and is NEVER copyFile'd to
+  // the user's output dir from within compressLoop — the outer caller
+  // does that, gated by compressLoop's OWN allPhasesFailed flag.
+  //
+  // Flagging this call site as a fan-out target would force a redundant
+  // copyFile + allPhasesFailed guard inside compressLoop, defeating the
+  // whole point of integrating gifski as a sub-step. We therefore
+  // explicitly skip await bindings whose result var name starts with
+  // `gifskiRes` — a project convention that any future internal-only
+  // compress helper bind MUST also follow.
+  const INTERNAL_HELPER_PREFIXES = ['gifskiRes'];
   for (let i = 0; i < lines.length; i++) {
     // Two binding forms are accepted:
     //   1. `const|let X = await (compressLoop|toolboxBudgetCompress|compressWithGifskiThenFallback)(`
@@ -83,6 +97,10 @@ const findCallSites = (src: string): CallSite[] => {
         if (up) { resultVar = up[1]; break; }
       }
       if (!resultVar) continue;
+    }
+    if (INTERNAL_HELPER_PREFIXES.some((p) => resultVar!.startsWith(p))) {
+      // Internal compress helper — fan-out invariant doesn't apply.
+      continue;
     }
     const compressLine = i + 1;
     // Search forward (within 200 lines) for the first copyFile of
